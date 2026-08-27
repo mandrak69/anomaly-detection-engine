@@ -1,7 +1,14 @@
 from datetime import datetime
+from decimal import Decimal
 
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
+from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY,
+    period=MarketPeriod.FULL_TIME,
+)
 
 
 def test_finds_best_odds_per_outcome():
@@ -10,17 +17,17 @@ def test_finds_best_odds_per_outcome():
     b = Bookmaker("b", "B")
 
     snapshots = [
-        OddsSnapshot("e1", a, "1X2", "1", 2.00, now),
-        OddsSnapshot("e1", b, "1X2", "1", 2.20, now),
-        OddsSnapshot("e1", a, "1X2", "X", 3.50, now),
-        OddsSnapshot("e1", b, "1X2", "X", 3.40, now),
-        OddsSnapshot("e1", a, "1X2", "2", 3.10, now),
-        OddsSnapshot("e1", b, "1X2", "2", 3.60, now),
+        OddsSnapshot("e1", a, MARKET, "1", Decimal("2.00"), now),
+        OddsSnapshot("e1", b, MARKET, "1", Decimal("2.20"), now),
+        OddsSnapshot("e1", a, MARKET, "X", Decimal("3.50"), now),
+        OddsSnapshot("e1", b, MARKET, "X", Decimal("3.40"), now),
+        OddsSnapshot("e1", a, MARKET, "2", Decimal("3.10"), now),
+        OddsSnapshot("e1", b, MARKET, "2", Decimal("3.60"), now),
     ]
 
-    result = find_best_odds(snapshots, event_id="e1", market="1X2")
+    result = find_best_odds(snapshots, event_id="e1", market=MARKET)
 
-    assert result["1"].odds == 2.20
+    assert result["1"].odds == Decimal("2.20")
     assert result["1"].bookmaker_name == "B"
-    assert result["X"].odds == 3.50
-    assert result["2"].odds == 3.60
+    assert result["X"].odds == Decimal("3.50")
+    assert result["2"].odds == Decimal("3.60")

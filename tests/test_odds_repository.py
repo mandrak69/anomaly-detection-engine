@@ -1,9 +1,16 @@
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 
+from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY,
+    period=MarketPeriod.FULL_TIME,
+)
 
 
 def create_test_connection():
@@ -12,6 +19,7 @@ def create_test_connection():
     initialize_database(connection)
     return connection
 
+
 def test_saves_odds_snapshot():
     connection = create_test_connection()
     repository = OddsRepository(connection)
@@ -19,9 +27,9 @@ def test_saves_odds_snapshot():
     snapshot = OddsSnapshot(
         event_id="event-001",
         bookmaker=Bookmaker("mozzart", "Mozzart"),
-        market="1X2",
+        market=MARKET,
         outcome="1",
-        odds=2.15,
+        odds=Decimal("2.15"),
         observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
     )
 
@@ -32,9 +40,10 @@ def test_saves_odds_snapshot():
     ).fetchone()
 
     assert row is not None
-    assert row[1] == "event-001"
-    assert row[2] == "mozzart"
-    assert row[5] == 2.15
+    assert row["event_id"] == "event-001"
+    assert row["bookmaker_id"] == "mozzart"
+    assert Decimal(row["odds"]) == Decimal("2.15")
+
 
 def test_finds_all_snapshots_for_event():
     connection = create_test_connection()
@@ -46,9 +55,9 @@ def test_finds_all_snapshots_for_event():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=bookmaker,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.15,
+            odds=Decimal("2.15"),
             observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         )
     )
@@ -57,18 +66,19 @@ def test_finds_all_snapshots_for_event():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=bookmaker,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=1.95,
-            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+            odds=Decimal("1.95"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:05:00+00:00"),
         )
     )
 
     result = repository.find_by_event("event-001")
 
     assert len(result) == 2
-    assert result[0].odds == 2.15
-    assert result[1].odds == 1.95
+    assert result[0].odds == Decimal("2.15")
+    assert result[1].odds == Decimal("1.95")
+
 
 def test_finds_latest_snapshot():
     connection = create_test_connection()
@@ -80,10 +90,10 @@ def test_finds_latest_snapshot():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=bookmaker,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.15,
-            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:000"),
+            odds=Decimal("2.15"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         )
     )
 
@@ -91,41 +101,43 @@ def test_finds_latest_snapshot():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=bookmaker,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=1.95,
-            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+            odds=Decimal("1.95"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:05:00+00:00"),
         )
     )
 
     result = repository.find_latest(
         event_id="event-001",
         bookmaker_id="mozzart",
-        market="1X2",
+        market_type=MarketType.THREE_WAY.value,
+        market_period=MarketPeriod.FULL_TIME.value,
         outcome="1",
     )
 
     assert result is not None
-    assert result.odds == 1.95
+    assert result.odds == Decimal("1.95")
 
-    def test_finds_last_two_snapshots_in_chronological_order():
+
+def test_finds_last_two_snapshots_in_chronological_order():
     connection = create_test_connection()
     repository = OddsRepository(connection)
 
     bookmaker = Bookmaker("mozzart", "Mozzart")
 
     for odds, observed_at in [
-        (2.30, "2026-08-27T09:55:00"),
-        (2.20, "2026-08-27T10:00:00"),
-        (1.90, "2026-08-27T10:04:00"),
+        ("2.30", "2026-08-27T09:55:00+00:00"),
+        ("2.20", "2026-08-27T10:00:00+00:00"),
+        ("1.90", "2026-08-27T10:04:00+00:00"),
     ]:
         repository.save(
             OddsSnapshot(
                 event_id="event-001",
                 bookmaker=bookmaker,
-                market="1X2",
+                market=MARKET,
                 outcome="1",
-                odds=odds,
+                odds=Decimal(odds),
                 observed_at=datetime.fromisoformat(observed_at),
             )
         )
@@ -133,18 +145,20 @@ def test_finds_latest_snapshot():
     result = repository.find_last_two(
         event_id="event-001",
         bookmaker_id="mozzart",
-        market="1X2",
+        market_type=MarketType.THREE_WAY.value,
+        market_period=MarketPeriod.FULL_TIME.value,
         outcome="1",
     )
 
     assert len(result) == 2
 
-    assert result[0].odds == 2.20
-    assert result[1].odds == 1.90
+    assert result[0].odds == Decimal("2.20")
+    assert result[1].odds == Decimal("1.90")
 
     assert result[0].observed_at < result[1].observed_at
 
-    def test_find_last_two_returns_available_snapshots_when_only_one_exists():
+
+def test_find_last_two_returns_available_snapshots_when_only_one_exists():
     connection = create_test_connection()
     repository = OddsRepository(connection)
 
@@ -154,9 +168,9 @@ def test_finds_latest_snapshot():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=bookmaker,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.20,
+            odds=Decimal("2.20"),
             observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         )
     )
@@ -164,14 +178,16 @@ def test_finds_latest_snapshot():
     result = repository.find_last_two(
         event_id="event-001",
         bookmaker_id="mozzart",
-        market="1X2",
+        market_type=MarketType.THREE_WAY.value,
+        market_period=MarketPeriod.FULL_TIME.value,
         outcome="1",
     )
 
     assert len(result) == 1
-    assert result[0].odds == 2.20
+    assert result[0].odds == Decimal("2.20")
 
-    def test_finds_latest_snapshot_for_each_bookmaker_and_outcome():
+
+def test_finds_latest_snapshot_for_each_bookmaker_and_outcome():
     connection = create_test_connection()
     repository = OddsRepository(connection)
 
@@ -182,33 +198,33 @@ def test_finds_latest_snapshot():
         OddsSnapshot(
             event_id="event-001",
             bookmaker=mozzart,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.20,
+            odds=Decimal("2.20"),
             observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         ),
         OddsSnapshot(
             event_id="event-001",
             bookmaker=mozzart,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.10,
-            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:000"),
+            odds=Decimal("2.10"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:05:00+00:00"),
         ),
         OddsSnapshot(
             event_id="event-001",
             bookmaker=mozzart,
-            market="1X2",
+            market=MARKET,
             outcome="X",
-            odds=3.40,
+            odds=Decimal("3.40"),
             observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         ),
         OddsSnapshot(
             event_id="event-001",
             bookmaker=maxbet,
-            market="1X2",
+            market=MARKET,
             outcome="1",
-            odds=2.15,
+            odds=Decimal("2.15"),
             observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
         ),
     ]
@@ -218,7 +234,8 @@ def test_finds_latest_snapshot():
 
     result = repository.find_latest_for_market(
         event_id="event-001",
-        market="1X2",
+        market_type=MarketType.THREE_WAY.value,
+        market_period=MarketPeriod.FULL_TIME.value,
     )
 
     assert len(result) == 3
@@ -230,4 +247,4 @@ def test_finds_latest_snapshot():
         and snapshot.outcome == "1"
     )
 
-    assert mozzart_home.odds == 2.10
+    assert mozzart_home.odds == Decimal("2.10")

@@ -16,12 +16,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             event_id TEXT NOT NULL,
             bookmaker_id TEXT NOT NULL,
             bookmaker_name TEXT NOT NULL,
-            market TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            market_period TEXT NOT NULL,
+            market_line TEXT,
+            market_rules TEXT,
+            market_specifier TEXT,
             outcome TEXT NOT NULL,
-            odds REAL NOT NULL,
+            odds TEXT NOT NULL,
             observed_at TEXT NOT NULL,
             source_timestamp TEXT
-        );
         );
 
         CREATE INDEX IF NOT EXISTS idx_odds_event
@@ -29,6 +32,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_odds_event_time
             ON odds_snapshots(event_id, observed_at);
+
+        CREATE INDEX IF NOT EXISTS idx_odds_event_market
+            ON odds_snapshots(event_id, market_type, market_period, market_line);
         """
     )
 

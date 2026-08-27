@@ -1,13 +1,14 @@
 from dataclasses import dataclass
+from decimal import Decimal
 
 from .best_odds import BestOddsResult
 
 
 @dataclass(frozen=True)
 class ArbitrageResult:
-    margin: float
+    margin: Decimal
     is_surebet: bool
-    theoretical_profit_percent: float
+    theoretical_profit_percent: Decimal
 
 
 def calculate_arbitrage(
@@ -18,9 +19,12 @@ def calculate_arbitrage(
     if missing:
         raise ValueError(f"Missing required outcomes: {', '.join(missing)}")
 
-    margin = sum(1.0 / best_odds[outcome].odds for outcome in required_outcomes)
-    is_surebet = margin < 1.0
-    profit = (1.0 - margin) * 100.0 if is_surebet else 0.0
+    margin = sum(
+        (Decimal("1") / best_odds[outcome].odds for outcome in required_outcomes),
+        start=Decimal("0"),
+    )
+    is_surebet = margin < Decimal("1")
+    profit = (Decimal("1") - margin) * Decimal("100") if is_surebet else Decimal("0")
 
     return ArbitrageResult(
         margin=margin,

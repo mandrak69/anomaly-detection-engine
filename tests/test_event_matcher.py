@@ -30,7 +30,7 @@ def test_match_event_using_aliases_and_time_tolerance():
         league="premier-league",
         home_team_raw="Man Utd",
         away_team_raw="Liv",
-        start_time=datetime.fromisoformat("2026-09-01T20:15:00"),
+        start_time=datetime.fromisoformat("2026-08-27T08:15:00+00:00"),
     )
 
     assert result.event is not None

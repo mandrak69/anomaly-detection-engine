@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 
 from anomaly_detection_engine.models.odds import OddsSnapshot
 
@@ -7,17 +8,17 @@ from anomaly_detection_engine.models.odds import OddsSnapshot
 @dataclass(frozen=True)
 class MovementResult:
     detected: bool
-    change_percent: float
+    change_percent: Decimal
     time_delta: timedelta
-    previous_odds: float
-    current_odds: float
+    previous_odds: Decimal
+    current_odds: Decimal
 
 
 def detect_rapid_movement(
     previous: OddsSnapshot,
     current: OddsSnapshot,
     *,
-    threshold_percent: float = 10.0,
+    threshold_percent: Decimal = Decimal("10.0"),
     max_window: timedelta = timedelta(minutes=5),
 ) -> MovementResult:
     if (
@@ -35,7 +36,7 @@ def detect_rapid_movement(
 
     change_percent = (
         (current.odds - previous.odds) / previous.odds
-    ) * 100.0
+    ) * Decimal("100.0")
 
     detected = (
         abs(change_percent) >= threshold_percent

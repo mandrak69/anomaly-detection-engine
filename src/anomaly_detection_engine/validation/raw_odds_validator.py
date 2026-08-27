@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.validation.result import (
@@ -93,16 +94,16 @@ def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
                 )
             )
 
-        if isinstance(odds, bool) or not isinstance(odds, (int, float)):
+        if not isinstance(odds, Decimal):
             semantic_errors.append(
                 ValidationIssue(
                     code="invalid-odds-type",
-                    message=f"Odds for outcome '{outcome}' must be numeric.",
+                    message=f"Odds for outcome '{outcome}' must be a Decimal.",
                 )
             )
             continue
 
-        if odds <= 1.0:
+        if odds <= Decimal("1.0"):
             semantic_errors.append(
                 ValidationIssue(
                     code="invalid-odds-value",
@@ -113,7 +114,7 @@ def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
                 )
             )
 
-        if odds > 1000:
+        if odds > Decimal("1000"):
             semantic_warnings.append(
                 ValidationIssue(
                     code="suspiciously-high-odds",

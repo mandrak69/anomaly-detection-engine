@@ -1,13 +1,16 @@
 from datetime import datetime
-import json
 from pathlib import Path
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
+from anomaly_detection_engine.collectors.json_collector import (
+    DEFAULT_MARKET,
+    JsonOddsCollector,
+)
+from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
-from anomaly_detection_engine.matching.event_matcher import EventMatcher
 
 
 ALIASES = {
@@ -29,7 +32,7 @@ def build_demo_events() -> list[Event]:
             league="demo-league",
             home_team=Team("team-001", "Manchester United"),
             away_team=Team("team-002", "Liverpool"),
-            start_time=datetime.fromisoformat("2026-09-01T18:00:00+00:000"),
+            start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),
         ),
         Event(
             id="event-002",
@@ -37,7 +40,7 @@ def build_demo_events() -> list[Event]:
             league="demo-league",
             home_team=Team("team-003", "Real Madrid"),
             away_team=Team("team-004", "Barcelona"),
-            start_time=datetime.fromisoformat("2026-09-01T19:00:00+00:00"),
+            start_time=datetime.fromisoformat("2026-09-02T21:00:00+00:00"),
         ),
     ]
 
@@ -46,9 +49,10 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sample_path = project_root / "data" / "samples" / "odds_sample.json"
 
-   collector = JsonOddsCollector(sample_path)
+    collector = JsonOddsCollector(sample_path)
 
-    raw_events = collector.collect()    events = build_demo_events()
+    raw_events = collector.collect()
+    events = build_demo_events()
 
     canonical_names = {
         event.home_team.canonical_name
@@ -63,36 +67,38 @@ def main() -> None:
 
     snapshots: list[OddsSnapshot] = []
 
-for raw_event in raw_events:
-    match = matcher.match(
-        sport=raw_event.sport,
-        league=raw_event.league,
-        home_team_raw=raw_event.home_team,
-        away_team_raw=raw_event.away_team,
-        start_time=raw_event.start_time,
-    )
+    for raw_event in raw_events:
+        match = matcher.match(
+            sport=raw_event.sport,
+            league=raw_event.league,
+            home_team_raw=raw_event.home_team,
+            away_team_raw=raw_event.away_team,
+            start_time=raw_event.start_time,
+        )
 
         if match.event is None:
-            print(f"SKIP: could not match {row['home_team']} vs {row['away_team']} ({match.reason})")
+            print(
+                f"SKIP: could not match {raw_event.home_team} vs "
+                f"{raw_event.away_team} ({match.reason})"
+            )
             continue
 
-        bookmaker = Bookmaker(row["bookmaker"].lower(), row["bookmaker"])
-        observed_at = datetime.fromisoformat(row["observed_at"])
+        bookmaker = Bookmaker(raw_event.source.lower(), raw_event.source)
 
         for outcome in ("1", "X", "2"):
             snapshots.append(
                 OddsSnapshot(
                     event_id=match.event.id,
                     bookmaker=bookmaker,
-                    market="1X2",
+                    market=raw_event.market,
                     outcome=outcome,
-                    odds=float(row["odds"][outcome]),
-                    observed_at=observed_at,
+                    odds=raw_event.odds[outcome],
+                    observed_at=raw_event.observed_at,
                 )
             )
 
     for event in events:
-        best = find_best_odds(snapshots, event_id=event.id, market="1X2")
+        best = find_best_odds(snapshots, event_id=event.id, market=DEFAULT_MARKET)
         if not best:
             continue
 

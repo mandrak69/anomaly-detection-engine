@@ -30,9 +30,9 @@ def build_valid_raw_event_odds() -> RawEventOdds:
             period=MarketPeriod.FULL_TIME,
         ),
         odds={
-            "1": 2.15,
-            "X": 3.45,
-            "2": 3.20,
+            "1": Decimal("2.15"),
+            "X": Decimal("3.45"),
+            "2": Decimal("3.20"),
         },
     )
 
@@ -73,9 +73,9 @@ def test_invalid_odds_fail_semantic_validation():
         **{
             **raw.__dict__,
             "odds": {
-                "1": 0.0,
-                "X": 3.45,
-                "2": 3.20,
+                "1": Decimal("0.0"),
+                "X": Decimal("3.45"),
+                "2": Decimal("3.20"),
             },
         }
     )

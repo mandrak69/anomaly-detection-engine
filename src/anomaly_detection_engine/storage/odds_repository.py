@@ -1,13 +1,13 @@
-from sqlite3 import Connection
+from datetime import datetime
+from decimal import Decimal
+from sqlite3 import Connection, Row
 
-from anomaly_detection_engine.models.odds import OddsSnapshot
+from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 
 
 class OddsRepository:
     def __init__(self, connection: Connection):
-        self._connection = connection
-
-     def __init__(self, connection: Connection):
         self._connection = connection
 
     def save(self, snapshot: OddsSnapshot) -> None:
@@ -17,21 +17,35 @@ class OddsRepository:
                 event_id,
                 bookmaker_id,
                 bookmaker_name,
-                market,
+                market_type,
+                market_period,
+                market_line,
+                market_rules,
+                market_specifier,
                 outcome,
                 odds,
-                observed_at
+                observed_at,
+                source_timestamp
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.event_id,
                 snapshot.bookmaker.id,
                 snapshot.bookmaker.name,
-                snapshot.market,
+                snapshot.market.market_type.value,
+                snapshot.market.period.value,
+                str(snapshot.market.line) if snapshot.market.line is not None else None,
+                snapshot.market.rules,
+                snapshot.market.specifier,
                 snapshot.outcome,
-                snapshot.odds,
+                str(snapshot.odds),
                 snapshot.observed_at.isoformat(),
+                (
+                    snapshot.source_timestamp.isoformat()
+                    if snapshot.source_timestamp
+                    else None
+                ),
             ),
         )
         self._connection.commit()
@@ -39,17 +53,10 @@ class OddsRepository:
     def find_by_event(self, event_id: str) -> list[OddsSnapshot]:
         rows = self._connection.execute(
             """
-            SELECT
-                event_id,
-                bookmaker_id,
-                bookmaker_name,
-                market,
-                outcome,
-                odds,
-                observed_at
+            SELECT *
             FROM odds_snapshots
             WHERE event_id = ?
-            ORDER BY observed_at ASC
+            ORDER BY observed_at ASC, id ASC
             """,
             (event_id,),
         ).fetchall()
@@ -61,119 +68,59 @@ class OddsRepository:
         *,
         event_id: str,
         bookmaker_id: str,
-        market: str,
+        market_type: str,
+        market_period: str,
         outcome: str,
     ) -> OddsSnapshot | None:
         row = self._connection.execute(
             """
-            SELECT
-                event_id,
-                bookmaker_id,
-                bookmaker_name,
-                market,
-                outcome,
-                odds,
-                observed_at
+            SELECT *
             FROM odds_snapshots
             WHERE event_id = ?
               AND bookmaker_id = ?
-              AND market = ?
+              AND market_type = ?
+              AND market_period = ?
               AND outcome = ?
-            ORDER BY observed_at DESC
+            ORDER BY observed_at DESC, id DESC
             LIMIT 1
             """,
             (
                 event_id,
                 bookmaker_id,
-                market,
+                market_type,
+                market_period,
                 outcome,
             ),
         ).fetchone()
 
         return self._map_row(row) if row else None
 
-    @staticmethod
-    def _map_row(row) -> OddsSnapshot:
-        return OddsSnapshot(
-            event_id=row["event_id"],
-            bookmaker=Bookmaker(
-                id=row["bookmaker_id"],
-                name=row["bookmaker_name"],
-            ),
-            market=row["market"],
-            outcome=row["outcome"],
-            odds=row["odds"],
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-            source_timestamp=(
-                datetime.fromisoformat(row["source_timestamp"])
-                if row["source_timestamp"]
-                else None
-            ),
-        )
-
-    def save(self, snapshot: OddsSnapshot) -> None:
-    self._connection.execute(
-        """
-        INSERT INTO odds_snapshots (
-            event_id,
-            bookmaker_id,
-            bookmaker_name,
-            market,
-            outcome,
-            odds,
-            observed_at,
-            source_timestamp
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            snapshot.event_id,
-            snapshot.bookmaker.id,
-            snapshot.bookmaker.name,
-            snapshot.market,
-            snapshot.outcome,
-            snapshot.odds,
-            snapshot.observed_at.isoformat(),
-            (
-                snapshot.source_timestamp.isoformat()
-                if snapshot.source_timestamp
-                else None
-            ),
-        ),
-    )
-
-    self._connection.commit()
-
     def find_last_two(
         self,
         *,
         event_id: str,
         bookmaker_id: str,
-        market: str,
+        market_type: str,
+        market_period: str,
         outcome: str,
     ) -> list[OddsSnapshot]:
         rows = self._connection.execute(
             """
-            SELECT
-                event_id,
-                bookmaker_id,
-                bookmaker_name,
-                market,
-                outcome,
-                odds,
-                observed_at
+            SELECT *
             FROM odds_snapshots
             WHERE event_id = ?
-            AND bookmaker_id = ?
-            AND market = ?
-            AND outcome = ?
-            ORDER BY observed_at DESC
+              AND bookmaker_id = ?
+              AND market_type = ?
+              AND market_period = ?
+              AND outcome = ?
+            ORDER BY observed_at DESC, id DESC
             LIMIT 2
             """,
             (
                 event_id,
                 bookmaker_id,
-                market,
+                market_type,
+                market_period,
                 outcome,
             ),
         ).fetchall()
@@ -181,12 +128,13 @@ class OddsRepository:
         snapshots = [self._map_row(row) for row in rows]
 
         return list(reversed(snapshots))
-    
+
     def find_latest_for_market(
-    self,
-    *,
-    event_id: str,
-    market: str,
+        self,
+        *,
+        event_id: str,
+        market_type: str,
+        market_period: str,
     ) -> list[OddsSnapshot]:
         rows = self._connection.execute(
             """
@@ -196,31 +144,67 @@ class OddsRepository:
                 SELECT
                     event_id,
                     bookmaker_id,
-                    market,
+                    market_type,
+                    market_period,
                     outcome,
-                    MAX(observed_at) AS max_observed_at
+                    MAX(observed_at) AS max_observed_at,
+                    MAX(id) AS max_id
                 FROM odds_snapshots
                 WHERE event_id = ?
-                AND market = ?
+                  AND market_type = ?
+                  AND market_period = ?
                 GROUP BY
                     event_id,
                     bookmaker_id,
-                    market,
+                    market_type,
+                    market_period,
                     outcome
             ) latest
                 ON o.event_id = latest.event_id
-            AND o.bookmaker_id = latest.bookmaker_id
-            AND o.market = latest.market
-            AND o.outcome = latest.outcome
-            AND o.observed_at = latest.max_observed_at
+                AND o.bookmaker_id = latest.bookmaker_id
+                AND o.market_type = latest.market_type
+                AND o.market_period = latest.market_period
+                AND o.outcome = latest.outcome
+                AND o.observed_at = latest.max_observed_at
+                AND o.id = latest.max_id
             ORDER BY
                 o.bookmaker_id,
                 o.outcome
             """,
             (
                 event_id,
-                market,
+                market_type,
+                market_period,
             ),
         ).fetchall()
 
         return [self._map_row(row) for row in rows]
+
+    @staticmethod
+    def _map_row(row: Row) -> OddsSnapshot:
+        return OddsSnapshot(
+            event_id=row["event_id"],
+            bookmaker=Bookmaker(
+                id=row["bookmaker_id"],
+                name=row["bookmaker_name"],
+            ),
+            market=MarketIdentity(
+                market_type=MarketType(row["market_type"]),
+                period=MarketPeriod(row["market_period"]),
+                line=(
+                    Decimal(row["market_line"])
+                    if row["market_line"] is not None
+                    else None
+                ),
+                rules=row["market_rules"],
+                specifier=row["market_specifier"],
+            ),
+            outcome=row["outcome"],
+            odds=Decimal(row["odds"]),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            source_timestamp=(
+                datetime.fromisoformat(row["source_timestamp"])
+                if row["source_timestamp"]
+                else None
+            ),
+        )

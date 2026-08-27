@@ -54,6 +54,9 @@ class EventMatcher:
             return EventMatchResult(candidates[0], confidence, "matched")
 
         if len(candidates) > 1:
-            return EventMatchResult(None, 0.0, "ambiguous-event")
+            candidate_ids = ", ".join(candidate.id for candidate in candidates)
+            return EventMatchResult(
+                None, 0.0, f"ambiguous-event: {candidate_ids}"
+            )
 
         return EventMatchResult(None, 0.0, "no-event-match")

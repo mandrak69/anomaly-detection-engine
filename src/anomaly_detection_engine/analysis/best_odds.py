@@ -1,13 +1,15 @@
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Iterable
 
+from anomaly_detection_engine.models.market import MarketIdentity
 from anomaly_detection_engine.models.odds import OddsSnapshot
 
 
 @dataclass(frozen=True)
 class BestOddsResult:
     outcome: str
-    odds: float
+    odds: Decimal
     bookmaker_name: str
 
 
@@ -15,7 +17,7 @@ def find_best_odds(
     snapshots: Iterable[OddsSnapshot],
     *,
     event_id: str,
-    market: str,
+    market: MarketIdentity,
 ) -> dict[str, BestOddsResult]:
     best: dict[str, BestOddsResult] = {}
 
