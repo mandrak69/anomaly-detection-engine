@@ -101,18 +101,21 @@ anomaly-detection-engine/
 │   └── samples/
 ├── docs/
 │   ├── architecture.md
-│   ├── data-quality-and-integrity.md
-│   └── project-development-pitfalls.md
+│   ├── data-quality-and-integrity
+│   └── project-development-pitfalls
 ├── src/
 │   └── anomaly_detection_engine/
 │       ├── analysis/
 │       │   ├── arbitrage.py
 │       │   ├── best_odds.py
 │       │   ├── freshness.py
-│       │   └── movement_detector.py
+│       │   ├── movement_detector.py
+│       │   └── outlier_detector.py
 │       ├── collectors/
 │       │   ├── base.py
 │       │   └── json_collector.py
+│       ├── ingestion/
+│       │   └── service.py
 │       ├── matching/
 │       │   └── event_matcher.py
 │       ├── models/
@@ -125,6 +128,7 @@ anomaly-detection-engine/
 │       │   └── team_normalizer.py
 │       ├── storage/
 │       │   ├── database.py
+│       │   ├── collector_run_repository.py
 │       │   └── odds_repository.py
 │       ├── validation/
 │       │   ├── result.py
@@ -497,6 +501,10 @@ rate limiting
 [x] Raw odds validation
 [x] CollectorRun
 [x] Unit tests for core components
+[x] Outlier detector
+[x] Ingestion/orchestration service (OddsIngestionService)
+[x] CollectorRun persistence (CollectorRunRepository)
+[x] Dirty-data test fixtures
 ```
 
 ---
@@ -504,17 +512,17 @@ rate limiting
 ## Next Development Steps
 
 ```text
-[ ] Update storage schema for MarketIdentity
-[ ] Persist source_timestamp consistently
-[ ] Add CollectorRun persistence
+[x] Update storage schema for MarketIdentity
+[x] Persist source_timestamp consistently
+[x] Add CollectorRun persistence
 [ ] Add raw payload storage / traceability
-[ ] Build ingestion/orchestration service
-[ ] Connect collector → validation → matching → storage
+[x] Build ingestion/orchestration service
+[x] Connect collector → validation → matching → storage
 [ ] Run freshness checks before current-market analysis
-[ ] Add outlier detector
+[x] Add outlier detector
 [ ] Add bookmaker-lag detector
 [ ] Add first real external source
-[ ] Add dirty-data fixtures
+[x] Add dirty-data fixtures
 [ ] Add structured logging and metrics
 [ ] Add reporting/dashboard layer
 ```

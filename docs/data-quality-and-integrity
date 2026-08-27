@@ -182,11 +182,11 @@ A suspicious value must not automatically become a market signal.
 [x] CollectorRun
 [x] Raw odds validation
 
-[ ] MarketIdentity storage schema
-[ ] CollectorRun persistence
+[x] MarketIdentity storage schema
+[x] CollectorRun persistence
 [ ] Raw payload retention
 [ ] Source-specific validation rules
 [ ] Duplicate/idempotency policy
-[ ] Dirty-data test fixtures
-[ ] Orchestration service
+[x] Dirty-data test fixtures
+[x] Orchestration service
 ```

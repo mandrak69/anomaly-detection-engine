@@ -1,0 +1,72 @@
+[
+  {
+    "bookmaker": "Mozzart",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Manchester United",
+    "away_team": "Liverpool",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:00:00+00:00",
+    "odds": {
+      "1": 2.15,
+      "X": 3.45,
+      "2": 3.20
+    }
+  },
+  {
+    "bookmaker": "MaxBet",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "",
+    "away_team": "Liverpool",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:00:30+00:00",
+    "odds": {
+      "1": 1.95,
+      "X": 3.85,
+      "2": 3.10
+    }
+  },
+  {
+    "bookmaker": "Soccer",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Manchester United",
+    "away_team": "Liverpool",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:01:00",
+    "odds": {
+      "1": 2.00,
+      "X": 3.30,
+      "2": 3.65
+    }
+  },
+  {
+    "bookmaker": "BadOdds",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Manchester United",
+    "away_team": "Liverpool",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:02:00+00:00",
+    "odds": {
+      "1": 0.95,
+      "X": 3.30,
+      "2": 3.65
+    }
+  },
+  {
+    "bookmaker": "GhostBook",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Definitely Unknown FC",
+    "away_team": "Nobody United",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:03:00+00:00",
+    "odds": {
+      "1": 2.05,
+      "X": 3.40,
+      "2": 3.50
+    }
+  }
+]
