@@ -1,0 +1,192 @@
+# Data Quality and Integrity
+
+## Status
+
+This document describes data-quality and temporal-integrity rules currently being implemented in the project.
+
+The following concepts are now part of the model:
+
+```text
+MarketIdentity
+DataValidationResult
+CollectorRun
+FreshnessPolicy
+FreshnessResult
+```
+
+---
+
+## Core Rule
+
+> Data must be valid, semantically equivalent, correctly matched, and temporally coherent before it can participate in anomaly analysis.
+
+---
+
+## Validation Stages
+
+Validation is explicitly divided into:
+
+```text
+STRUCTURAL
+SEMANTIC
+IDENTITY
+TEMPORAL
+```
+
+### Structural
+
+Checks whether required data exists and can be parsed.
+
+### Semantic
+
+Checks whether values are logically valid.
+
+### Identity
+
+Checks whether the event and market have been resolved correctly.
+
+### Temporal
+
+Checks whether the observations are fresh and comparable in time.
+
+---
+
+## Market Semantics
+
+`MarketIdentity` has been introduced so market equivalence does not depend on a display string.
+
+Potential fields include:
+
+```text
+market_type
+period
+line
+rules
+specifier
+```
+
+Only equivalent market identities may participate in the same comparison.
+
+---
+
+## Timestamp Policy
+
+All internal timestamps are timezone-aware and normalized to UTC.
+
+Important timestamps:
+
+```text
+event_start_time
+observed_at
+source_timestamp
+analysis_time
+```
+
+`observed_at` is controlled by our system.
+
+`source_timestamp` is optional external metadata and may have source-specific semantics.
+
+---
+
+## Freshness and Temporal Coherence
+
+Current-market analysis must verify:
+
+```text
+snapshot age
+observation spread
+```
+
+A snapshot can be valid historical data while still being invalid for a current comparison.
+
+Freshness thresholds must remain configuration-driven.
+
+---
+
+## Collector Quality
+
+Every ingestion cycle should be represented by `CollectorRun`.
+
+Tracked information includes:
+
+```text
+source
+started_at
+finished_at
+status
+records_received
+records_accepted
+records_rejected
+collector_version
+errors
+```
+
+Statuses:
+
+```text
+SUCCESS
+PARTIAL
+FAILED
+```
+
+This allows the analysis layer to distinguish complete source coverage from partial ingestion.
+
+---
+
+## DataValidationResult
+
+Validation returns structured results.
+
+Typical contents:
+
+```text
+valid
+stage
+errors
+warnings
+```
+
+This enables:
+
+- debugging
+- metrics
+- source-quality monitoring
+- rejection reasons
+- future review/reprocessing
+
+---
+
+## Data Quality vs Market Anomaly
+
+The engine distinguishes:
+
+```text
+DATA_QUALITY_ANOMALY
+MARKET_ANOMALY
+ARBITRAGE_SIGNAL
+SYSTEM_ANOMALY
+```
+
+A suspicious value must not automatically become a market signal.
+
+---
+
+## Required Work Before First Real Source
+
+```text
+[x] Timezone-aware UTC policy
+[x] observed_at/source_timestamp distinction
+[x] Freshness model
+[x] MarketIdentity
+[x] DataValidationResult
+[x] CollectorRun
+[x] Raw odds validation
+
+[ ] MarketIdentity storage schema
+[ ] CollectorRun persistence
+[ ] Raw payload retention
+[ ] Source-specific validation rules
+[ ] Duplicate/idempotency policy
+[ ] Dirty-data test fixtures
+[ ] Orchestration service
+```

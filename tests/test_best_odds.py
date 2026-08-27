@@ -5,7 +5,7 @@ from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 
 
 def test_finds_best_odds_per_outcome():
-    now = datetime.fromisoformat("2026-08-27T10:00:00")
+    now = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
     a = Bookmaker("a", "A")
     b = Bookmaker("b", "B")
 

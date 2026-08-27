@@ -12,10 +12,11 @@ class Bookmaker:
 class OddsSnapshot:
     event_id: str
     bookmaker: Bookmaker
-    market: str
+    market: MarketIdentity
     outcome: str
     odds: float
     observed_at: datetime
+    source_timestamp: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.odds <= 1.0:

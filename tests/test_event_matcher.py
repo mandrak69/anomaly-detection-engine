@@ -12,7 +12,7 @@ def build_matcher():
         league="premier-league",
         home_team=Team("team-1", "Manchester United"),
         away_team=Team("team-2", "Liverpool"),
-        start_time=datetime.fromisoformat("2026-09-01T20:00:00"),
+        start_time=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
     )
 
     normalizer = TeamNormalizer(
@@ -46,7 +46,7 @@ def test_does_not_match_wrong_league():
         league="champions-league",
         home_team_raw="Man Utd",
         away_team_raw="Liv",
-        start_time=datetime.fromisoformat("2026-09-01T20:00:00"),
+        start_time=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
     )
 
     assert result.event is None

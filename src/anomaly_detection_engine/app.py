@@ -29,7 +29,7 @@ def build_demo_events() -> list[Event]:
             league="demo-league",
             home_team=Team("team-001", "Manchester United"),
             away_team=Team("team-002", "Liverpool"),
-            start_time=datetime.fromisoformat("2026-09-01T20:00:00"),
+            start_time=datetime.fromisoformat("2026-09-01T18:00:00+00:000"),
         ),
         Event(
             id="event-002",
@@ -37,7 +37,7 @@ def build_demo_events() -> list[Event]:
             league="demo-league",
             home_team=Team("team-003", "Real Madrid"),
             away_team=Team("team-004", "Barcelona"),
-            start_time=datetime.fromisoformat("2026-09-02T21:00:00"),
+            start_time=datetime.fromisoformat("2026-09-01T19:00:00+00:00"),
         ),
     ]
 
@@ -46,8 +46,9 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sample_path = project_root / "data" / "samples" / "odds_sample.json"
 
-    raw_data = json.loads(sample_path.read_text(encoding="utf-8"))
-    events = build_demo_events()
+   collector = JsonOddsCollector(sample_path)
+
+    raw_events = collector.collect()    events = build_demo_events()
 
     canonical_names = {
         event.home_team.canonical_name
@@ -62,14 +63,14 @@ def main() -> None:
 
     snapshots: list[OddsSnapshot] = []
 
-    for row in raw_data:
-        match = matcher.match(
-            sport=row["sport"],
-            league=row["league"],
-            home_team_raw=row["home_team"],
-            away_team_raw=row["away_team"],
-            start_time=datetime.fromisoformat(row["start_time"]),
-        )
+for raw_event in raw_events:
+    match = matcher.match(
+        sport=raw_event.sport,
+        league=raw_event.league,
+        home_team_raw=raw_event.home_team,
+        away_team_raw=raw_event.away_team,
+        start_time=raw_event.start_time,
+    )
 
         if match.event is None:
             print(f"SKIP: could not match {row['home_team']} vs {row['away_team']} ({match.reason})")

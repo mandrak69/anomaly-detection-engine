@@ -1,0 +1,117 @@
+# Project Development Pitfalls
+
+## Status Update
+
+This document tracks implementation pitfalls and design responses.
+
+Three major concepts that were previously identified as missing have now been introduced:
+
+```text
+[x] MarketIdentity
+[x] DataValidationResult
+[x] CollectorRun
+```
+
+These concepts address three important classes of risk:
+
+```text
+market semantic mismatch
+invalid or low-quality input
+partial/failed ingestion cycles
+```
+
+---
+
+## Implemented Safeguards
+
+### MarketIdentity
+
+Prevents unrelated market contracts from being compared only because their display names look similar.
+
+### DataValidationResult
+
+Provides structured validation output with stages, errors, and warnings.
+
+### CollectorRun
+
+Provides ingestion-cycle traceability, including success/partial/failure state and accepted/rejected record counts.
+
+### Freshness
+
+The project now models snapshot age and observation spread explicitly.
+
+### UTC Timestamp Policy
+
+Runtime timestamps are timezone-aware and normalized to UTC.
+
+---
+
+## Remaining High-Risk Areas
+
+### Storage Schema Evolution
+
+The current SQLite schema must be updated to persist full market identity and source timestamps consistently.
+
+### Duplicate and Idempotency Rules
+
+Repeated collector runs must have deterministic behavior.
+
+### Raw Payload Traceability
+
+Raw payload storage is needed for debugging and reprocessing.
+
+### Dirty Data
+
+Tests must include malformed and semantically incorrect source data.
+
+### Source-Specific Validation
+
+Scrapers and unofficial endpoints require stronger source-specific validation.
+
+### Database Growth
+
+High-frequency polling will eventually require retention or aggregation policies.
+
+### SQLite Concurrency
+
+SQLite is acceptable for the PoC but may become a limitation when multiple collectors write concurrently.
+
+### Precision
+
+Odds currently use float; migration to Decimal should be evaluated before narrow-margin calculations become important.
+
+### Event Rescheduling
+
+Start-time changes must not accidentally create duplicate canonical events.
+
+### Market Lifecycle
+
+OPEN / SUSPENDED / CLOSED states should be modeled when sources expose them.
+
+---
+
+## Next Planned Architectural Step
+
+Build an orchestration service connecting:
+
+```text
+Collector
+→ CollectorRun
+→ RawEventOdds
+→ validation
+→ normalization
+→ matching
+→ MarketIdentity
+→ OddsSnapshot
+→ storage
+→ freshness
+→ analysis
+```
+
+This will be the first complete ingestion workflow.
+
+---
+
+## Rule
+
+> The engine should detect anomalies in the domain, not anomalies introduced by bad parsing, stale observations, inconsistent formats, or incorrect matching.

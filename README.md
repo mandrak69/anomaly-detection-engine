@@ -1,2 +1,579 @@
-# anomaly-detection-engine
-A generic system for detecting mismatches and anomalies across large, heterogeneous data sets.
+# Anomaly Detection Engine
+
+## Overview
+
+**Anomaly Detection Engine** is a generic system for detecting mismatches, outliers, rapid changes, and other anomalies across large and heterogeneous datasets.
+
+The project is intentionally designed around a generic data-analysis problem rather than a single domain.
+
+The first concrete use case is **sports odds analysis**, where the system collects odds from multiple bookmakers, normalizes different representations of the same event and market, stores historical observations, validates data quality and temporal validity, and detects anomalies such as:
+
+- best-odds differences
+- arbitrage / surebet signals
+- outlier odds
+- rapid odds movements
+- bookmaker lag
+- stale or invalid observations
+
+The long-term goal is to keep the ingestion, validation, matching, storage, and anomaly-detection layers generic enough to support other datasets and domains later.
+
+---
+
+## Current MVP Scope
+
+The initial MVP focuses on:
+
+- football
+- pre-match data
+- 1X2 markets
+- multiple bookmakers / data sources
+- source-independent collection
+- event normalization and matching
+- canonical market identity
+- data validation
+- historical odds storage
+- freshness and temporal-coherence checks
+- best-odds analysis
+- surebet detection
+- rapid movement detection
+
+Real APIs and bookmaker scraping will be introduced after the ingestion and validation pipeline is stable.
+
+---
+
+## Architecture
+
+Current target flow:
+
+```text
+External Source
+      ↓
+Collector
+      ↓
+CollectorRun
+      ↓
+Raw Payload / RawEventOdds
+      ↓
+Structural Validation
+      ↓
+DataValidationResult
+      ↓
+Normalization
+      ↓
+Event Matching
+      ↓
+MarketIdentity
+      ↓
+Semantic Validation
+      ↓
+OddsSnapshot
+      ↓
+Storage
+      ↓
+Freshness / Temporal Coherence
+      ↓
+Analysis Engine
+      ↓
+Anomaly Classification
+```
+
+The core analysis engine does not depend on how data is acquired.
+
+Possible collectors:
+
+```text
+Public API
+Internal JSON/HTTP endpoint
+HTML scraper
+Browser automation
+JSON/file input
+```
+
+All collectors must produce the same internal model before data enters the core pipeline.
+
+---
+
+## Project Structure
+
+```text
+anomaly-detection-engine/
+├── data/
+│   └── samples/
+├── docs/
+│   ├── architecture.md
+│   ├── data-quality-and-integrity.md
+│   └── project-development-pitfalls.md
+├── src/
+│   └── anomaly_detection_engine/
+│       ├── analysis/
+│       │   ├── arbitrage.py
+│       │   ├── best_odds.py
+│       │   ├── freshness.py
+│       │   └── movement_detector.py
+│       ├── collectors/
+│       │   ├── base.py
+│       │   └── json_collector.py
+│       ├── matching/
+│       │   └── event_matcher.py
+│       ├── models/
+│       │   ├── collector_run.py
+│       │   ├── event.py
+│       │   ├── market.py
+│       │   ├── odds.py
+│       │   └── raw_odds.py
+│       ├── normalization/
+│       │   └── team_normalizer.py
+│       ├── storage/
+│       │   ├── database.py
+│       │   └── odds_repository.py
+│       ├── validation/
+│       │   ├── result.py
+│       │   └── raw_odds_validator.py
+│       └── app.py
+├── tests/
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Core Domain Concepts
+
+### Event
+
+Canonical sports event identified using domain information such as:
+
+```text
+sport
+competition
+home team
+away team
+start time
+```
+
+External event IDs are source-specific and must not be treated as global IDs.
+
+### MarketIdentity
+
+`MarketIdentity` defines exactly what market is being compared.
+
+Potential fields include:
+
+```text
+market_type
+period
+line
+rules
+specifier
+```
+
+Examples:
+
+```text
+THREE_WAY + FULL_TIME
+TOTALS + FULL_TIME + 2.5
+HANDICAP + FULL_TIME + -1.5
+```
+
+Only semantically equivalent markets may be compared.
+
+### RawEventOdds
+
+Common source-independent representation produced by collectors.
+
+### OddsSnapshot
+
+Represents one observed odd for a specific:
+
+```text
+event
+bookmaker
+market
+outcome
+observed_at
+```
+
+Snapshots are stored historically so the engine can analyze changes through time.
+
+### CollectorRun
+
+Represents one ingestion cycle.
+
+It tracks:
+
+```text
+source
+started_at
+finished_at
+status
+records_received
+records_accepted
+records_rejected
+collector_version
+errors
+```
+
+Possible statuses:
+
+```text
+SUCCESS
+PARTIAL
+FAILED
+```
+
+### DataValidationResult
+
+Validation returns structured results instead of only `True` or `False`.
+
+It contains:
+
+```text
+valid
+validation stage
+errors
+warnings
+```
+
+Validation stages include:
+
+```text
+STRUCTURAL
+SEMANTIC
+IDENTITY
+TEMPORAL
+```
+
+---
+
+## Data Collection
+
+The project defines a generic `OddsCollector` interface.
+
+Each collector transforms source-specific data into the internal `RawEventOdds` contract.
+
+Current implementation:
+
+```text
+JsonOddsCollector
+```
+
+Future implementations may include:
+
+```text
+TheOddsApiCollector
+MozzartCollector
+MaxBetCollector
+SoccerCollector
+```
+
+A bookmaker-specific collector may internally use an API, an undocumented frontend endpoint, HTML parsing, or browser automation, but the rest of the system remains unchanged.
+
+---
+
+## Validation
+
+Data must pass validation before entering analysis.
+
+### Structural Validation
+
+Examples:
+
+- required fields exist
+- timestamps can be parsed
+- market exists
+- outcomes exist
+- odds can be interpreted
+
+### Semantic Validation
+
+Examples:
+
+- decimal odds are greater than 1.0
+- home and away teams are not identical
+- timestamps are timezone-aware
+- values are within reasonable ranges
+
+### Identity Validation
+
+Examples:
+
+- event match is sufficiently reliable
+- competition is correct
+- home/away orientation is correct
+- market semantics match
+
+### Temporal Validation
+
+Examples:
+
+- snapshot is fresh enough
+- observations are close enough in time
+- timestamp is not unexpectedly in the future
+
+---
+
+## Time Handling
+
+All internal runtime timestamps are:
+
+```text
+timezone-aware
+UTC-normalized
+```
+
+Important time concepts remain separate:
+
+```text
+event_start_time
+observed_at
+source_timestamp
+```
+
+`observed_at` represents when our system saw the data.
+
+`source_timestamp` is optional metadata supplied by the source.
+
+---
+
+## Freshness
+
+A valid observation may still be too old for current comparison.
+
+The engine uses a configurable `FreshnessPolicy`, for example:
+
+```text
+maximum snapshot age
+maximum observation spread
+```
+
+Cross-source analysis must not compare stale or temporally incoherent observations.
+
+---
+
+## Best Odds
+
+The best-odds module selects the highest available odd for each outcome among eligible current snapshots.
+
+Example:
+
+```text
+            1      X      2
+
+Book A     2.10   3.40   3.20
+Book B     1.95   3.75   3.10
+Book C     2.00   3.30   3.60
+
+BEST       2.10   3.75   3.60
+```
+
+---
+
+## Surebet Detection
+
+For a three-way market:
+
+```text
+margin =
+    1 / best_1
+  + 1 / best_X
+  + 1 / best_2
+```
+
+If:
+
+```text
+margin < 1
+```
+
+the engine reports a mathematical arbitrage signal.
+
+This does not automatically mean the opportunity is executable in practice.
+
+---
+
+## Rapid Movement Detection
+
+Historical snapshots allow the engine to detect large movements over a short time window.
+
+Example:
+
+```text
+10:00 odds = 2.20
+10:04 odds = 1.90
+```
+
+The detector evaluates percentage change and elapsed time.
+
+---
+
+## Storage
+
+The PoC currently uses SQLite.
+
+The repository supports operations such as:
+
+```text
+save
+find_by_event
+find_latest
+find_last_two
+find_latest_for_market
+```
+
+SQLite is appropriate for the current phase, while the storage layer is kept isolated so a future migration to PostgreSQL remains possible.
+
+---
+
+## Data Quality Principles
+
+The engine must distinguish:
+
+### DATA_QUALITY_ANOMALY
+
+Examples:
+
+```text
+invalid odds
+bad timestamp
+parser regression
+missing outcome
+wrong market representation
+```
+
+### MARKET_ANOMALY
+
+Examples:
+
+```text
+outlier odds
+rapid movement
+bookmaker lag
+market divergence
+```
+
+### ARBITRAGE_SIGNAL
+
+Example:
+
+```text
+surebet candidate
+```
+
+### SYSTEM_ANOMALY
+
+Examples:
+
+```text
+collector failure
+source latency
+stale source
+rate limiting
+```
+
+---
+
+## Current Development Status
+
+```text
+[x] Initial project structure
+[x] Canonical Event and Team models
+[x] Bookmaker and OddsSnapshot models
+[x] RawEventOdds model
+[x] Collector abstraction
+[x] JSON collector
+[x] Team normalization
+[x] Alias mapping
+[x] Fuzzy matching
+[x] Event matching
+[x] Best-odds calculation
+[x] Surebet detection
+[x] SQLite storage
+[x] Historical snapshot queries
+[x] Rapid movement detector
+[x] Freshness policy/result model
+[x] MarketIdentity
+[x] DataValidationResult
+[x] Raw odds validation
+[x] CollectorRun
+[x] Unit tests for core components
+```
+
+---
+
+## Next Development Steps
+
+```text
+[ ] Update storage schema for MarketIdentity
+[ ] Persist source_timestamp consistently
+[ ] Add CollectorRun persistence
+[ ] Add raw payload storage / traceability
+[ ] Build ingestion/orchestration service
+[ ] Connect collector → validation → matching → storage
+[ ] Run freshness checks before current-market analysis
+[ ] Add outlier detector
+[ ] Add bookmaker-lag detector
+[ ] Add first real external source
+[ ] Add dirty-data fixtures
+[ ] Add structured logging and metrics
+[ ] Add reporting/dashboard layer
+```
+
+---
+
+## Next Architectural Milestone
+
+The next major milestone is an orchestration layer that coordinates:
+
+```text
+collect
+→ validate
+→ normalize
+→ match
+→ create snapshot
+→ persist
+→ evaluate freshness
+→ analyze
+→ record run result
+```
+
+This keeps `app.py` small and prevents source-specific or orchestration logic from leaking into analysis modules.
+
+---
+
+## Long-Term Vision
+
+The architecture follows a generic pattern:
+
+```text
+heterogeneous sources
+        ↓
+canonical representation
+        ↓
+validation
+        ↓
+entity/market matching
+        ↓
+historical observations
+        ↓
+anomaly detection
+```
+
+Possible future domains include:
+
+- pricing data
+- financial market data
+- sensor measurements
+- inventory data
+- monitoring metrics
+- distributed-system observations
+
+Sports odds are the first domain used to validate the architecture.
+
+---
+
+## Guiding Principle
+
+> An anomaly is only meaningful if the observations being compared are valid, semantically equivalent, correctly matched, and temporally coherent.
+
+Correctness of input data has priority over the number of detected signals.
