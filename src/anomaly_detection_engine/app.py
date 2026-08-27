@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -7,10 +8,13 @@ from anomaly_detection_engine.collectors.json_collector import (
     DEFAULT_MARKET,
     JsonOddsCollector,
 )
+from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
+from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 
 ALIASES = {
@@ -49,9 +53,13 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sample_path = project_root / "data" / "samples" / "odds_sample.json"
 
-    collector = JsonOddsCollector(sample_path)
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    initialize_database(connection)
 
-    raw_events = collector.collect()
+    odds_repository = OddsRepository(connection)
+    collector_run_repository = CollectorRunRepository(connection)
+
     events = build_demo_events()
 
     canonical_names = {
@@ -65,39 +73,27 @@ def main() -> None:
     normalizer = TeamNormalizer(canonical_names, ALIASES, fuzzy_threshold=80)
     matcher = EventMatcher(events, normalizer)
 
-    snapshots: list[OddsSnapshot] = []
+    service = OddsIngestionService(
+        collector=JsonOddsCollector(sample_path),
+        matcher=matcher,
+        odds_repository=odds_repository,
+        collector_run_repository=collector_run_repository,
+        collector_version="0.1.0",
+    )
 
-    for raw_event in raw_events:
-        match = matcher.match(
-            sport=raw_event.sport,
-            league=raw_event.league,
-            home_team_raw=raw_event.home_team,
-            away_team_raw=raw_event.away_team,
-            start_time=raw_event.start_time,
-        )
-
-        if match.event is None:
-            print(
-                f"SKIP: could not match {raw_event.home_team} vs "
-                f"{raw_event.away_team} ({match.reason})"
-            )
-            continue
-
-        bookmaker = Bookmaker(raw_event.source.lower(), raw_event.source)
-
-        for outcome in ("1", "X", "2"):
-            snapshots.append(
-                OddsSnapshot(
-                    event_id=match.event.id,
-                    bookmaker=bookmaker,
-                    market=raw_event.market,
-                    outcome=outcome,
-                    odds=raw_event.odds[outcome],
-                    observed_at=raw_event.observed_at,
-                )
-            )
+    run = service.run()
+    print(
+        f"Collector run {run.id}: {run.status.value} "
+        f"({run.records_accepted}/{run.records_received} accepted)"
+    )
 
     for event in events:
+        snapshots = odds_repository.find_latest_for_market(
+            event_id=event.id,
+            market_type=DEFAULT_MARKET.market_type.value,
+            market_period=DEFAULT_MARKET.period.value,
+        )
+
         best = find_best_odds(snapshots, event_id=event.id, market=DEFAULT_MARKET)
         if not best:
             continue

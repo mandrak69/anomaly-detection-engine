@@ -35,6 +35,23 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_odds_event_market
             ON odds_snapshots(event_id, market_type, market_period, market_line);
+
+        CREATE TABLE IF NOT EXISTS collector_runs (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            records_received INTEGER NOT NULL,
+            records_accepted INTEGER NOT NULL,
+            records_rejected INTEGER NOT NULL,
+            collector_version TEXT,
+            error_type TEXT,
+            error_message TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_collector_runs_source
+            ON collector_runs(source, started_at);
         """
     )
 

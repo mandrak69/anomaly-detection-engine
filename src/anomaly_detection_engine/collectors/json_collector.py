@@ -20,6 +20,10 @@ class JsonOddsCollector(OddsCollector):
     def __init__(self, path: Path):
         self.path = path
 
+    @property
+    def source(self) -> str:
+        return f"json:{self.path.name}"
+
     def collect(self) -> list[RawEventOdds]:
         raw_data = json.loads(
             self.path.read_text(encoding="utf-8"),
