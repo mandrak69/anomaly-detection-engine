@@ -1,9 +1,10 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
+from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
 from anomaly_detection_engine.collectors.json_collector import (
     DEFAULT_MARKET,
     JsonOddsCollector,
@@ -15,6 +16,7 @@ from anomaly_detection_engine.normalization.team_normalizer import TeamNormalize
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
 
 ALIASES = {
@@ -26,6 +28,14 @@ ALIASES = {
     "Barca": "Barcelona",
     "Real Madrid CF": "Real Madrid",
 }
+
+# Demo dataset uses fixed calendar timestamps rather than live polling, so
+# freshness is evaluated relative to the newest observation in the batch
+# (not wall-clock "now", which would drift stale as real time passes).
+DEMO_FRESHNESS_POLICY = FreshnessPolicy(
+    max_snapshot_age=timedelta(minutes=5),
+    max_observation_spread=timedelta(minutes=5),
+)
 
 
 def build_demo_events() -> list[Event]:
@@ -59,6 +69,7 @@ def main() -> None:
 
     odds_repository = OddsRepository(connection)
     collector_run_repository = CollectorRunRepository(connection)
+    raw_payload_repository = RawPayloadRepository(connection)
 
     events = build_demo_events()
 
@@ -78,6 +89,7 @@ def main() -> None:
         matcher=matcher,
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
+        raw_payload_repository=raw_payload_repository,
         collector_version="0.1.0",
     )
 
@@ -93,6 +105,17 @@ def main() -> None:
             market_type=DEFAULT_MARKET.market_type.value,
             market_period=DEFAULT_MARKET.period.value,
         )
+        if not snapshots:
+            continue
+
+        freshness = validate_freshness(
+            snapshots,
+            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
+            policy=DEMO_FRESHNESS_POLICY,
+        )
+        if not freshness.valid:
+            print(f"\nSKIP {event.display_name}: not fresh ({freshness.reason})")
+            continue
 
         best = find_best_odds(snapshots, event_id=event.id, market=DEFAULT_MARKET)
         if not best:

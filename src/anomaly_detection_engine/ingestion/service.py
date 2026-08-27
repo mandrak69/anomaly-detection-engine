@@ -8,6 +8,10 @@ from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.raw_payload_repository import (
+    RawPayloadRepository,
+    serialize_raw_event_odds,
+)
 from anomaly_detection_engine.validation.raw_odds_validator import validate_raw_event_odds
 
 
@@ -25,21 +29,25 @@ class OddsIngestionService:
         matcher: EventMatcher,
         odds_repository: OddsRepository,
         collector_run_repository: CollectorRunRepository,
+        raw_payload_repository: RawPayloadRepository,
         collector_version: str | None = None,
     ) -> None:
         self._collector = collector
         self._matcher = matcher
         self._odds_repository = odds_repository
         self._collector_run_repository = collector_run_repository
+        self._raw_payload_repository = raw_payload_repository
         self._collector_version = collector_version
 
     def run(self) -> CollectorRun:
+        run_id = str(uuid4())
         started_at = datetime.now(timezone.utc)
 
         try:
             raw_events = self._collector.collect()
         except Exception as exc:
             return self._record_run(
+                run_id=run_id,
                 started_at=started_at,
                 status=CollectorRunStatus.FAILED,
                 records_received=0,
@@ -53,7 +61,16 @@ class OddsIngestionService:
         records_rejected = 0
 
         for raw in raw_events:
-            if self._ingest_one(raw):
+            accepted, reason = self._ingest_one(raw)
+            self._save_raw_payload(
+                run_id=run_id,
+                raw=raw,
+                accepted=accepted,
+                reason=reason,
+                received_at=started_at,
+            )
+
+            if accepted:
                 records_accepted += 1
             else:
                 records_rejected += 1
@@ -66,6 +83,7 @@ class OddsIngestionService:
             status = CollectorRunStatus.SUCCESS
 
         return self._record_run(
+            run_id=run_id,
             started_at=started_at,
             status=status,
             records_received=len(raw_events),
@@ -73,10 +91,11 @@ class OddsIngestionService:
             records_rejected=records_rejected,
         )
 
-    def _ingest_one(self, raw: RawEventOdds) -> bool:
+    def _ingest_one(self, raw: RawEventOdds) -> tuple[bool, str | None]:
         validation = validate_raw_event_odds(raw)
         if not validation.valid:
-            return False
+            codes = ", ".join(error.code for error in validation.errors)
+            return False, f"{validation.stage.value}: {codes}"
 
         match = self._matcher.match(
             sport=raw.sport,
@@ -86,7 +105,7 @@ class OddsIngestionService:
             start_time=raw.start_time,
         )
         if match.event is None:
-            return False
+            return False, f"identity: {match.reason}"
 
         bookmaker = Bookmaker(raw.source.lower(), raw.source)
 
@@ -103,11 +122,30 @@ class OddsIngestionService:
                 )
             )
 
-        return True
+        return True, None
+
+    def _save_raw_payload(
+        self,
+        *,
+        run_id: str,
+        raw: RawEventOdds,
+        accepted: bool,
+        reason: str | None,
+        received_at: datetime,
+    ) -> None:
+        self._raw_payload_repository.save(
+            collector_run_id=run_id,
+            source=raw.source,
+            payload=serialize_raw_event_odds(raw),
+            accepted=accepted,
+            received_at=received_at,
+            rejection_reason=reason,
+        )
 
     def _record_run(
         self,
         *,
+        run_id: str,
         started_at: datetime,
         status: CollectorRunStatus,
         records_received: int,
@@ -117,7 +155,7 @@ class OddsIngestionService:
         error_message: str | None = None,
     ) -> CollectorRun:
         run = CollectorRun(
-            id=str(uuid4()),
+            id=run_id,
             source=self._collector.source,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),

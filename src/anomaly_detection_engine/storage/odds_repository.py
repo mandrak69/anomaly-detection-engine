@@ -13,7 +13,7 @@ class OddsRepository:
     def save(self, snapshot: OddsSnapshot) -> None:
         self._connection.execute(
             """
-            INSERT INTO odds_snapshots (
+            INSERT OR IGNORE INTO odds_snapshots (
                 event_id,
                 bookmaker_id,
                 bookmaker_name,

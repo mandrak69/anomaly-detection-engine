@@ -13,6 +13,7 @@ from anomaly_detection_engine.normalization.team_normalizer import TeamNormalize
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
 MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
 
@@ -72,20 +73,24 @@ def build_service(collector):
 
     odds_repository = OddsRepository(connection)
     collector_run_repository = CollectorRunRepository(connection)
+    raw_payload_repository = RawPayloadRepository(connection)
 
     service = OddsIngestionService(
         collector=collector,
         matcher=build_matcher(),
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
+        raw_payload_repository=raw_payload_repository,
         collector_version="0.1.0",
     )
-    return service, odds_repository, collector_run_repository
+    return service, odds_repository, collector_run_repository, raw_payload_repository
 
 
 def test_successful_run_persists_snapshots():
     collector = StubCollector(raw_events=[build_raw_event()])
-    service, odds_repository, collector_run_repository = build_service(collector)
+    service, odds_repository, collector_run_repository, raw_payload_repository = build_service(
+        collector
+    )
 
     run = service.run()
 
@@ -100,13 +105,19 @@ def test_successful_run_persists_snapshots():
 
     assert collector_run_repository.find_by_id(run.id) is not None
 
+    raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
+    assert len(raw_payloads) == 1
+    assert raw_payloads[0].accepted is True
+    assert raw_payloads[0].rejection_reason is None
+    assert '"source": "Mozzart"' in raw_payloads[0].payload
+
 
 def test_partial_run_when_one_record_fails_validation():
     valid = build_raw_event()
     invalid = build_raw_event(odds={"1": Decimal("0.5"), "X": Decimal("3.0"), "2": Decimal("3.0")})
 
     collector = StubCollector(raw_events=[valid, invalid])
-    service, odds_repository, _ = build_service(collector)
+    service, odds_repository, _, raw_payload_repository = build_service(collector)
 
     run = service.run()
 
@@ -117,13 +128,18 @@ def test_partial_run_when_one_record_fails_validation():
 
     assert len(odds_repository.find_by_event("event-001")) == 3
 
+    raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
+    assert len(raw_payloads) == 2
+    rejected = next(p for p in raw_payloads if not p.accepted)
+    assert rejected.rejection_reason.startswith("semantic:")
+
 
 def test_partial_run_when_event_cannot_be_matched():
     valid = build_raw_event()
     unmatched = build_raw_event(home_team="Totally Unknown Team FC")
 
     collector = StubCollector(raw_events=[valid, unmatched])
-    service, odds_repository, _ = build_service(collector)
+    service, odds_repository, _, raw_payload_repository = build_service(collector)
 
     run = service.run()
 
@@ -131,12 +147,16 @@ def test_partial_run_when_event_cannot_be_matched():
     assert run.records_accepted == 1
     assert run.records_rejected == 1
 
+    raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
+    rejected = next(p for p in raw_payloads if not p.accepted)
+    assert rejected.rejection_reason.startswith("identity:")
+
 
 def test_all_records_rejected_returns_failed_status():
     invalid = build_raw_event(odds={"1": Decimal("0.5"), "X": Decimal("3.0"), "2": Decimal("3.0")})
 
     collector = StubCollector(raw_events=[invalid])
-    service, _, _ = build_service(collector)
+    service, _, _, _ = build_service(collector)
 
     run = service.run()
 
@@ -148,7 +168,7 @@ def test_all_records_rejected_returns_failed_status():
 
 def test_collector_failure_produces_failed_run_with_error_details():
     collector = StubCollector(error=ValueError("source unreachable"))
-    service, _, collector_run_repository = build_service(collector)
+    service, _, collector_run_repository, _ = build_service(collector)
 
     run = service.run()
 

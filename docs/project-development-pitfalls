@@ -52,17 +52,25 @@ Runtime timestamps are timezone-aware and normalized to UTC.
 
 The current SQLite schema must be updated to persist full market identity and source timestamps consistently.
 
+**Resolved:** `odds_snapshots` now has `market_type`/`market_period`/`market_line`/`market_rules`/`market_specifier` columns instead of a single display string.
+
 ### Duplicate and Idempotency Rules
 
 Repeated collector runs must have deterministic behavior.
+
+**Resolved:** a unique index on (event, bookmaker, market, outcome, observed_at) plus `INSERT OR IGNORE` makes re-saving the same snapshot a no-op instead of a duplicate row.
 
 ### Raw Payload Traceability
 
 Raw payload storage is needed for debugging and reprocessing.
 
+**Resolved:** `RawPayloadRepository` persists every ingested `RawEventOdds` (accepted or rejected, with the rejection reason) against its `CollectorRun`.
+
 ### Dirty Data
 
 Tests must include malformed and semantically incorrect source data.
+
+**Resolved:** see `tests/fixtures/dirty_odds_sample.json` and `tests/test_dirty_data_ingestion.py`.
 
 ### Source-Specific Validation
 
@@ -79,6 +87,8 @@ SQLite is acceptable for the PoC but may become a limitation when multiple colle
 ### Precision
 
 Odds currently use float; migration to Decimal should be evaluated before narrow-margin calculations become important.
+
+**Resolved:** odds are `Decimal` end-to-end (models, validation, analysis, storage).
 
 ### Event Rescheduling
 
@@ -108,7 +118,10 @@ Collector
 → analysis
 ```
 
-This will be the first complete ingestion workflow.
+**Resolved:** `OddsIngestionService` implements collect → validate → match →
+persist → `CollectorRun`. Freshness is evaluated by the caller (`app.py`)
+against the repository's stored snapshots before analysis, kept separate
+from ingestion per the Guiding Principle in `architecture.md`.
 
 ---
 

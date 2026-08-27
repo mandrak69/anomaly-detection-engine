@@ -108,6 +108,7 @@ anomaly-detection-engine/
 │       ├── analysis/
 │       │   ├── arbitrage.py
 │       │   ├── best_odds.py
+│       │   ├── bookmaker_lag.py
 │       │   ├── freshness.py
 │       │   ├── movement_detector.py
 │       │   └── outlier_detector.py
@@ -123,13 +124,15 @@ anomaly-detection-engine/
 │       │   ├── event.py
 │       │   ├── market.py
 │       │   ├── odds.py
-│       │   └── raw_odds.py
+│       │   ├── raw_odds.py
+│       │   └── raw_payload.py
 │       ├── normalization/
 │       │   └── team_normalizer.py
 │       ├── storage/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
-│       │   └── odds_repository.py
+│       │   ├── odds_repository.py
+│       │   └── raw_payload_repository.py
 │       ├── validation/
 │       │   ├── result.py
 │       │   └── raw_odds_validator.py
@@ -502,8 +505,12 @@ rate limiting
 [x] CollectorRun
 [x] Unit tests for core components
 [x] Outlier detector
+[x] Bookmaker-lag detector
 [x] Ingestion/orchestration service (OddsIngestionService)
 [x] CollectorRun persistence (CollectorRunRepository)
+[x] Raw payload retention (RawPayloadRepository)
+[x] Odds snapshot idempotency (dedupe on save)
+[x] Freshness check wired into demo analysis
 [x] Dirty-data test fixtures
 ```
 
@@ -515,12 +522,12 @@ rate limiting
 [x] Update storage schema for MarketIdentity
 [x] Persist source_timestamp consistently
 [x] Add CollectorRun persistence
-[ ] Add raw payload storage / traceability
+[x] Add raw payload storage / traceability
 [x] Build ingestion/orchestration service
 [x] Connect collector → validation → matching → storage
-[ ] Run freshness checks before current-market analysis
+[x] Run freshness checks before current-market analysis
 [x] Add outlier detector
-[ ] Add bookmaker-lag detector
+[x] Add bookmaker-lag detector
 [ ] Add first real external source
 [x] Add dirty-data fixtures
 [ ] Add structured logging and metrics

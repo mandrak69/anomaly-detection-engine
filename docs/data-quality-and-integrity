@@ -184,9 +184,9 @@ A suspicious value must not automatically become a market signal.
 
 [x] MarketIdentity storage schema
 [x] CollectorRun persistence
-[ ] Raw payload retention
+[x] Raw payload retention
 [ ] Source-specific validation rules
-[ ] Duplicate/idempotency policy
+[x] Duplicate/idempotency policy
 [x] Dirty-data test fixtures
 [x] Orchestration service
 ```

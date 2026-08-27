@@ -36,6 +36,17 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_odds_event_market
             ON odds_snapshots(event_id, market_type, market_period, market_line);
 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_snapshot_dedupe
+            ON odds_snapshots(
+                event_id,
+                bookmaker_id,
+                market_type,
+                market_period,
+                COALESCE(market_line, ''),
+                outcome,
+                observed_at
+            );
+
         CREATE TABLE IF NOT EXISTS collector_runs (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -52,6 +63,19 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_collector_runs_source
             ON collector_runs(source, started_at);
+
+        CREATE TABLE IF NOT EXISTS raw_payloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collector_run_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            accepted INTEGER NOT NULL,
+            rejection_reason TEXT,
+            received_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_raw_payloads_run
+            ON raw_payloads(collector_run_id);
         """
     )
 

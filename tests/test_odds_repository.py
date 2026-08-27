@@ -45,6 +45,63 @@ def test_saves_odds_snapshot():
     assert Decimal(row["odds"]) == Decimal("2.15")
 
 
+def test_saving_the_same_snapshot_twice_is_idempotent():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+
+    snapshot = OddsSnapshot(
+        event_id="event-001",
+        bookmaker=Bookmaker("mozzart", "Mozzart"),
+        market=MARKET,
+        outcome="1",
+        odds=Decimal("2.15"),
+        observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+    )
+
+    repository.save(snapshot)
+    repository.save(snapshot)
+
+    rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
+    assert len(rows) == 1
+
+
+def test_saving_a_changed_odds_value_at_the_same_timestamp_is_still_deduped():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+
+    observed_at = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MARKET,
+            outcome="1",
+            odds=Decimal("2.15"),
+            observed_at=observed_at,
+        )
+    )
+    # Same identity (event/bookmaker/market/outcome/observed_at) but a
+    # different odds value -- this is what a duplicated/retried collector
+    # payload for the same poll would look like, and must not create a
+    # second row.
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MARKET,
+            outcome="1",
+            odds=Decimal("2.20"),
+            observed_at=observed_at,
+        )
+    )
+
+    rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
+    assert len(rows) == 1
+    assert Decimal(rows[0]["odds"]) == Decimal("2.15")
+
+
 def test_finds_all_snapshots_for_event():
     connection = create_test_connection()
     repository = OddsRepository(connection)

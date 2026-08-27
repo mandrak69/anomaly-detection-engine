@@ -13,6 +13,7 @@ import sqlite3
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "dirty_odds_sample.json"
 
@@ -40,12 +41,14 @@ def test_ingestion_rejects_each_kind_of_dirty_record_but_keeps_the_valid_one():
 
     odds_repository = OddsRepository(connection)
     collector_run_repository = CollectorRunRepository(connection)
+    raw_payload_repository = RawPayloadRepository(connection)
 
     service = OddsIngestionService(
         collector=JsonOddsCollector(FIXTURE_PATH),
         matcher=build_matcher(),
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
+        raw_payload_repository=raw_payload_repository,
     )
 
     run = service.run()
@@ -61,3 +64,12 @@ def test_ingestion_rejects_each_kind_of_dirty_record_but_keeps_the_valid_one():
     snapshots = odds_repository.find_by_event("event-001")
     assert len(snapshots) == 3
     assert {snapshot.bookmaker.name for snapshot in snapshots} == {"Mozzart"}
+
+    raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
+    assert len(raw_payloads) == 5
+
+    reasons = {p.source: p.rejection_reason for p in raw_payloads if not p.accepted}
+    assert reasons["MaxBet"].startswith("structural:")
+    assert reasons["Soccer"].startswith("semantic:")
+    assert reasons["BadOdds"].startswith("semantic:")
+    assert reasons["GhostBook"].startswith("identity:")
