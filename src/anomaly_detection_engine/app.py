@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -5,13 +6,16 @@ from pathlib import Path
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
+from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import (
     DEFAULT_MARKET,
     JsonOddsCollector,
 )
+from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiCollector
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.event import Event, Team
+from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
@@ -38,6 +42,27 @@ DEMO_FRESHNESS_POLICY = FreshnessPolicy(
 )
 
 
+class _ReplayCollector(OddsCollector):
+    """Replays an already-collected batch instead of hitting the network.
+
+    Used for the live-source demo path below, which has to collect once
+    up front to discover events before a matcher can be built -- this lets
+    that same batch be handed to OddsIngestionService without a second,
+    credit-consuming API call.
+    """
+
+    def __init__(self, source: str, raw_events: list[RawEventOdds]) -> None:
+        self._source = source
+        self._raw_events = raw_events
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def collect(self) -> list[RawEventOdds]:
+        return self._raw_events
+
+
 def build_demo_events() -> list[Event]:
     return [
         Event(
@@ -59,10 +84,44 @@ def build_demo_events() -> list[Event]:
     ]
 
 
-def main() -> None:
+def build_events_from_raw(raw_events: list[RawEventOdds]) -> list[Event]:
+    """Derives canonical events straight from a collected batch.
+
+    Only meaningful for the live-source demo path: there is no real
+    fixtures/event catalog yet (see architecture.md's Matching Layer for
+    what a real deployment would resolve against instead), so this is a
+    stand-in that trusts the source's own team names as canonical.
+    """
+    events: dict[tuple[str, str], Event] = {}
+    for raw in raw_events:
+        key = (raw.home_team, raw.away_team)
+        if key not in events:
+            index = len(events) + 1
+            events[key] = Event(
+                id=f"event-{index:03d}",
+                sport=raw.sport,
+                league=raw.league,
+                home_team=Team(f"home-{index}", raw.home_team),
+                away_team=Team(f"away-{index}", raw.away_team),
+                start_time=raw.start_time,
+            )
+    return list(events.values())
+
+
+def build_collector_and_events() -> tuple[OddsCollector, list[Event]]:
+    if os.environ.get("ODDS_SOURCE") == "the-odds-api":
+        sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
+        live_collector = TheOddsApiCollector(sport_key)
+        raw_events = live_collector.collect()
+        events = build_events_from_raw(raw_events)
+        return _ReplayCollector(live_collector.source, raw_events), events
+
     project_root = Path(__file__).resolve().parents[2]
     sample_path = project_root / "data" / "samples" / "odds_sample.json"
+    return JsonOddsCollector(sample_path), build_demo_events()
 
+
+def main() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     initialize_database(connection)
@@ -71,7 +130,8 @@ def main() -> None:
     collector_run_repository = CollectorRunRepository(connection)
     raw_payload_repository = RawPayloadRepository(connection)
 
-    events = build_demo_events()
+    collector, events = build_collector_and_events()
+    print(f"Source: {collector.source} ({len(events)} events)")
 
     canonical_names = {
         event.home_team.canonical_name
@@ -85,7 +145,7 @@ def main() -> None:
     matcher = EventMatcher(events, normalizer)
 
     service = OddsIngestionService(
-        collector=JsonOddsCollector(sample_path),
+        collector=collector,
         matcher=matcher,
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
