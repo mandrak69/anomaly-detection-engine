@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -9,6 +10,8 @@ from typing import Callable
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import DEFAULT_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.the-odds-api.com/v4"
 API_KEY_ENV_VAR = "ODDS_API_KEY"
@@ -63,6 +66,11 @@ class TheOddsApiCollector(OddsCollector):
             f"?apiKey={self._api_key}&regions={self._regions}"
             f"&markets=h2h&oddsFormat=decimal&dateFormat=iso"
         )
+        logger.info(
+            "the_odds_api.request",
+            extra={"sport_key": self._sport_key, "regions": self._regions},
+        )
+
         events = json.loads(self._fetch(url), parse_float=Decimal)
 
         observed_at = datetime.now(timezone.utc)
@@ -98,6 +106,15 @@ class TheOddsApiCollector(OddsCollector):
                         source_timestamp=source_timestamp,
                     )
                 )
+
+        logger.info(
+            "the_odds_api.response",
+            extra={
+                "sport_key": self._sport_key,
+                "events_returned": len(events),
+                "raw_records_produced": len(result),
+            },
+        )
 
         return result
 

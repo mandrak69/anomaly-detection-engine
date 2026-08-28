@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -6,6 +7,8 @@ from pathlib import Path
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
+
+logger = logging.getLogger(__name__)
 
 # Current MVP scope (see README) is limited to pre-match full-time 1X2 markets,
 # and the sample/source payloads do not carry explicit market metadata yet.
@@ -50,5 +53,10 @@ class JsonOddsCollector(OddsCollector):
                     },
                 )
             )
+
+        logger.info(
+            "json_collector.read",
+            extra={"path": str(self.path), "records_produced": len(result)},
+        )
 
         return result

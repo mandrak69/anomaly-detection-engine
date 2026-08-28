@@ -110,6 +110,20 @@ def test_uses_api_key_from_environment_variable(monkeypatch):
     assert collector.collect() == []
 
 
+def test_collect_never_logs_the_api_key(caplog):
+    secret_key = "super-secret-key-value"
+    collector = TheOddsApiCollector(
+        sport_key="soccer_epl",
+        api_key=secret_key,
+        fetch=fetch_stub(SAMPLE_RESPONSE),
+    )
+
+    with caplog.at_level("DEBUG"):
+        collector.collect()
+
+    assert secret_key not in caplog.text
+
+
 def test_http_error_is_wrapped_in_the_odds_api_error():
     collector = TheOddsApiCollector(
         sport_key="soccer_epl", api_key="bad-key"

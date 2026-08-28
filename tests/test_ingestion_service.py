@@ -166,6 +166,41 @@ def test_all_records_rejected_returns_failed_status():
     assert run.records_rejected == 1
 
 
+def test_metrics_are_updated_when_provided():
+    import sqlite3
+
+    from anomaly_detection_engine.observability.metrics import IngestionMetrics
+    from anomaly_detection_engine.storage.collector_run_repository import (
+        CollectorRunRepository,
+    )
+    from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    initialize_database(connection)
+
+    valid = build_raw_event()
+    invalid = build_raw_event(odds={"1": Decimal("0.5"), "X": Decimal("3.0"), "2": Decimal("3.0")})
+
+    metrics = IngestionMetrics()
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=[valid, invalid]),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+        metrics=metrics,
+    )
+
+    service.run()
+
+    snapshot = metrics.snapshot()
+    assert snapshot["total_runs"] == 1
+    assert snapshot["total_accepted"] == 1
+    assert snapshot["total_rejected"] == 1
+    assert snapshot["rejections_by_reason"] == {"semantic": 1}
+
+
 def test_collector_failure_produces_failed_run_with_error_details():
     collector = StubCollector(error=ValueError("source unreachable"))
     service, _, collector_run_repository, _ = build_service(collector)

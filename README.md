@@ -129,6 +129,9 @@ anomaly-detection-engine/
 │       │   └── raw_payload.py
 │       ├── normalization/
 │       │   └── team_normalizer.py
+│       ├── observability/
+│       │   ├── logging_config.py
+│       │   └── metrics.py
 │       ├── storage/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
@@ -440,6 +443,34 @@ SQLite is appropriate for the current phase, while the storage layer is kept iso
 
 ---
 
+## Observability
+
+`OddsIngestionService` and the collectors log structured JSON (one object
+per line) via the standard `logging` module rather than printing directly,
+so ingestion activity is machine-parseable:
+
+```text
+ingestion.run.started
+ingestion.record.rejected   (WARNING, includes the rejection reason)
+ingestion.collector.failed  (ERROR)
+ingestion.run.completed     (INFO; carries the same counts as CollectorRun)
+```
+
+Call `observability.logging_config.configure_logging()` once at process
+start to attach a JSON `StreamHandler` to the `anomaly_detection_engine`
+logger.
+
+`observability.metrics.IngestionMetrics` is a small in-process accumulator
+that a long-lived caller (e.g. a scheduler polling `service.run()`
+periodically) can pass into `OddsIngestionService` to track totals across
+runs -- accepted/rejected counts, run status counts, and rejection reasons
+grouped by validation stage. It has no exporter built in; `snapshot()`
+returns a plain dict, which a real deployment would ship to whatever
+backend it uses (StatsD, Prometheus, CloudWatch, ...) rather than this
+project taking a dependency on one.
+
+---
+
 ## Data Quality Principles
 
 The engine must distinguish:
@@ -520,6 +551,8 @@ rate limiting
 [x] Odds snapshot idempotency (dedupe on save)
 [x] Freshness check wired into demo analysis
 [x] First real external source (TheOddsApiCollector)
+[x] Structured JSON logging (observability.logging_config)
+[x] In-process ingestion metrics (observability.metrics.IngestionMetrics)
 [x] Dirty-data test fixtures
 ```
 
@@ -539,7 +572,7 @@ rate limiting
 [x] Add bookmaker-lag detector
 [x] Add first real external source (TheOddsApiCollector)
 [x] Add dirty-data fixtures
-[ ] Add structured logging and metrics
+[x] Add structured logging and metrics
 [ ] Add reporting/dashboard layer
 ```
 

@@ -17,6 +17,8 @@ from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.observability.logging_config import configure_logging
+from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -122,6 +124,8 @@ def build_collector_and_events() -> tuple[OddsCollector, list[Event]]:
 
 
 def main() -> None:
+    configure_logging()
+
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     initialize_database(connection)
@@ -144,6 +148,8 @@ def main() -> None:
     normalizer = TeamNormalizer(canonical_names, ALIASES, fuzzy_threshold=80)
     matcher = EventMatcher(events, normalizer)
 
+    metrics = IngestionMetrics()
+
     service = OddsIngestionService(
         collector=collector,
         matcher=matcher,
@@ -151,6 +157,7 @@ def main() -> None:
         collector_run_repository=collector_run_repository,
         raw_payload_repository=raw_payload_repository,
         collector_version="0.1.0",
+        metrics=metrics,
     )
 
     run = service.run()
@@ -193,6 +200,9 @@ def main() -> None:
         print(f"Arbitrage margin: {result.margin:.4f}")
         print(f"Surebet: {'YES' if result.is_surebet else 'NO'}")
         print(f"Theoretical profit: {result.theoretical_profit_percent:.2f}%")
+
+    print("\n" + "-" * 72)
+    print(f"Metrics: {metrics.snapshot()}")
 
 
 if __name__ == "__main__":
