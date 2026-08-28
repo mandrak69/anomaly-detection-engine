@@ -283,17 +283,28 @@ subscription API key: pass `api_key=` or set the `ODDS_API_KEY` environment
 variable (never hardcode a real key in source or commit it).
 
 `MozzartFileCollector` reads a manually-captured Mozzart response (their
-internal `/live/matches`-shaped JSON) from a local directory -- it does
+internal `/live/matches`-shaped JSON) from a fixed drop file -- it does
 not fetch anything itself. mozzartbet.com sits behind Cloudflare
 bot-management (`cf_clearance`/`__cf_bm` cookies observed on the captured
 request), so an automated fetch would mean scripting around that
 protection, which this project won't do. The capture step is manual: save
-the response body from your own browser session (DevTools -> Network) as
-a `.json` file into a directory; `collect()` picks whichever file has the
-newest modification time and maps its `"Konačan ishod"` (final result)
-odds group onto `1`/`X`/`2`. Run the app again after dropping in a newer
-capture and the movement report picks up the difference, same as the two
-JSON demo polls do.
+the response body from your own browser session (DevTools -> Network) to
+`<capture_dir>/live.json`, overwriting the same filename each time you
+capture a new reading. Each `collect()` call:
+
+```text
+no file waiting     -> returns [] (not an error, just nothing new yet)
+file present         -> parses it, maps "Konačan ishod" onto 1/X/2, then
+                         moves it into <capture_dir>/history/ under a
+                         timestamped name (drop slot freed, raw capture
+                         kept for traceability/replay)
+parse failure         -> raises (surfaces as a FAILED CollectorRun) and
+                         leaves the file in place instead of archiving a
+                         capture that couldn't be read
+```
+
+Run the app again after dropping in a newer capture and the movement
+report picks up the difference, same as the two JSON demo polls do.
 
 Future implementations may include:
 

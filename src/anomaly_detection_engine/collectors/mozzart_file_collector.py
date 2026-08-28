@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -15,18 +16,26 @@ _SPORT_NAME_MAP = {"Fudbal": "football"}
 
 
 class MozzartFileCollector(OddsCollector):
-    """Reads a manually-captured Mozzart response from disk; fetches nothing itself.
+    """Watches a fixed drop-file for a manually-captured Mozzart response.
 
     mozzartbet.com sits behind Cloudflare bot-management (cf_clearance /
     __cf_bm cookies observed on the captured request) -- an automated
     fetch here would mean scripting around that protection, which this
     project won't do. The capture step stays manual: in your own browser,
     open DevTools -> Network, find the matches request (e.g.
-    /live/matches), save its response body as a .json file into
-    `directory`. Each collect() call picks whichever file in that
-    directory has the newest modification time and treats it as the
-    current snapshot -- drop a new capture in periodically and repeated
-    app runs will naturally build up history for the movement report.
+    /live/matches), and save its response body to `capture_dir /
+    filename` (default "live.json"), overwriting the same file each time
+    you capture a new reading.
+
+    Each collect() call:
+      - returns [] if the drop file isn't there yet (nothing new to
+        report this cycle -- not an error);
+      - otherwise parses it, and moves it into `capture_dir/history/`
+        under a timestamped name so the drop slot is free for the next
+        capture and every raw reading is kept for traceability/replay.
+        A parse failure leaves the file in place (not archived) so it
+        stays visible for you to inspect instead of silently vanishing
+        into history.
 
     Maps the "Konačan ishod" (final result / 1X2) odds group; other
     markets (next goal, totals, ...) in the same response are ignored.
@@ -36,24 +45,33 @@ class MozzartFileCollector(OddsCollector):
 
     def __init__(
         self,
-        directory: Path,
+        capture_dir: Path,
         *,
+        filename: str = "live.json",
+        history_dirname: str = "history",
         source_name: str = "Mozzart",
-        pattern: str = "*.json",
     ) -> None:
-        self.directory = directory
+        self.capture_dir = capture_dir
+        self._filename = filename
+        self._history_dir = capture_dir / history_dirname
         self._source_name = source_name
-        self._pattern = pattern
 
     @property
     def source(self) -> str:
-        return f"mozzart-file:{self.directory.name}"
+        return f"mozzart-file:{self.capture_dir.name}"
 
     def collect(self) -> list[RawEventOdds]:
-        path = self._latest_file()
-        observed_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        drop_path = self.capture_dir / self._filename
+        if not drop_path.exists():
+            logger.info(
+                "mozzart_file_collector.no_new_capture",
+                extra={"path": str(drop_path)},
+            )
+            return []
 
-        data = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal)
+        observed_at = datetime.fromtimestamp(drop_path.stat().st_mtime, tz=timezone.utc)
+
+        data = json.loads(drop_path.read_text(encoding="utf-8"), parse_float=Decimal)
         matches = data.get("items", [])
 
         result = [
@@ -62,10 +80,13 @@ class MozzartFileCollector(OddsCollector):
             if raw is not None
         ]
 
+        archived_path = self._archive(drop_path, observed_at)
+
         logger.info(
             "mozzart_file_collector.read",
             extra={
-                "path": str(path),
+                "path": str(drop_path),
+                "archived_to": str(archived_path),
                 "matches_in_file": len(matches),
                 "records_produced": len(result),
             },
@@ -73,16 +94,18 @@ class MozzartFileCollector(OddsCollector):
 
         return result
 
-    def _latest_file(self) -> Path:
-        candidates = sorted(
-            self.directory.glob(self._pattern),
-            key=lambda candidate: candidate.stat().st_mtime,
-        )
-        if not candidates:
-            raise FileNotFoundError(
-                f"No files matching {self._pattern!r} in {self.directory}"
-            )
-        return candidates[-1]
+    def _archive(self, path: Path, observed_at: datetime) -> Path:
+        # Timestamp alone isn't a reliable uniqueness guarantee -- captures
+        # dropped in rapid succession can land within the same filesystem
+        # mtime tick, which would make a second archive silently overwrite
+        # the first via Path.replace(). The short random suffix guarantees
+        # no collision regardless of clock resolution.
+        self._history_dir.mkdir(parents=True, exist_ok=True)
+        stamp = observed_at.strftime("%Y%m%dT%H%M%SZ")
+        unique = uuid.uuid4().hex[:8]
+        archived_path = self._history_dir / f"{path.stem}_{stamp}_{unique}{path.suffix}"
+        path.replace(archived_path)
+        return archived_path
 
     def _map_match(self, match: dict, observed_at: datetime) -> RawEventOdds | None:
         sport = _SPORT_NAME_MAP.get(match.get("sport", {}).get("name", ""))
