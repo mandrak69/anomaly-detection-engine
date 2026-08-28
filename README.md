@@ -439,8 +439,10 @@ threshold so ordinary bookmaker-margin spread doesn't flood it:
 ```text
 SUREBET     a real arbitrage (calculate_arbitrage.is_surebet), kept only
             if the theoretical profit clears min_surebet_profit_percent
-            (default 0.1%) -- a real but tiny margin is still noise once
-            execution/rounding risk is accounted for.
+            (default 1.0%). A mathematically real margin of 0.1-0.2% is
+            still noise in practice: odds can move before all legs are
+            placed, stakes have to be rounded, and bookmakers actively
+            limit accounts suspected of arbitrage betting.
 
 VALUE_GAP   one bookmaker pricing an outcome well above the consensus of
             its peers (detect_outliers, favorable direction only -- an
@@ -450,7 +452,22 @@ VALUE_GAP   one bookmaker pricing an outcome well above the consensus of
             lower bar just flags routine price shopping.
 ```
 
-Example output:
+Both thresholds are overridable per call, and `app.py`'s demo reads them
+from `MIN_SUREBET_PROFIT_PERCENT` / `MIN_VALUE_GAP_PERCENT` environment
+variables so they can be tuned without editing code:
+
+```bash
+MIN_SUREBET_PROFIT_PERCENT=0.1 python -m anomaly_detection_engine.app
+```
+
+Example output (default thresholds -- the sample dataset's ~0.12% margin
+does not clear the 1.0% bar and correctly produces no rows):
+
+```text
+No opportunities above threshold.
+```
+
+Lowering `MIN_SUREBET_PROFIT_PERCENT` to `0.1` surfaces it:
 
 ```text
 SIGNAL     EVENT                            OUT  BOOKMAKER          ODDS   EDGE%

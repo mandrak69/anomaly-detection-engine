@@ -29,7 +29,7 @@ def build_opportunity_report(
     odds_repository: OddsRepository,
     market: MarketIdentity,
     *,
-    min_surebet_profit_percent: Decimal = Decimal("0.1"),
+    min_surebet_profit_percent: Decimal = Decimal("1.0"),
     min_value_gap_percent: Decimal = Decimal("15.0"),
     min_value_gap_bookmakers: int = 3,
 ) -> list[OpportunityRow]:
@@ -40,8 +40,11 @@ def build_opportunity_report(
 
     SUREBET: an actual arbitrage (calculate_arbitrage.is_surebet), but
     only kept if the theoretical profit clears min_surebet_profit_percent
-    -- a mathematically-real margin of 0.01% is still noise in practice
-    (execution/rounding risk eats it).
+    (default 1.0%). A mathematically real margin of 0.1-0.2% is still
+    noise in practice: odds can move before all legs are placed, stakes
+    have to be rounded, and bookmakers actively limit accounts they
+    suspect of arbitrage betting -- all of which can eat a thin margin
+    before it's ever realized.
 
     VALUE_GAP: one bookmaker pricing an outcome well above the consensus
     of its peers (detect_outliers, restricted to the favorable direction

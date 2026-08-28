@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
@@ -208,7 +209,13 @@ def main() -> None:
     print("\n" + "=" * 72)
     print("OPPORTUNITIES (surebets and notable best-odds gaps only)")
     print("=" * 72)
-    opportunity_rows = build_opportunity_report(events, odds_repository, DEFAULT_MARKET)
+    opportunity_rows = build_opportunity_report(
+        events,
+        odds_repository,
+        DEFAULT_MARKET,
+        min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
+        min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
+    )
     print(render_opportunity_report(opportunity_rows))
 
     print("\n" + "-" * 72)

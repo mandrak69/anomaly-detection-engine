@@ -120,6 +120,32 @@ def test_report_excludes_noise_below_thresholds():
     assert rows == []
 
 
+def test_default_threshold_excludes_a_thin_real_world_margin():
+    # Same shape as the actual demo dataset (Man Utd vs Liverpool): a real
+    # ~0.12% surebet. Mathematically a genuine opportunity, but too thin
+    # to survive odds movement/stake rounding/bookmaker limits in
+    # practice -- the default threshold (1.0%) should filter it out,
+    # while an explicit lower threshold still surfaces it on request.
+    repository = make_repository()
+    event = make_event("e5", "Man Utd", "Liverpool")
+
+    save(repository, "e5", "Mozzart", "1", "2.15")
+    save(repository, "e5", "MaxBet", "X", "3.85")
+    save(repository, "e5", "Soccer", "2", "3.65")
+
+    default_rows = build_opportunity_report([event], repository, MARKET)
+    assert default_rows == []
+
+    lenient_rows = build_opportunity_report(
+        [event],
+        repository,
+        MARKET,
+        min_surebet_profit_percent=Decimal("0.1"),
+    )
+    surebet_rows = [r for r in lenient_rows if r.signal == SUREBET]
+    assert len(surebet_rows) == 3
+
+
 def test_rows_sorted_by_edge_descending():
     # Two separate events, each with exactly one value-gap outcome and two
     # tight (non-signal) outcomes, sized so neither accidentally forms a
