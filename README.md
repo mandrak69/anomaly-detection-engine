@@ -694,27 +694,38 @@ rate limiting
 [x] Add dirty-data fixtures
 [x] Add structured logging and metrics
 [x] Add reporting layer (opportunity report; a dashboard/web UI remains open)
+[x] Add odds-movement report (reporting.movement_report)
+[x] Add a manual-capture collector for a source that can't be fetched automatically (MozzartFileCollector)
+```
+
+Everything above is done. Genuinely open next:
+
+```text
+[ ] Persistent event/fixtures catalog (see Next Architectural Milestone below)
+[ ] Web dashboard (reports are text-only so far)
+[ ] Source-specific validation rules
+[ ] Wire MozzartFileCollector into app.py's demo (currently standalone)
+[ ] Database growth / retention policy for high-frequency polling
+[ ] Market lifecycle states (OPEN/SUSPENDED/CLOSED)
 ```
 
 ---
 
 ## Next Architectural Milestone
 
-The next major milestone is an orchestration layer that coordinates:
+**Done:** `OddsIngestionService` coordinates collect → validate → match →
+persist → record `CollectorRun`, keeping that orchestration logic out of
+the analysis modules. Freshness/analyze/report stay outside it, run by
+the caller (`app.py`) against the repository's stored snapshots.
 
-```text
-collect
-→ validate
-→ normalize
-→ match
-→ create snapshot
-→ persist
-→ evaluate freshness
-→ analyze
-→ record run result
-```
-
-This keeps `app.py` small and prevents source-specific or orchestration logic from leaking into analysis modules.
+The next milestone is a **persistent event/fixtures catalog**. Every
+demo path (`build_demo_events()`, and `build_events_from_raw()` for the
+live source) still constructs canonical `Event` objects in memory at
+process start rather than resolving against a maintained, persisted
+list -- nothing survives a restart, and a source can only ever match
+events it happens to already know about that run. See
+`docs/architecture.md`'s Next Architectural Step for the same point in
+more detail.
 
 ---
 
