@@ -20,6 +20,10 @@ from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
+from anomaly_detection_engine.reporting.movement_report import (
+    build_movement_report,
+    render_movement_report,
+)
 from anomaly_detection_engine.reporting.opportunity_report import (
     build_opportunity_report,
     render_opportunity_report,
@@ -217,6 +221,16 @@ def main() -> None:
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
     )
     print(render_opportunity_report(opportunity_rows))
+
+    print("\n" + "=" * 72)
+    print("ODDS MOVEMENT (significant change between the last two readings)")
+    print("=" * 72)
+    movement_rows = build_movement_report(events, odds_repository, DEFAULT_MARKET)
+    print(render_movement_report(movement_rows))
+    print(
+        "(needs at least two ingestion runs per event/bookmaker to have "
+        "history to compare -- a single run here will show none)"
+    )
 
     print("\n" + "-" * 72)
     print(f"Metrics: {metrics.snapshot()}")

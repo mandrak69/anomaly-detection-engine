@@ -133,6 +133,7 @@ anomaly-detection-engine/
 │       │   ├── logging_config.py
 │       │   └── metrics.py
 │       ├── reporting/
+│       │   ├── movement_report.py
 │       │   └── opportunity_report.py
 │       ├── storage/
 │       │   ├── database.py
@@ -477,7 +478,35 @@ SUREBET    Manchester United vs Liverpool   2    Soccer             3.65   0.12%
 SUREBET    Manchester United vs Liverpool   X    MaxBet             3.85   0.12%
 ```
 
-A full web dashboard is not built yet -- this is a text report over the
+**SUREBET and VALUE_GAP are not the same kind of signal.** SUREBET is
+risk-free by construction: hedge all three outcomes across bookmakers and
+you profit no matter what happens. VALUE_GAP is a single, directional bet
+with real risk -- it just means one bookmaker's price for one outcome
+looks better than its peers' right now, which can mean the bookmaker is
+slow to update, or it can mean their line is simply wrong (a data-quality
+issue, not a real edge). The report doesn't yet distinguish those two
+cases; treat a large VALUE_GAP as "worth a manual look", not as instant
+free money the way a SUREBET is.
+
+`reporting.movement_report` is a separate report over the same repository
+data: it flags outcomes whose odds moved sharply between their **last two
+readings** for the same bookmaker (`analysis.movement_detector`, applied
+across every event/bookmaker/outcome instead of one pair you'd pick by
+hand). Needs at least two ingestion runs to have anything to compare --
+with the demo's single run it correctly shows nothing.
+
+```text
+EVENT                            OUT  BOOKMAKER          FROM     TO  CHANGE%  ELAPSED
+----------------------------------------------------------------------------------------
+Manchester United vs Liverpool   1    Mozzart            2.15   1.08  -49.77%    4m00s
+```
+
+Default threshold is 10% within a 24-hour window between the two readings
+(much wider than `detect_rapid_movement`'s own 5-minute default, since
+this report cares about any sharp move between successive polls, not
+specifically a *fast* one).
+
+A full web dashboard is not built yet -- these are text reports over the
 same repository data a dashboard would eventually read from.
 
 ---
@@ -611,6 +640,7 @@ rate limiting
 [x] Structured JSON logging (observability.logging_config)
 [x] In-process ingestion metrics (observability.metrics.IngestionMetrics)
 [x] Noise-filtered opportunity report (reporting.opportunity_report)
+[x] Odds movement report (reporting.movement_report)
 [x] Dirty-data test fixtures
 ```
 
