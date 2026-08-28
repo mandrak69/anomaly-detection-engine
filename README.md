@@ -132,6 +132,8 @@ anomaly-detection-engine/
 │       ├── observability/
 │       │   ├── logging_config.py
 │       │   └── metrics.py
+│       ├── reporting/
+│       │   └── opportunity_report.py
 │       ├── storage/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
@@ -425,6 +427,44 @@ The detector evaluates percentage change and elapsed time.
 
 ---
 
+## Reporting
+
+`reporting.opportunity_report` turns the analysis modules into one
+noise-filtered, at-a-glance table: who (bookmaker), where (event/outcome),
+how much (odds and edge %), sorted by edge descending.
+
+Two signal types, each with its own "is this worth a line in the report"
+threshold so ordinary bookmaker-margin spread doesn't flood it:
+
+```text
+SUREBET     a real arbitrage (calculate_arbitrage.is_surebet), kept only
+            if the theoretical profit clears min_surebet_profit_percent
+            (default 0.1%) -- a real but tiny margin is still noise once
+            execution/rounding risk is accounted for.
+
+VALUE_GAP   one bookmaker pricing an outcome well above the consensus of
+            its peers (detect_outliers, favorable direction only -- an
+            outlier priced below consensus is a bad price, not an
+            opportunity). Default threshold is 15%, matching
+            detect_outliers itself, since with only 3-4 bookmakers a
+            lower bar just flags routine price shopping.
+```
+
+Example output:
+
+```text
+SIGNAL     EVENT                            OUT  BOOKMAKER          ODDS   EDGE%
+--------------------------------------------------------------------------------
+SUREBET    Manchester United vs Liverpool   1    Mozzart            2.15   0.12%
+SUREBET    Manchester United vs Liverpool   2    Soccer             3.65   0.12%
+SUREBET    Manchester United vs Liverpool   X    MaxBet             3.85   0.12%
+```
+
+A full web dashboard is not built yet -- this is a text report over the
+same repository data a dashboard would eventually read from.
+
+---
+
 ## Storage
 
 The PoC currently uses SQLite.
@@ -553,6 +593,7 @@ rate limiting
 [x] First real external source (TheOddsApiCollector)
 [x] Structured JSON logging (observability.logging_config)
 [x] In-process ingestion metrics (observability.metrics.IngestionMetrics)
+[x] Noise-filtered opportunity report (reporting.opportunity_report)
 [x] Dirty-data test fixtures
 ```
 
@@ -573,7 +614,7 @@ rate limiting
 [x] Add first real external source (TheOddsApiCollector)
 [x] Add dirty-data fixtures
 [x] Add structured logging and metrics
-[ ] Add reporting/dashboard layer
+[x] Add reporting layer (opportunity report; a dashboard/web UI remains open)
 ```
 
 ---

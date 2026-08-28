@@ -19,6 +19,10 @@ from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
+from anomaly_detection_engine.reporting.opportunity_report import (
+    build_opportunity_report,
+    render_opportunity_report,
+)
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -200,6 +204,12 @@ def main() -> None:
         print(f"Arbitrage margin: {result.margin:.4f}")
         print(f"Surebet: {'YES' if result.is_surebet else 'NO'}")
         print(f"Theoretical profit: {result.theoretical_profit_percent:.2f}%")
+
+    print("\n" + "=" * 72)
+    print("OPPORTUNITIES (surebets and notable best-odds gaps only)")
+    print("=" * 72)
+    opportunity_rows = build_opportunity_report(events, odds_repository, DEFAULT_MARKET)
+    print(render_opportunity_report(opportunity_rows))
 
     print("\n" + "-" * 72)
     print(f"Metrics: {metrics.snapshot()}")
