@@ -1,0 +1,86 @@
+[
+  {
+    "bookmaker": "Mozzart",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Man Utd",
+    "away_team": "Liv",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:04:00+00:00",
+    "odds": {
+      "1": 1.08,
+      "X": 3.5,
+      "2": 3.15
+    }
+  },
+  {
+    "bookmaker": "MaxBet",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Manchester United",
+    "away_team": "Liverpool FC",
+    "start_time": "2026-09-01T20:05:00+00:00",
+    "observed_at": "2026-08-27T10:04:30+00:00",
+    "odds": {
+      "1": 1.97,
+      "X": 3.8,
+      "2": 3.15
+    }
+  },
+  {
+    "bookmaker": "Soccer",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Man. United",
+    "away_team": "Liverpool",
+    "start_time": "2026-09-01T20:00:00+00:00",
+    "observed_at": "2026-08-27T10:05:00+00:00",
+    "odds": {
+      "1": 2.02,
+      "X": 3.28,
+      "2": 3.6
+    }
+  },
+  {
+    "bookmaker": "Mozzart",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Real Madrid",
+    "away_team": "FCB",
+    "start_time": "2026-09-02T21:00:00+00:00",
+    "observed_at": "2026-08-27T10:04:00+00:00",
+    "odds": {
+      "1": 1.92,
+      "X": 3.55,
+      "2": 3.25
+    }
+  },
+  {
+    "bookmaker": "MaxBet",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Real Madrid CF",
+    "away_team": "Barcelona",
+    "start_time": "2026-09-02T21:10:00+00:00",
+    "observed_at": "2026-08-27T10:04:30+00:00",
+    "odds": {
+      "1": 2.05,
+      "X": 3.65,
+      "2": 3.15
+    }
+  },
+  {
+    "bookmaker": "Soccer",
+    "sport": "football",
+    "league": "demo-league",
+    "home_team": "Real Madrid",
+    "away_team": "Barca",
+    "start_time": "2026-09-02T21:00:00+00:00",
+    "observed_at": "2026-08-27T10:05:00+00:00",
+    "odds": {
+      "1": 1.88,
+      "X": 3.42,
+      "2": 3.7
+    }
+  }
+]

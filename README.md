@@ -492,8 +492,14 @@ free money the way a SUREBET is.
 data: it flags outcomes whose odds moved sharply between their **last two
 readings** for the same bookmaker (`analysis.movement_detector`, applied
 across every event/bookmaker/outcome instead of one pair you'd pick by
-hand). Needs at least two ingestion runs to have anything to compare --
-with the demo's single run it correctly shows nothing.
+hand). Needs at least two ingestion runs to have anything to compare, so
+the JSON demo path in `app.py` runs two polls (`odds_sample.json`, then
+`odds_sample_poll2.json` -- a second reading a few minutes later with
+mostly small moves and one bookmaker's price nearly halved) instead of
+one, so this report has something to show on a single `python -m
+anomaly_detection_engine.app` run. The live `the-odds-api` source stays
+single-poll (a second real call seconds later would double API credit
+usage without the market necessarily having moved).
 
 ```text
 EVENT                            OUT  BOOKMAKER          FROM     TO  CHANGE%  ELAPSED

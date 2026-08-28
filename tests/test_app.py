@@ -39,12 +39,15 @@ def test_build_events_from_raw_deduplicates_by_matchup():
     }
 
 
-def test_default_source_uses_json_collector(monkeypatch):
+def test_default_source_uses_two_json_collector_polls(monkeypatch):
     monkeypatch.delenv("ODDS_SOURCE", raising=False)
 
-    collector, events = app.build_collector_and_events()
+    collectors, events = app.build_collectors_and_events()
 
-    assert isinstance(collector, JsonOddsCollector)
+    assert len(collectors) == 2
+    assert all(isinstance(collector, JsonOddsCollector) for collector in collectors)
+    assert collectors[0].path.name == "odds_sample.json"
+    assert collectors[1].path.name == "odds_sample_poll2.json"
     assert len(events) == 2
 
 
@@ -67,8 +70,10 @@ def test_the_odds_api_source_replays_a_single_collected_batch(monkeypatch):
 
     monkeypatch.setattr(app, "TheOddsApiCollector", FakeLiveCollector)
 
-    collector, events = app.build_collector_and_events()
+    collectors, events = app.build_collectors_and_events()
 
+    assert len(collectors) == 1
+    collector = collectors[0]
     assert collector.source == "the-odds-api:soccer_epl"
     assert len(events) == 1
     # Calling collect() again must not hit the (fake) live collector a

@@ -119,17 +119,29 @@ def build_events_from_raw(raw_events: list[RawEventOdds]) -> list[Event]:
     return list(events.values())
 
 
-def build_collector_and_events() -> tuple[OddsCollector, list[Event]]:
+def build_collectors_and_events() -> tuple[list[OddsCollector], list[Event]]:
+    """Returns the poll cycle(s) to run and the canonical events to match against.
+
+    The JSON demo path runs two polls against two fixed sample files (a
+    second one with moved odds) so the movement report has something to
+    compare on a single script run, instead of only being demonstrable
+    across separate invocations. The live path stays single-poll: two
+    real API calls a few seconds apart would double credit usage without
+    a real market having necessarily moved in that time.
+    """
     if os.environ.get("ODDS_SOURCE") == "the-odds-api":
         sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
         live_collector = TheOddsApiCollector(sport_key)
         raw_events = live_collector.collect()
         events = build_events_from_raw(raw_events)
-        return _ReplayCollector(live_collector.source, raw_events), events
+        return [_ReplayCollector(live_collector.source, raw_events)], events
 
-    project_root = Path(__file__).resolve().parents[2]
-    sample_path = project_root / "data" / "samples" / "odds_sample.json"
-    return JsonOddsCollector(sample_path), build_demo_events()
+    samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
+    collectors = [
+        JsonOddsCollector(samples_dir / "odds_sample.json"),
+        JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
+    ]
+    return collectors, build_demo_events()
 
 
 def main() -> None:
@@ -143,8 +155,8 @@ def main() -> None:
     collector_run_repository = CollectorRunRepository(connection)
     raw_payload_repository = RawPayloadRepository(connection)
 
-    collector, events = build_collector_and_events()
-    print(f"Source: {collector.source} ({len(events)} events)")
+    collectors, events = build_collectors_and_events()
+    print(f"Source: {collectors[0].source} ({len(events)} events, {len(collectors)} poll(s))")
 
     canonical_names = {
         event.home_team.canonical_name
@@ -159,21 +171,21 @@ def main() -> None:
 
     metrics = IngestionMetrics()
 
-    service = OddsIngestionService(
-        collector=collector,
-        matcher=matcher,
-        odds_repository=odds_repository,
-        collector_run_repository=collector_run_repository,
-        raw_payload_repository=raw_payload_repository,
-        collector_version="0.1.0",
-        metrics=metrics,
-    )
-
-    run = service.run()
-    print(
-        f"Collector run {run.id}: {run.status.value} "
-        f"({run.records_accepted}/{run.records_received} accepted)"
-    )
+    for poll_number, collector in enumerate(collectors, start=1):
+        service = OddsIngestionService(
+            collector=collector,
+            matcher=matcher,
+            odds_repository=odds_repository,
+            collector_run_repository=collector_run_repository,
+            raw_payload_repository=raw_payload_repository,
+            collector_version="0.1.0",
+            metrics=metrics,
+        )
+        run = service.run()
+        print(
+            f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
+            f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
+        )
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
@@ -227,10 +239,6 @@ def main() -> None:
     print("=" * 72)
     movement_rows = build_movement_report(events, odds_repository, DEFAULT_MARKET)
     print(render_movement_report(movement_rows))
-    print(
-        "(needs at least two ingestion runs per event/bookmaker to have "
-        "history to compare -- a single run here will show none)"
-    )
 
     print("\n" + "-" * 72)
     print(f"Metrics: {metrics.snapshot()}")
