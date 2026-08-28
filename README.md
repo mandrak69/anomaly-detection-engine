@@ -114,7 +114,8 @@ anomaly-detection-engine/
 │       │   └── outlier_detector.py
 │       ├── collectors/
 │       │   ├── base.py
-│       │   └── json_collector.py
+│       │   ├── json_collector.py
+│       │   └── the_odds_api_collector.py
 │       ├── ingestion/
 │       │   └── service.py
 │       ├── matching/
@@ -259,16 +260,23 @@ The project defines a generic `OddsCollector` interface.
 
 Each collector transforms source-specific data into the internal `RawEventOdds` contract.
 
-Current implementation:
+Current implementations:
 
 ```text
 JsonOddsCollector
+TheOddsApiCollector
 ```
+
+`TheOddsApiCollector` talks to https://the-odds-api.com's `/v4/sports/{sport}/odds`
+endpoint (h2h/1X2 markets, decimal odds) and maps bookmaker outcomes onto
+`1`/`X`/`2` by matching outcome names against the event's home/away team
+names, skipping any bookmaker whose line is missing an outcome. It needs a
+subscription API key: pass `api_key=` or set the `ODDS_API_KEY` environment
+variable (never hardcode a real key in source or commit it).
 
 Future implementations may include:
 
 ```text
-TheOddsApiCollector
 MozzartCollector
 MaxBetCollector
 SoccerCollector
@@ -511,6 +519,7 @@ rate limiting
 [x] Raw payload retention (RawPayloadRepository)
 [x] Odds snapshot idempotency (dedupe on save)
 [x] Freshness check wired into demo analysis
+[x] First real external source (TheOddsApiCollector)
 [x] Dirty-data test fixtures
 ```
 
@@ -528,7 +537,7 @@ rate limiting
 [x] Run freshness checks before current-market analysis
 [x] Add outlier detector
 [x] Add bookmaker-lag detector
-[ ] Add first real external source
+[x] Add first real external source (TheOddsApiCollector)
 [x] Add dirty-data fixtures
 [ ] Add structured logging and metrics
 [ ] Add reporting/dashboard layer
