@@ -76,6 +76,35 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_raw_payloads_run
             ON raw_payloads(collector_run_id);
+
+        CREATE TABLE IF NOT EXISTS teams (
+            id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL,
+            sport TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_name_sport
+            ON teams(canonical_name, sport);
+
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            sport TEXT NOT NULL,
+            league TEXT NOT NULL,
+            home_team_id TEXT NOT NULL REFERENCES teams(id),
+            away_team_id TEXT NOT NULL REFERENCES teams(id),
+            start_time TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_events_teams_time
+            ON events(home_team_id, away_team_id, start_time);
+
+        CREATE TABLE IF NOT EXISTS source_team_mappings (
+            source TEXT NOT NULL,
+            sport TEXT NOT NULL,
+            source_team_name TEXT NOT NULL,
+            team_id TEXT NOT NULL REFERENCES teams(id),
+            PRIMARY KEY (source, sport, source_team_name)
+        );
         """
     )
 

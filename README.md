@@ -139,6 +139,7 @@ anomaly-detection-engine/
 │       ├── storage/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
+│       │   ├── fixture_catalog.py
 │       │   ├── odds_repository.py
 │       │   └── raw_payload_repository.py
 │       ├── validation/
@@ -308,12 +309,10 @@ report picks up the difference, same as the two JSON demo polls do.
 
 Set `MOZZART_CAPTURE_DIR=<path>` and `app.py`'s demo picks it up as a
 **supplemental** source alongside whichever primary source (`ODDS_SOURCE`)
-is active -- it's collected in the same cycle and written to the same
-repository, so its odds are compared against everyone else's (best odds,
-opportunity report, movement report all see it). Its match(es) get their
-own canonical event(s), auto-bootstrapped from the capture the same way
-the live `the-odds-api` path does, since there's no fixed catalog entry
-for them:
+is active -- it's collected in the same cycle and matched against the same
+`FixtureCatalog` (see Matching below) as everyone else, so its odds are
+compared against everyone else's (best odds, opportunity report, movement
+report all see it):
 
 ```bash
 MOZZART_CAPTURE_DIR=./mozzart python -m anomaly_detection_engine.app
@@ -323,13 +322,15 @@ Adding another manual-capture source later (MaxBet, Soccer, ...) is the
 same shape: its own env var, its own `FileCollector`, appended in
 `app.py`'s `_supplemental_collectors()` -- no other wiring changes.
 
-One real limitation worth knowing: events are matched by **exact**
-team-name string per source right now. If Mozzart and another active
-source report the *same* real match under differently-spelled team
-names, they become two separate, unrelated canonical events here, not
-one -- so their odds are never compared against each other. Fixing that
-needs a real fixtures catalog (see `docs/architecture.md`'s Next
-Architectural Step); this doesn't attempt it.
+Because matching goes through `FixtureCatalog`, Mozzart and another
+active source reporting the *same* real match under differently-spelled
+team names ("Manchester United" vs a hypothetical "Man Utd" from another
+source) now resolve to **one** shared canonical event once that spelling
+has been seen once (exact/alias/fuzzy match, cached permanently) --
+verified during development: a Mozzart capture reporting the demo's
+"Manchester United vs Liverpool" merged into the same event as the JSON
+demo data, and the opportunity report found a real cross-source surebet
+combining a Mozzart leg with a JSON-demo-bookmaker leg.
 
 Future implementations may include:
 
@@ -381,6 +382,57 @@ Examples:
 - snapshot is fresh enough
 - observations are close enough in time
 - timestamp is not unexpectedly in the future
+
+---
+
+## Matching
+
+Two implementations, both producing an `EventMatchResult(event, confidence, reason)`
+so `OddsIngestionService` can use either interchangeably:
+
+```text
+EventMatcher      fixed, in-memory candidate list -- rejects anything
+                  it doesn't already know (no-event-match,
+                  team-normalization-failed, ambiguous-event)
+FixtureCatalog     persistent, auto-growing -- resolves a never-seen
+                   team or event by creating a canonical row instead of
+                   rejecting it
+```
+
+`app.py`'s demo uses `FixtureCatalog` for every source. It reuses
+`TeamNormalizer` internally (same exact/alias/fuzzy resolution as
+`EventMatcher`), but runs it against the *durable* `teams` table instead
+of a list passed in for one run, and persists every resolution in
+`source_team_mappings` (keyed by `(source, sport, raw_name)`) so it's
+never re-solved later -- that cache is what lets two different sources
+reporting the same real match under different team-name spellings end up
+sharing one canonical event, once that particular spelling has been
+resolved once, whether just now (exact/alias/fuzzy match against the
+existing catalog) or replayed from a previous run's mapping.
+
+Team resolution, per raw name:
+
+```text
+1. known mapping for (source, sport, raw_name)? -> use it, done
+2. exact/alias/fuzzy match (>= fuzzy_threshold, default 85%) against
+   existing teams for this sport? -> use that team
+3. otherwise -> create a new canonical team from the raw name
+```
+
+A fuzzy score just under the threshold creates a new team rather than
+merging into an existing one -- deliberately conservative: a harmless
+near-duplicate team is better than silently merging two different real
+teams because the threshold was set too loose.
+
+Event resolution reuses the same start-time-tolerance idea as
+`EventMatcher` (default 30 minutes): given the two resolved teams, an
+existing event for that exact team pair within the tolerance window is
+reused; otherwise a new canonical event is created.
+
+`EventMatcher` still exists and is still tested -- it is the right tool
+when you genuinely want a fixed, non-growing candidate list (e.g. a
+controlled test), not a mistake left behind by the switch to
+`FixtureCatalog`.
 
 ---
 
@@ -571,7 +623,7 @@ same repository data a dashboard would eventually read from.
 
 The PoC currently uses SQLite.
 
-The repository supports operations such as:
+`OddsRepository` supports operations such as:
 
 ```text
 save
@@ -580,6 +632,11 @@ find_latest
 find_last_two
 find_latest_for_market
 ```
+
+`FixtureCatalog` (see Matching above) owns three more tables --
+`teams`, `events`, `source_team_mappings` -- the persistent canonical
+registry that replaced the old in-memory fixed/self-bootstrapped event
+lists.
 
 SQLite is appropriate for the current phase, while the storage layer is kept isolated so a future migration to PostgreSQL remains possible.
 
@@ -699,6 +756,8 @@ rate limiting
 [x] Noise-filtered opportunity report (reporting.opportunity_report)
 [x] Odds movement report (reporting.movement_report)
 [x] Dirty-data test fixtures
+[x] Persistent event/fixtures catalog (FixtureCatalog)
+[x] Manual-capture sources wired in as supplemental collectors
 ```
 
 ---
@@ -721,24 +780,22 @@ rate limiting
 [x] Add reporting layer (opportunity report; a dashboard/web UI remains open)
 [x] Add odds-movement report (reporting.movement_report)
 [x] Add a manual-capture collector for a source that can't be fetched automatically (MozzartFileCollector)
+[x] Wire manual-capture sources into app.py's demo as supplemental collectors (MOZZART_CAPTURE_DIR)
+[x] Persistent event/fixtures catalog (FixtureCatalog: teams, events, source_team_mappings)
 ```
 
 Everything above is done. Genuinely open next:
 
 ```text
-[ ] Persistent event/fixtures catalog (see Next Architectural Milestone below)
+[ ] Wire freshness checks into build_opportunity_report/build_movement_report
+    (only main()'s per-event display loop checks freshness today; the
+    reports don't, and can compare odds that were never actually
+    simultaneously available -- see Next Architectural Milestone below)
 [ ] Web dashboard (reports are text-only so far)
 [ ] Source-specific validation rules
 [ ] Database growth / retention policy for high-frequency polling
 [ ] Market lifecycle states (OPEN/SUSPENDED/CLOSED)
 ```
-
-`MozzartFileCollector` is now wired into `app.py`'s demo as a
-supplemental source (`MOZZART_CAPTURE_DIR`, see Data Collection) --
-running alongside the primary source in the same cycle/repository, but
-still matched by exact team-name string per source (no cross-source
-fuzzy matching yet, which is the persistent fixtures catalog item
-above).
 
 ---
 
@@ -749,14 +806,25 @@ persist → record `CollectorRun`, keeping that orchestration logic out of
 the analysis modules. Freshness/analyze/report stay outside it, run by
 the caller (`app.py`) against the repository's stored snapshots.
 
-The next milestone is a **persistent event/fixtures catalog**. Every
-demo path (`build_demo_events()`, and `build_events_from_raw()` for the
-live source) still constructs canonical `Event` objects in memory at
-process start rather than resolving against a maintained, persisted
-list -- nothing survives a restart, and a source can only ever match
-events it happens to already know about that run. See
-`docs/architecture.md`'s Next Architectural Step for the same point in
-more detail.
+**Done:** `FixtureCatalog` (see Matching above) replaced the in-memory
+fixed/self-bootstrapped event lists (`build_demo_events()` and
+`build_events_from_raw()`, both removed) with a persistent `teams` /
+`events` / `source_team_mappings` registry. Every source now resolves
+against the same durable catalog instead of a per-run list, and a team
+name resolved once (by exact/alias/fuzzy match) is remembered
+permanently -- which is what lets two different sources report the same
+real match under different spellings and still land on one shared
+canonical event, verified end-to-end with a Mozzart capture merging into
+the JSON demo's "Manchester United vs Liverpool" and producing a real
+cross-source surebet in the opportunity report.
+
+One gap this surfaced rather than solved: `build_opportunity_report`
+and `build_movement_report` don't run a freshness check the way the
+per-event display loop in `main()` does. Combining a source with
+wall-clock-fresh `observed_at` (Mozzart, TheOddsApi) against the JSON
+demo's fixed historical timestamps can produce a report row comparing
+odds that were never actually simultaneously available -- open item,
+not yet fixed.
 
 ---
 

@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,10 +15,6 @@ from anomaly_detection_engine.collectors.json_collector import (
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiCollector
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
-from anomaly_detection_engine.matching.event_matcher import EventMatcher
-from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.raw_odds import RawEventOdds
-from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.reporting.movement_report import (
@@ -31,10 +27,16 @@ from anomaly_detection_engine.reporting.opportunity_report import (
 )
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
 
+# Known variant spellings fed to every FixtureCatalog instance below --
+# harmless where irrelevant (e.g. for Mozzart's own Serbian team names),
+# and what still makes the JSON demo's "Man Utd"/"Man. United"/
+# "Manchester United" rows resolve to one canonical team on first sight,
+# same as before FixtureCatalog replaced the old fixed event list.
 ALIASES = {
     "Man Utd": "Manchester United",
     "Man. United": "Manchester United",
@@ -54,89 +56,13 @@ DEMO_FRESHNESS_POLICY = FreshnessPolicy(
 )
 
 
-class _ReplayCollector(OddsCollector):
-    """Replays an already-collected batch instead of hitting the network.
-
-    Used for the live-source demo path below, which has to collect once
-    up front to discover events before a matcher can be built -- this lets
-    that same batch be handed to OddsIngestionService without a second,
-    credit-consuming API call.
-    """
-
-    def __init__(self, source: str, raw_events: list[RawEventOdds]) -> None:
-        self._source = source
-        self._raw_events = raw_events
-
-    @property
-    def source(self) -> str:
-        return self._source
-
-    def collect(self) -> list[RawEventOdds]:
-        return self._raw_events
-
-
-def build_demo_events() -> list[Event]:
-    return [
-        Event(
-            id="event-001",
-            sport="football",
-            league="demo-league",
-            home_team=Team("team-001", "Manchester United"),
-            away_team=Team("team-002", "Liverpool"),
-            start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),
-        ),
-        Event(
-            id="event-002",
-            sport="football",
-            league="demo-league",
-            home_team=Team("team-003", "Real Madrid"),
-            away_team=Team("team-004", "Barcelona"),
-            start_time=datetime.fromisoformat("2026-09-02T21:00:00+00:00"),
-        ),
-    ]
-
-
-def build_events_from_raw(raw_events: list[RawEventOdds]) -> list[Event]:
-    """Derives canonical events straight from a collected batch.
-
-    A stand-in for sources with no fixed canonical events to match
-    against -- there is no real fixtures/event catalog yet (see
-    architecture.md's Next Architectural Step), so this trusts the
-    source's own team-name strings as canonical. IDs are prefixed
-    "auto-" specifically so they can never collide with build_demo_events()'s
-    fixed "event-NNN" IDs when both are combined into one events list
-    (see build_collectors_and_events) -- a collision there would silently
-    merge two unrelated matches under the same database event_id.
-
-    Two different sources reporting the same real match under different
-    team-name spellings ("Man Utd" vs "Manchester United") will NOT be
-    merged into one event here -- each becomes its own canonical event,
-    so their odds are never compared against each other. Resolving that
-    needs the same fixtures catalog noted above; this is a known gap,
-    not an oversight.
-    """
-    events: dict[tuple[str, str], Event] = {}
-    for raw in raw_events:
-        key = (raw.home_team, raw.away_team)
-        if key not in events:
-            index = len(events) + 1
-            events[key] = Event(
-                id=f"auto-{index:03d}",
-                sport=raw.sport,
-                league=raw.league,
-                home_team=Team(f"auto-home-{index}", raw.home_team),
-                away_team=Team(f"auto-away-{index}", raw.away_team),
-                start_time=raw.start_time,
-            )
-    return list(events.values())
-
-
 def _supplemental_collectors() -> list[OddsCollector]:
     """Manual-capture collectors layered on top of whichever primary
-    source is active below, so they land in the same ingestion cycle and
-    repository and get compared against everyone else instead of running
-    in isolation. Each is opt-in via its own env var, so a run with none
-    configured behaves exactly as before.
+    source is active in build_collectors(), so they land in the same
+    ingestion cycle and get matched against the same FixtureCatalog as
+    everyone else instead of running in isolation. Each is opt-in via
+    its own env var, so a run with none configured behaves exactly as
+    before.
 
     Adding another manual-capture source (MaxBet, Soccer, ...) later is
     the same two lines: read its own env var, construct its
@@ -151,55 +77,33 @@ def _supplemental_collectors() -> list[OddsCollector]:
     return collectors
 
 
-def build_collectors_and_events() -> tuple[list[OddsCollector], list[Event]]:
-    """Returns the poll cycle(s) to run and the canonical events to match against.
+def build_collectors() -> list[OddsCollector]:
+    """Returns the poll cycle(s) to run this invocation.
 
     The JSON demo path runs two polls against two fixed sample files (a
     second one with moved odds) so the movement report has something to
     compare on a single script run, instead of only being demonstrable
-    across separate invocations. The live path stays single-poll: two
-    real API calls a few seconds apart would double credit usage without
-    a real market having necessarily moved in that time.
+    across separate invocations. The live path stays single-poll: a
+    second real API call a few seconds later would double credit usage
+    without a real market having necessarily moved in that time.
 
-    Any supplemental collectors (see _supplemental_collectors) run
-    alongside whichever primary path is active. Every collector is
-    collected from exactly once here and wrapped in a _ReplayCollector --
-    this is a discovery pass to learn what events exist before the
-    matcher can be built, and doing the real fetch/archive twice would
-    waste API credits (live source) or archive a capture that was never
-    actually ingested (file source).
+    Unlike the old build_collectors_and_events(), no discovery pass or
+    replay wrapping is needed here: FixtureCatalog resolves events on the
+    fly as records are ingested (see main()), so each collector's
+    collect() only ever needs to run once, called naturally by
+    OddsIngestionService.run() itself.
     """
     if os.environ.get("ODDS_SOURCE") == "the-odds-api":
         sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
         primary_collectors: list[OddsCollector] = [TheOddsApiCollector(sport_key)]
-        fixed_events: list[Event] = []
     else:
         samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
         primary_collectors = [
             JsonOddsCollector(samples_dir / "odds_sample.json"),
             JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
         ]
-        fixed_events = build_demo_events()
 
-    supplemental_collectors = _supplemental_collectors()
-
-    replay_collectors: list[OddsCollector] = []
-    events_needed_from: list[RawEventOdds] = []
-
-    for collector in primary_collectors:
-        raw_events = collector.collect()
-        replay_collectors.append(_ReplayCollector(collector.source, raw_events))
-        if not fixed_events:
-            events_needed_from.extend(raw_events)
-
-    for collector in supplemental_collectors:
-        raw_events = collector.collect()
-        replay_collectors.append(_ReplayCollector(collector.source, raw_events))
-        events_needed_from.extend(raw_events)
-
-    events = fixed_events + build_events_from_raw(events_needed_from)
-
-    return replay_collectors, events
+    return [*primary_collectors, *_supplemental_collectors()]
 
 
 def main() -> None:
@@ -213,27 +117,23 @@ def main() -> None:
     collector_run_repository = CollectorRunRepository(connection)
     raw_payload_repository = RawPayloadRepository(connection)
 
-    collectors, events = build_collectors_and_events()
+    collectors = build_collectors()
     sources = ", ".join(collector.source for collector in collectors)
-    print(f"Sources: {sources} ({len(events)} events, {len(collectors)} poll(s))")
-
-    canonical_names = {
-        event.home_team.canonical_name
-        for event in events
-    } | {
-        event.away_team.canonical_name
-        for event in events
-    }
-
-    normalizer = TeamNormalizer(canonical_names, ALIASES, fuzzy_threshold=80)
-    matcher = EventMatcher(events, normalizer)
+    print(f"Sources: {sources} ({len(collectors)} poll(s))")
 
     metrics = IngestionMetrics()
+    catalog: FixtureCatalog | None = None
 
     for poll_number, collector in enumerate(collectors, start=1):
+        # One FixtureCatalog per collector, scoped to that collector's own
+        # source label (its team-name mapping cache is per-source), but
+        # all sharing the same connection/tables -- so a team or event
+        # resolved by one collector is immediately visible to the next.
+        catalog = FixtureCatalog(connection, source=collector.source, aliases=ALIASES)
+
         service = OddsIngestionService(
             collector=collector,
-            matcher=matcher,
+            matcher=catalog,
             odds_repository=odds_repository,
             collector_run_repository=collector_run_repository,
             raw_payload_repository=raw_payload_repository,
@@ -245,6 +145,8 @@ def main() -> None:
             f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
             f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
         )
+
+    events = catalog.list_events() if catalog is not None else []
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(

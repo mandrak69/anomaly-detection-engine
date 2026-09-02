@@ -44,11 +44,11 @@ ODDS_SOURCE=the-odds-api ODDS_API_KEY=<your key> python -m anomaly_detection_eng
 
 - `models`: canonical event, team, bookmaker, market, odds snapshot, collector run and raw payload models
 - `normalization`: exact, alias and fuzzy team normalization
-- `matching`: event matching by sport, league, teams and start-time tolerance
+- `matching`: `EventMatcher` (fixed, in-memory candidate list) and `FixtureCatalog` (persistent, auto-growing -- what `app.py` actually uses)
 - `validation`: structural/semantic validation of raw odds before they reach matching
 - `collectors`: `JsonOddsCollector` (local file), `TheOddsApiCollector` (public API), `MozzartFileCollector` (manual capture for a bot-protected source)
 - `ingestion.service`: `OddsIngestionService` -- collect -> validate -> match -> persist, producing a `CollectorRun`
-- `storage`: SQLite-backed `OddsRepository`, `CollectorRunRepository`, `RawPayloadRepository`
+- `storage`: SQLite-backed `OddsRepository`, `CollectorRunRepository`, `RawPayloadRepository`, `FixtureCatalog` (teams/events/source_team_mappings)
 - `analysis`: best odds, arbitrage (surebet), freshness, rapid movement, outlier detection, bookmaker lag
 - `reporting`: `opportunity_report` (SUREBET/VALUE_GAP), `movement_report`
 - `observability`: structured JSON logging, in-process `IngestionMetrics`
@@ -61,5 +61,6 @@ ODDS_SOURCE=the-odds-api ODDS_API_KEY=<your key> python -m anomaly_detection_eng
 3. ~~Persist `OddsSnapshot` history.~~ done (`OddsRepository`).
 4. ~~Implement outlier detection.~~ done (`analysis.outlier_detector`).
 5. ~~Add structured reporting.~~ done (`reporting.opportunity_report`, `reporting.movement_report`).
+6. ~~Persistent event/fixtures catalog.~~ done (`FixtureCatalog`), including wiring `MozzartFileCollector` into `app.py` as a supplemental source sharing it.
 
-Open: a web dashboard (the reports above are still text-only), and a persistent event/fixtures catalog (see architecture.md's Next Architectural Step).
+Open: a web dashboard (the reports above are still text-only), and wiring a freshness check into the reports themselves (only `main()`'s per-event display loop checks freshness today).

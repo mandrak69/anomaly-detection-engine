@@ -116,6 +116,29 @@ start time
 market semantics
 ```
 
+Two implementations of the same `match(...) -> EventMatchResult`
+contract:
+
+```text
+EventMatcher      fixed, in-memory candidate list -- rejects anything
+                  it doesn't already know
+FixtureCatalog     persistent (teams/events/source_team_mappings
+                   tables) -- resolves a never-seen team or event by
+                   creating a canonical row instead of rejecting it,
+                   and remembers every (source, sport, raw name)
+                   resolution permanently
+```
+
+`FixtureCatalog` reuses `TeamNormalizer` (the same exact/alias/fuzzy
+logic `EventMatcher` uses) internally, run against the durable `teams`
+table instead of a candidate list scoped to one run. The permanent
+mapping cache is what lets two different sources report the same real
+match under different team-name spellings and still resolve to one
+shared canonical event -- once a spelling has been resolved, it never
+needs to be re-solved. `app.py` uses `FixtureCatalog` for every source;
+`EventMatcher` remains available (and tested) for callers that
+genuinely want a fixed, non-growing candidate list.
+
 ### Domain Layer
 
 Contains canonical models such as:
@@ -128,6 +151,11 @@ MarketIdentity
 OddsSnapshot
 CollectorRun
 ```
+
+`Event` and `Team` are now persisted (via `FixtureCatalog`, not a
+dedicated repository of their own -- see Matching Layer above and
+Storage Strategy below), so they are no longer purely in-memory
+runtime objects the way `Bookmaker` still is.
 
 ### Storage Layer
 
@@ -356,26 +384,30 @@ Current storage is optimized for PoC simplicity.
 Current tables:
 
 ```text
-odds_snapshots    unique-indexed on (event, bookmaker, market, outcome,
-                   observed_at); re-saving an identical snapshot is a
-                   no-op rather than a duplicate row
+odds_snapshots           unique-indexed on (event, bookmaker, market,
+                          outcome, observed_at); re-saving an identical
+                          snapshot is a no-op rather than a duplicate row
 collector_runs
-raw_payloads       every ingested RawEventOdds, accepted or rejected,
-                   with its rejection reason, linked to its CollectorRun
+raw_payloads              every ingested RawEventOdds, accepted or
+                          rejected, with its rejection reason, linked to
+                          its CollectorRun
+teams                     canonical team registry, unique per
+                          (canonical_name, sport)
+events                    canonical event registry: sport, league,
+                          home_team_id, away_team_id, start_time
+source_team_mappings      (source, sport, raw team name) -> team_id,
+                          the permanent memory behind FixtureCatalog's
+                          cross-source matching
 ```
 
-Events, teams, competitions, markets, and bookmakers are still canonical
-Python objects held in memory (`build_demo_events()` / matcher-supplied),
-not normalized tables -- there is no persistent event catalog yet. Future
-tables may include:
+Competitions/leagues and bookmakers are still plain strings (`league` on
+`events`, `bookmaker_name` on `odds_snapshots`) rather than their own
+normalized tables -- a smaller, separate step from the event/team catalog
+above. Future tables may include:
 
 ```text
-events
-teams
 competitions
-markets
 bookmakers
-source_event_mappings
 anomalies
 ```
 
@@ -433,16 +465,29 @@ by the caller against the repository's stored snapshots) per the
 Guiding Principle below -- ingestion orchestration stays separate from
 pure analysis logic, as originally intended here.
 
-The next open architectural step is a **persistent event/fixtures
-catalog**. `build_events_from_raw()` (the live `the-odds-api` demo path)
-and `build_demo_events()` (the fixed sample-data path) both construct
-canonical `Event` objects in memory at process start -- there is still
-no `events` table, so nothing survives a restart and nothing can be
-resolved against fixtures that were not already known when the process
-began. `MozzartFileCollector` is not wired into `app.py`'s demo at all
-yet; a caller using it standalone has to supply its own `EventMatcher`
-and canonical events the same way, which is the same gap, not a
-different one.
+**Resolved:** the persistent event/fixtures catalog. `FixtureCatalog`
+(see Matching Layer above) replaced `build_events_from_raw()` and
+`build_demo_events()` -- every source now resolves teams/events against
+the durable `teams`/`events`/`source_team_mappings` tables, and
+`MozzartFileCollector` is wired into `app.py` as a supplemental
+collector sharing that same catalog. Verified end-to-end: a Mozzart
+capture reporting the same match as the JSON demo data ("Manchester
+United vs Liverpool") resolved to one shared canonical event, and the
+opportunity report found a real surebet combining a Mozzart leg with a
+JSON-demo-bookmaker leg -- cross-source matching that was not possible
+before this.
 
-A web dashboard (see Reporting Layer) is a separate, smaller-scoped open
-item -- the reports it would serve already exist as text.
+That work surfaced the next open item: `build_opportunity_report` and
+`build_movement_report` don't run a freshness check the way `main()`'s
+per-event display loop does (`validate_freshness` against
+`DEMO_FRESHNESS_POLICY`). Once a fast-moving source (Mozzart, live
+`the-odds-api`, both `observed_at`-stamped near wall-clock "now") shares
+an event with the JSON demo's fixed historical timestamps, the reports
+can present a signal comparing odds that were never actually
+simultaneously available. `main()`'s display loop already guards against
+exactly this (it correctly printed `SKIP ... not fresh` for that event
+during verification); the reports should apply the same gate before
+computing best odds / arbitrage / outliers, not just before printing.
+
+A web dashboard (see Reporting Layer) remains a separate, smaller-scoped
+open item -- the reports it would serve already exist as text.
