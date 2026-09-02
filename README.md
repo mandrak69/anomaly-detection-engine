@@ -306,6 +306,31 @@ parse failure         -> raises (surfaces as a FAILED CollectorRun) and
 Run the app again after dropping in a newer capture and the movement
 report picks up the difference, same as the two JSON demo polls do.
 
+Set `MOZZART_CAPTURE_DIR=<path>` and `app.py`'s demo picks it up as a
+**supplemental** source alongside whichever primary source (`ODDS_SOURCE`)
+is active -- it's collected in the same cycle and written to the same
+repository, so its odds are compared against everyone else's (best odds,
+opportunity report, movement report all see it). Its match(es) get their
+own canonical event(s), auto-bootstrapped from the capture the same way
+the live `the-odds-api` path does, since there's no fixed catalog entry
+for them:
+
+```bash
+MOZZART_CAPTURE_DIR=./mozzart python -m anomaly_detection_engine.app
+```
+
+Adding another manual-capture source later (MaxBet, Soccer, ...) is the
+same shape: its own env var, its own `FileCollector`, appended in
+`app.py`'s `_supplemental_collectors()` -- no other wiring changes.
+
+One real limitation worth knowing: events are matched by **exact**
+team-name string per source right now. If Mozzart and another active
+source report the *same* real match under differently-spelled team
+names, they become two separate, unrelated canonical events here, not
+one -- so their odds are never compared against each other. Fixing that
+needs a real fixtures catalog (see `docs/architecture.md`'s Next
+Architectural Step); this doesn't attempt it.
+
 Future implementations may include:
 
 ```text
@@ -704,10 +729,16 @@ Everything above is done. Genuinely open next:
 [ ] Persistent event/fixtures catalog (see Next Architectural Milestone below)
 [ ] Web dashboard (reports are text-only so far)
 [ ] Source-specific validation rules
-[ ] Wire MozzartFileCollector into app.py's demo (currently standalone)
 [ ] Database growth / retention policy for high-frequency polling
 [ ] Market lifecycle states (OPEN/SUSPENDED/CLOSED)
 ```
+
+`MozzartFileCollector` is now wired into `app.py`'s demo as a
+supplemental source (`MOZZART_CAPTURE_DIR`, see Data Collection) --
+running alongside the primary source in the same cycle/repository, but
+still matched by exact team-name string per source (no cross-source
+fuzzy matching yet, which is the persistent fixtures catalog item
+above).
 
 ---
 

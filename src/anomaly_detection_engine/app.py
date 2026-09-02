@@ -12,6 +12,7 @@ from anomaly_detection_engine.collectors.json_collector import (
     DEFAULT_MARKET,
     JsonOddsCollector,
 )
+from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiCollector
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.matching.event_matcher import EventMatcher
@@ -98,10 +99,21 @@ def build_demo_events() -> list[Event]:
 def build_events_from_raw(raw_events: list[RawEventOdds]) -> list[Event]:
     """Derives canonical events straight from a collected batch.
 
-    Only meaningful for the live-source demo path: there is no real
-    fixtures/event catalog yet (see architecture.md's Matching Layer for
-    what a real deployment would resolve against instead), so this is a
-    stand-in that trusts the source's own team names as canonical.
+    A stand-in for sources with no fixed canonical events to match
+    against -- there is no real fixtures/event catalog yet (see
+    architecture.md's Next Architectural Step), so this trusts the
+    source's own team-name strings as canonical. IDs are prefixed
+    "auto-" specifically so they can never collide with build_demo_events()'s
+    fixed "event-NNN" IDs when both are combined into one events list
+    (see build_collectors_and_events) -- a collision there would silently
+    merge two unrelated matches under the same database event_id.
+
+    Two different sources reporting the same real match under different
+    team-name spellings ("Man Utd" vs "Manchester United") will NOT be
+    merged into one event here -- each becomes its own canonical event,
+    so their odds are never compared against each other. Resolving that
+    needs the same fixtures catalog noted above; this is a known gap,
+    not an oversight.
     """
     events: dict[tuple[str, str], Event] = {}
     for raw in raw_events:
@@ -109,14 +121,34 @@ def build_events_from_raw(raw_events: list[RawEventOdds]) -> list[Event]:
         if key not in events:
             index = len(events) + 1
             events[key] = Event(
-                id=f"event-{index:03d}",
+                id=f"auto-{index:03d}",
                 sport=raw.sport,
                 league=raw.league,
-                home_team=Team(f"home-{index}", raw.home_team),
-                away_team=Team(f"away-{index}", raw.away_team),
+                home_team=Team(f"auto-home-{index}", raw.home_team),
+                away_team=Team(f"auto-away-{index}", raw.away_team),
                 start_time=raw.start_time,
             )
     return list(events.values())
+
+
+def _supplemental_collectors() -> list[OddsCollector]:
+    """Manual-capture collectors layered on top of whichever primary
+    source is active below, so they land in the same ingestion cycle and
+    repository and get compared against everyone else instead of running
+    in isolation. Each is opt-in via its own env var, so a run with none
+    configured behaves exactly as before.
+
+    Adding another manual-capture source (MaxBet, Soccer, ...) later is
+    the same two lines: read its own env var, construct its
+    FileCollector, append it here -- no other wiring changes needed.
+    """
+    collectors: list[OddsCollector] = []
+
+    mozzart_dir = os.environ.get("MOZZART_CAPTURE_DIR")
+    if mozzart_dir:
+        collectors.append(MozzartFileCollector(Path(mozzart_dir)))
+
+    return collectors
 
 
 def build_collectors_and_events() -> tuple[list[OddsCollector], list[Event]]:
@@ -128,20 +160,46 @@ def build_collectors_and_events() -> tuple[list[OddsCollector], list[Event]]:
     across separate invocations. The live path stays single-poll: two
     real API calls a few seconds apart would double credit usage without
     a real market having necessarily moved in that time.
+
+    Any supplemental collectors (see _supplemental_collectors) run
+    alongside whichever primary path is active. Every collector is
+    collected from exactly once here and wrapped in a _ReplayCollector --
+    this is a discovery pass to learn what events exist before the
+    matcher can be built, and doing the real fetch/archive twice would
+    waste API credits (live source) or archive a capture that was never
+    actually ingested (file source).
     """
     if os.environ.get("ODDS_SOURCE") == "the-odds-api":
         sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
-        live_collector = TheOddsApiCollector(sport_key)
-        raw_events = live_collector.collect()
-        events = build_events_from_raw(raw_events)
-        return [_ReplayCollector(live_collector.source, raw_events)], events
+        primary_collectors: list[OddsCollector] = [TheOddsApiCollector(sport_key)]
+        fixed_events: list[Event] = []
+    else:
+        samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
+        primary_collectors = [
+            JsonOddsCollector(samples_dir / "odds_sample.json"),
+            JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
+        ]
+        fixed_events = build_demo_events()
 
-    samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
-    collectors = [
-        JsonOddsCollector(samples_dir / "odds_sample.json"),
-        JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
-    ]
-    return collectors, build_demo_events()
+    supplemental_collectors = _supplemental_collectors()
+
+    replay_collectors: list[OddsCollector] = []
+    events_needed_from: list[RawEventOdds] = []
+
+    for collector in primary_collectors:
+        raw_events = collector.collect()
+        replay_collectors.append(_ReplayCollector(collector.source, raw_events))
+        if not fixed_events:
+            events_needed_from.extend(raw_events)
+
+    for collector in supplemental_collectors:
+        raw_events = collector.collect()
+        replay_collectors.append(_ReplayCollector(collector.source, raw_events))
+        events_needed_from.extend(raw_events)
+
+    events = fixed_events + build_events_from_raw(events_needed_from)
+
+    return replay_collectors, events
 
 
 def main() -> None:
@@ -156,7 +214,8 @@ def main() -> None:
     raw_payload_repository = RawPayloadRepository(connection)
 
     collectors, events = build_collectors_and_events()
-    print(f"Source: {collectors[0].source} ({len(events)} events, {len(collectors)} poll(s))")
+    sources = ", ".join(collector.source for collector in collectors)
+    print(f"Sources: {sources} ({len(events)} events, {len(collectors)} poll(s))")
 
     canonical_names = {
         event.home_team.canonical_name
