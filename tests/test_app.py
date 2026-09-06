@@ -1,9 +1,20 @@
+import sqlite3
+from datetime import datetime, timedelta
+from decimal import Decimal
+
 import pytest
 
 import anomaly_detection_engine.app as app
-from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
+from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
+from anomaly_detection_engine.collectors.json_collector import DEFAULT_MARKET, JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
+from anomaly_detection_engine.models.event import Event, Team
+from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.movement_repository import MovementRepository
+from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.signal_repository import SignalRepository
 
 
 def _clear_source_env(monkeypatch):
@@ -117,3 +128,76 @@ def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
     collectors = app.build_collectors()
 
     assert len(collectors) == 2
+
+
+def _repositories():
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    initialize_database(connection)
+    return (
+        OddsRepository(connection),
+        SignalRepository(connection),
+        MovementRepository(connection),
+    )
+
+
+def test_persist_detected_signals_creates_then_resolves_a_surebet():
+    odds_repository, signal_repository, movement_repository = _repositories()
+    now = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
+    event = Event(
+        id="e1",
+        sport="football",
+        league="L",
+        home_team=Team("h", "A"),
+        away_team=Team("a", "B"),
+        start_time=now,
+    )
+    policy = FreshnessPolicy(
+        max_snapshot_age=timedelta(hours=1), max_observation_spread=timedelta(hours=1)
+    )
+
+    def save(outcome, odds, observed_at):
+        odds_repository.save(
+            OddsSnapshot(
+                event_id="e1",
+                bookmaker=Bookmaker("bet1", "Bet1"),
+                market=DEFAULT_MARKET,
+                outcome=outcome,
+                odds=Decimal(odds),
+                observed_at=observed_at,
+            )
+        )
+
+    save("1", "2.50", now)
+    save("X", "4.00", now)
+    save("2", "4.00", now)
+
+    first_sweep = app.persist_detected_signals(
+        [event],
+        odds_repository,
+        signal_repository,
+        movement_repository,
+        market=DEFAULT_MARKET,
+        freshness_policy=policy,
+    )
+    assert first_sweep["active_surebets"] == 1
+    active = signal_repository.find_active("SUREBET")
+    assert len(active) == 1
+    assert active[0].details["legs"][0]["bookmaker"] == "Bet1"
+
+    # Odds move enough to kill the arbitrage (margin now > 1) -- the
+    # signal should resolve, and the price change itself should be
+    # recorded as a movement.
+    save("1", "2.00", now + timedelta(minutes=5))
+
+    second_sweep = app.persist_detected_signals(
+        [event],
+        odds_repository,
+        signal_repository,
+        movement_repository,
+        market=DEFAULT_MARKET,
+        freshness_policy=policy,
+    )
+    assert second_sweep["active_surebets"] == 0
+    assert second_sweep["movements_recorded"] == 1
+    assert signal_repository.find_active("SUREBET") == []

@@ -110,7 +110,9 @@ anomaly-detection-engine/
 │       │   ├── best_odds.py
 │       │   ├── bookmaker_lag.py
 │       │   ├── freshness.py
+│       │   ├── movement_detection.py
 │       │   ├── movement_detector.py
+│       │   ├── opportunity_detection.py
 │       │   └── outlier_detector.py
 │       ├── collectors/
 │       │   ├── base.py
@@ -141,8 +143,10 @@ anomaly-detection-engine/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
 │       │   ├── fixture_catalog.py
+│       │   ├── movement_repository.py
 │       │   ├── odds_repository.py
-│       │   └── raw_payload_repository.py
+│       │   ├── raw_payload_repository.py
+│       │   └── signal_repository.py
 │       ├── validation/
 │       │   ├── result.py
 │       │   └── raw_odds_validator.py
@@ -716,7 +720,16 @@ same repository data a dashboard would eventually read from.
 
 ## Storage
 
-The PoC currently uses SQLite.
+The PoC currently uses SQLite, and (since this was previously `:memory:`
+every run) now persists to a real file by default:
+`data/anomaly_detection.db`, overridable via `DB_PATH` (`DB_PATH=:memory:`
+still works, for the old throwaway-per-run behavior). The connection uses
+a 30-second busy timeout, because `scripts/watch_capture.py` makes
+concurrent writers to this same file a real possibility now: two watcher
+processes (e.g. Mozzart and a manual `the-odds-api` capture) can each
+spawn `app.py` at close to the same moment, and SQLite allows only one
+writer at a time -- the timeout makes the second one wait instead of
+immediately failing with "database is locked".
 
 `OddsRepository` supports operations such as:
 
@@ -732,6 +745,73 @@ find_latest_for_market
 `teams`, `events`, `source_team_mappings` -- the persistent canonical
 registry that replaced the old in-memory fixed/self-bootstrapped event
 lists.
+
+### Persisting derived signals, not just raw odds
+
+Reporting (`opportunity_report`/`movement_report`, above) used to be the
+only consumer of the analysis modules -- compute, print, discard. Two new
+repositories persist what gets *detected*, independent of whether/how
+it's ever displayed:
+
+```text
+SignalRepository     SUREBET / VALUE_GAP -- conditions that can persist
+                      across multiple poll cycles
+MovementRepository    odds movements -- point-in-time events, already
+                      over the moment they're detected
+```
+
+The two need different lifecycles, which is why they're separate tables
+with separate repository shapes rather than one generic "detections"
+table:
+
+```text
+signals table      status ACTIVE/RESOLVED, first_seen_at, last_seen_at,
+                    resolved_at. SignalRepository.reconcile(signal_type,
+                    candidates, observed_at=...) upserts every currently-
+                    detected candidate of that type (new -> insert
+                    ACTIVE; still there -> update last_seen_at/edge/
+                    details; previously RESOLVED -> reactivate, keeping
+                    the original first_seen_at) and marks anything of
+                    that type that *was* ACTIVE but isn't in `candidates`
+                    as RESOLVED. Identity excludes which bookmaker/odds
+                    are currently involved -- those are updated in
+                    place, not part of what makes two detections "the
+                    same" opportunity. Call reconcile() once per signal
+                    type per sweep, even with an empty candidate list --
+                    that's not a no-op, it's what correctly resolves
+                    everything of that type.
+
+movements table     append-only, no status. MovementRepository.save()
+                    per detected transition, deduped on the full
+                    (event, bookmaker, market, outcome, both
+                    observed_at timestamps) via a unique index -- the
+                    same idempotency approach OddsRepository.save uses.
+```
+
+Detection itself lives in `analysis.opportunity_detection`
+(`detect_surebet_candidates`, `detect_value_gap_candidates`) and
+`analysis.movement_detection` (`detect_movements`) -- the same functions
+`opportunity_report`/`movement_report` call to build their display rows,
+now shared with `app.py`'s persistence sweep
+(`persist_detected_signals`) so detection logic exists in exactly one
+place regardless of what eventually consumes the result. Persisted
+SUREBET candidates carry no minimum-profit threshold (that's a
+reporting-only "worth telling a human" decision,
+`min_surebet_profit_percent`); VALUE_GAP persists at the same threshold
+as the report, since that one is part of the outlier detection itself,
+not a presentation-layer filter.
+
+Verified end-to-end (not just unit-tested): a real surebet gets
+persisted as `ACTIVE`; once the underlying odds move enough to kill the
+arbitrage, the *same* signal row (not a new one) is marked `RESOLVED`,
+and the price move that killed it is independently recorded in
+`movements`.
+
+There is deliberately no presentation layer reading these tables yet
+(dashboard, notifications, dedup-aware alerting) -- see Reporting above
+and the Next Development Steps below. This is the "where/how to keep the
+data" half of that question, kept separate from "how to show it" on
+purpose.
 
 SQLite is appropriate for the current phase, while the storage layer is kept isolated so a future migration to PostgreSQL remains possible.
 
@@ -855,6 +935,9 @@ rate limiting
 [x] Manual-capture sources wired in as supplemental collectors
 [x] Generalized manual-capture mechanism (ManualCaptureCollector) + explicit per-source mode flags (ODDS_API_MODE, MOZZART_MODE)
 [x] Directory watcher for manual captures (scripts/watch_capture.py)
+[x] Fail loud on wrong-shaped manual captures (MozzartResponseError, TheOddsApiError)
+[x] Persistent runtime database (DB_PATH)
+[x] Persisted derived signals (SignalRepository, MovementRepository) -- decoupled from reporting
 ```
 
 ---
@@ -880,14 +963,21 @@ rate limiting
 [x] Wire manual-capture sources into app.py's demo as supplemental collectors (MOZZART_CAPTURE_DIR)
 [x] Persistent event/fixtures catalog (FixtureCatalog: teams, events, source_team_mappings)
 [x] Wire freshness checks into build_opportunity_report (required freshness_policy parameter)
+[x] Persistent runtime database (DB_PATH, defaults to a real file instead of :memory:)
+[x] Persist derived signals, not just raw odds (SignalRepository, MovementRepository)
 ```
 
 Everything above is done. Genuinely open next:
 
 ```text
-[ ] Web dashboard (reports are text-only so far)
+[ ] Web dashboard / notification layer reading from signals+movements
+    (SignalRepository/MovementRepository exist and are populated every
+    run now -- nothing presents from them yet besides the existing
+    text reports, which still recompute rather than reading back)
 [ ] Source-specific validation rules
 [ ] Database growth / retention policy for high-frequency polling
+    (now doubly relevant: odds_snapshots, signals, and movements can
+    all grow indefinitely)
 [ ] Market lifecycle states (OPEN/SUSPENDED/CLOSED)
 ```
 

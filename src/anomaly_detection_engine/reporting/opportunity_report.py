@@ -1,16 +1,24 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
-from anomaly_detection_engine.analysis.best_odds import find_best_odds
-from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
-from anomaly_detection_engine.analysis.outlier_detector import detect_outliers
+from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
+from anomaly_detection_engine.analysis.opportunity_detection import (
+    SUREBET,
+    VALUE_GAP,
+    detect_surebet_candidates,
+    detect_value_gap_candidates,
+)
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import MarketIdentity
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
-SUREBET = "SUREBET"
-VALUE_GAP = "VALUE_GAP"
+__all__ = [
+    "SUREBET",
+    "VALUE_GAP",
+    "OpportunityRow",
+    "build_opportunity_report",
+    "render_opportunity_report",
+]
 
 
 @dataclass(frozen=True)
@@ -37,6 +45,11 @@ def build_opportunity_report(
 ) -> list[OpportunityRow]:
     """Surfaces real betting opportunities and filters out noise.
 
+    Thin presentation layer over analysis.opportunity_detection: that
+    module finds every real arbitrage/outlier unconditionally (raw
+    facts), this applies the "is it worth a line in the report"
+    threshold on top and flattens each into a display row.
+
     freshness_policy is required, not defaulted: this report compares
     odds *across bookmakers at a point in time* (best odds, arbitrage,
     consensus deviation), which is only meaningful if those odds were
@@ -49,83 +62,59 @@ def build_opportunity_report(
     There's no single sensible default across deployments (it depends on
     real polling frequency), so callers must decide.
 
-    Two signal types, both already-vetted analysis modules -- this just
-    applies a "is it worth a line in the report" threshold on top:
+    SUREBET: kept only if the theoretical profit clears
+    min_surebet_profit_percent (default 1.0%). A mathematically real
+    margin of 0.1-0.2% is still noise in practice: odds can move before
+    all legs are placed, stakes have to be rounded, and bookmakers
+    actively limit accounts they suspect of arbitrage betting -- all of
+    which can eat a thin margin before it's ever realized.
 
-    SUREBET: an actual arbitrage (calculate_arbitrage.is_surebet), but
-    only kept if the theoretical profit clears min_surebet_profit_percent
-    (default 1.0%). A mathematically real margin of 0.1-0.2% is still
-    noise in practice: odds can move before all legs are placed, stakes
-    have to be rounded, and bookmakers actively limit accounts they
-    suspect of arbitrage betting -- all of which can eat a thin margin
-    before it's ever realized.
-
-    VALUE_GAP: one bookmaker pricing an outcome well above the consensus
-    of its peers (detect_outliers, restricted to the favorable direction
-    only -- an outlier priced *below* consensus is a bad price, not an
-    opportunity). The default threshold matches detect_outliers' own
-    (15%): with only 3-4 bookmakers, ordinary bookmaker-margin spread
-    can easily clear a low bar like 3-5%, which would just fill the
-    report with routine price shopping rather than real gaps.
+    VALUE_GAP: the default threshold matches detect_outliers' own (15%):
+    with only 3-4 bookmakers, ordinary bookmaker-margin spread can
+    easily clear a low bar like 3-5%, which would just fill the report
+    with routine price shopping rather than real gaps.
 
     Rows are sorted by edge, largest first, so the most actionable items
     are at the top regardless of signal type.
     """
     rows: list[OpportunityRow] = []
 
-    for event in events:
-        snapshots = odds_repository.find_latest_for_market(
-            event_id=event.id,
-            market_type=market.market_type.value,
-            market_period=market.period.value,
-        )
-        if not snapshots:
+    for surebet in detect_surebet_candidates(
+        events, odds_repository, market, freshness_policy=freshness_policy
+    ):
+        if surebet.profit_percent < min_surebet_profit_percent:
             continue
 
-        freshness = validate_freshness(
-            snapshots,
-            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
-            policy=freshness_policy,
-        )
-        if not freshness.valid:
-            continue
-
-        best = find_best_odds(snapshots, event_id=event.id, market=market)
-        if len(best) == 3:
-            arbitrage = calculate_arbitrage(best)
-            if arbitrage.is_surebet and arbitrage.theoretical_profit_percent >= min_surebet_profit_percent:
-                for outcome, item in best.items():
-                    rows.append(
-                        OpportunityRow(
-                            signal=SUREBET,
-                            event=event.display_name,
-                            outcome=outcome,
-                            bookmaker=item.bookmaker_name,
-                            odds=item.odds,
-                            edge_percent=arbitrage.theoretical_profit_percent,
-                        )
-                    )
-
-        for outlier in detect_outliers(
-            snapshots,
-            event_id=event.id,
-            market=market,
-            threshold_percent=min_value_gap_percent,
-            min_bookmakers=min_value_gap_bookmakers,
-        ):
-            if outlier.deviation_percent <= 0:
-                continue
-
+        for leg in surebet.legs:
             rows.append(
                 OpportunityRow(
-                    signal=VALUE_GAP,
-                    event=event.display_name,
-                    outcome=outlier.outcome,
-                    bookmaker=outlier.bookmaker_name,
-                    odds=outlier.odds,
-                    edge_percent=outlier.deviation_percent,
+                    signal=SUREBET,
+                    event=surebet.event.display_name,
+                    outcome=leg.outcome,
+                    bookmaker=leg.bookmaker,
+                    odds=leg.odds,
+                    edge_percent=surebet.profit_percent,
                 )
             )
+
+    for gap in detect_value_gap_candidates(
+        events,
+        odds_repository,
+        market,
+        freshness_policy=freshness_policy,
+        threshold_percent=min_value_gap_percent,
+        min_bookmakers=min_value_gap_bookmakers,
+    ):
+        rows.append(
+            OpportunityRow(
+                signal=VALUE_GAP,
+                event=gap.event.display_name,
+                outcome=gap.outcome,
+                bookmaker=gap.bookmaker,
+                odds=gap.odds,
+                edge_percent=gap.deviation_percent,
+            )
+        )
 
     rows.sort(key=lambda row: row.edge_percent, reverse=True)
     return rows

@@ -1,12 +1,19 @@
 import os
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
+from anomaly_detection_engine.analysis.movement_detection import detect_movements
+from anomaly_detection_engine.analysis.opportunity_detection import (
+    SUREBET,
+    VALUE_GAP,
+    detect_surebet_candidates,
+    detect_value_gap_candidates,
+)
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import (
     DEFAULT_MARKET,
@@ -18,6 +25,8 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiManualCollector,
 )
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
+from anomaly_detection_engine.models.event import Event
+from anomaly_detection_engine.models.market import MarketIdentity
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.reporting.movement_report import (
@@ -31,8 +40,28 @@ from anomaly_detection_engine.reporting.opportunity_report import (
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import initialize_database
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
+from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
+from anomaly_detection_engine.storage.signal_repository import (
+    SignalRepository,
+    from_surebet,
+    from_value_gap,
+)
+
+# Default location for the persistent runtime database -- overridable via
+# DB_PATH so tests/alternate deployments aren't forced to use this exact
+# file. ":memory:" (pass DB_PATH=:memory:) is still supported for anyone
+# who wants the old throwaway-per-run behavior back.
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "anomaly_detection.db"
+
+# How long a connection waits for a lock before raising "database is
+# locked", in seconds. Matters now that manual-capture sources can be
+# triggered by independent watch_capture.py processes: two of them
+# spawning app.py at close to the same moment both open this same file,
+# and SQLite allows only one writer at a time. A generous timeout makes
+# the second one wait instead of failing outright.
+DB_BUSY_TIMEOUT_SECONDS = 30
 
 
 # Known variant spellings fed to every FixtureCatalog instance below --
@@ -160,16 +189,86 @@ def build_collectors() -> list[OddsCollector]:
     return [*primary_collectors, *_supplemental_collectors()]
 
 
+def persist_detected_signals(
+    events: list[Event],
+    odds_repository: OddsRepository,
+    signal_repository: SignalRepository,
+    movement_repository: MovementRepository,
+    *,
+    market: MarketIdentity,
+    freshness_policy: FreshnessPolicy,
+) -> dict:
+    """Runs one detection sweep and persists the result -- the "where and
+    how to keep derived information" half of the pipeline, deliberately
+    separate from reporting (the OPPORTUNITIES/ODDS MOVEMENT sections
+    above): this decides what counts as a signal and stores it; a future
+    presentation layer (dashboard, Telegram bot, whatever) would read
+    from these tables instead of recomputing anything.
+
+    SUREBET candidates are persisted unconditionally (no minimum-profit
+    threshold): that cutoff is a "worth telling a human" business
+    decision (reporting.opportunity_report's min_surebet_profit_percent),
+    not a fact about whether the arbitrage exists, and persisting
+    everything keeps that decision revisitable later without having
+    discarded the underlying data. VALUE_GAP uses the same
+    MIN_VALUE_GAP_PERCENT threshold as the report, since that one *is*
+    part of the outlier detection itself (see
+    analysis.opportunity_detection).
+
+    SUREBET/VALUE_GAP go through SignalRepository.reconcile() (stateful:
+    new/still-active/resolved). Movements go through
+    MovementRepository.save() (point-in-time, append-only) -- see those
+    modules for why the two need different lifecycle handling.
+    """
+    observed_at = datetime.now(timezone.utc)
+    min_value_gap_percent = Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0"))
+
+    surebets = detect_surebet_candidates(
+        events, odds_repository, market, freshness_policy=freshness_policy
+    )
+    signal_repository.reconcile(
+        SUREBET, [from_surebet(candidate) for candidate in surebets], observed_at=observed_at
+    )
+
+    value_gaps = detect_value_gap_candidates(
+        events,
+        odds_repository,
+        market,
+        freshness_policy=freshness_policy,
+        threshold_percent=min_value_gap_percent,
+    )
+    signal_repository.reconcile(
+        VALUE_GAP,
+        [from_value_gap(candidate) for candidate in value_gaps],
+        observed_at=observed_at,
+    )
+
+    movements = detect_movements(events, odds_repository, market)
+    for movement in movements:
+        movement_repository.save(movement, detected_at=observed_at)
+
+    return {
+        "active_surebets": len(signal_repository.find_active(SUREBET)),
+        "active_value_gaps": len(signal_repository.find_active(VALUE_GAP)),
+        "movements_recorded": len(movements),
+    }
+
+
 def main() -> None:
     configure_logging()
 
-    connection = sqlite3.connect(":memory:")
+    db_path = os.environ.get("DB_PATH", str(DEFAULT_DB_PATH))
+    if db_path != ":memory:":
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     initialize_database(connection)
 
     odds_repository = OddsRepository(connection)
     collector_run_repository = CollectorRunRepository(connection)
     raw_payload_repository = RawPayloadRepository(connection)
+    signal_repository = SignalRepository(connection)
+    movement_repository = MovementRepository(connection)
 
     collectors = build_collectors()
     sources = ", ".join(collector.source for collector in collectors)
@@ -255,6 +354,17 @@ def main() -> None:
     print("=" * 72)
     movement_rows = build_movement_report(events, odds_repository, DEFAULT_MARKET)
     print(render_movement_report(movement_rows))
+
+    sweep_summary = persist_detected_signals(
+        events,
+        odds_repository,
+        signal_repository,
+        movement_repository,
+        market=DEFAULT_MARKET,
+        freshness_policy=DEMO_FRESHNESS_POLICY,
+    )
+    print("\n" + "-" * 72)
+    print(f"Signals: {sweep_summary}")
 
     print("\n" + "-" * 72)
     print(f"Metrics: {metrics.snapshot()}")

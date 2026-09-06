@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 
-from anomaly_detection_engine.analysis.movement_detector import detect_rapid_movement
+from anomaly_detection_engine.analysis.movement_detection import detect_movements
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import MarketIdentity
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -29,81 +29,37 @@ def build_movement_report(
     threshold_percent: Decimal = Decimal("10.0"),
     max_window: timedelta = timedelta(hours=24),
 ) -> list[MovementRow]:
-    """Flags outcomes whose odds moved sharply between their last two readings.
-
-    Reuses analysis.movement_detector.detect_rapid_movement per
-    (event, bookmaker, outcome) pair -- this just discovers which
-    combinations currently have at least two readings and applies the
-    threshold across all of them, instead of comparing two snapshots by
-    hand.
-
-    max_window defaults far wider than detect_rapid_movement's own
-    default (5 minutes): "rapid" there means fast *and* big, but this
-    report is about any big move between two successive readings
-    regardless of how far apart those polls happened to land -- a 50%
-    drop discovered between readings 6 hours apart is still worth a
-    line, even if it wasn't "rapid" in the narrow sense.
-
-    Rows are sorted by the size of the move (either direction), largest
-    first -- a drop (odds getting cheaper, implying the market now
-    thinks that outcome more likely) is just as reportable as a rise.
+    """Flattens analysis.movement_detection.detect_movements into display
+    rows, sorted by the size of the move (either direction), largest
+    first -- a drop (odds getting cheaper, implying the market now thinks
+    that outcome more likely) is just as reportable as a rise.
 
     Unlike opportunity_report, this does not take a FreshnessPolicy.
     Freshness there guards against comparing odds *across bookmakers*
-    that were never simultaneously valid; this report always compares
-    one bookmaker against its own earlier reading, and max_window
-    already bounds how far apart those two readings can be -- a pair
-    further apart than max_window is excluded by detect_rapid_movement
-    itself (time_delta <= max_window), so there is no equivalent gap
-    here to close.
+    that were never simultaneously valid; this always compares one
+    bookmaker against its own earlier reading, and max_window already
+    bounds how far apart those two readings can be -- a pair further
+    apart than max_window is excluded by detect_rapid_movement itself,
+    so there is no equivalent gap here to close.
     """
-    rows: list[MovementRow] = []
-
-    for event in events:
-        latest = odds_repository.find_latest_for_market(
-            event_id=event.id,
-            market_type=market.market_type.value,
-            market_period=market.period.value,
+    rows = [
+        MovementRow(
+            event=candidate.event.display_name,
+            outcome=candidate.outcome,
+            bookmaker=candidate.bookmaker_name,
+            previous_odds=candidate.previous_odds,
+            current_odds=candidate.current_odds,
+            change_percent=candidate.change_percent,
+            time_delta=candidate.time_delta,
         )
-
-        seen: set[tuple[str, str]] = set()
-        for snapshot in latest:
-            key = (snapshot.bookmaker.id, snapshot.outcome)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            history = odds_repository.find_last_two(
-                event_id=event.id,
-                bookmaker_id=snapshot.bookmaker.id,
-                market_type=market.market_type.value,
-                market_period=market.period.value,
-                outcome=snapshot.outcome,
-            )
-            if len(history) < 2:
-                continue
-
-            previous, current = history
-            result = detect_rapid_movement(
-                previous,
-                current,
-                threshold_percent=threshold_percent,
-                max_window=max_window,
-            )
-            if not result.detected:
-                continue
-
-            rows.append(
-                MovementRow(
-                    event=event.display_name,
-                    outcome=snapshot.outcome,
-                    bookmaker=snapshot.bookmaker.name,
-                    previous_odds=result.previous_odds,
-                    current_odds=result.current_odds,
-                    change_percent=result.change_percent,
-                    time_delta=result.time_delta,
-                )
-            )
+        for candidate in detect_movements(
+            events,
+            odds_repository,
+            market,
+            threshold_percent=threshold_percent,
+            max_window=max_window,
+        )
+    ]
 
     rows.sort(key=lambda row: abs(row.change_percent), reverse=True)
     return rows

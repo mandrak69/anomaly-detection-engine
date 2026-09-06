@@ -105,6 +105,81 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             team_id TEXT NOT NULL REFERENCES teams(id),
             PRIMARY KEY (source, sport, source_team_name)
         );
+
+        -- Stateful signals (SUREBET, VALUE_GAP): a condition that can
+        -- persist across multiple poll cycles. Identity deliberately
+        -- excludes which bookmaker/odds are currently involved -- those
+        -- are "current state" that gets updated in place, not part of
+        -- what makes two detections "the same" opportunity. `details` is
+        -- a JSON blob for the type-specific current state (surebet legs,
+        -- or the single outlier bookmaker/odds for a value gap).
+        CREATE TABLE IF NOT EXISTS signals (
+            id TEXT PRIMARY KEY,
+            signal_type TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            market_period TEXT NOT NULL,
+            market_line TEXT,
+            outcome TEXT,
+            status TEXT NOT NULL,
+            edge_percent TEXT NOT NULL,
+            details TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_signals_identity
+            ON signals(
+                signal_type,
+                event_id,
+                market_type,
+                market_period,
+                COALESCE(market_line, ''),
+                COALESCE(outcome, '')
+            );
+
+        CREATE INDEX IF NOT EXISTS idx_signals_status
+            ON signals(status);
+
+        -- Movements are point-in-time events (a transition that already
+        -- happened), not an ongoing condition -- append-only, no status,
+        -- no reconciliation. Unlike `signals`, a duplicate here would
+        -- mean the same (event, bookmaker, outcome) transition was
+        -- reported twice for the exact same pair of readings, so it is
+        -- deduped on the full transition, not merged/updated like a
+        -- stateful signal would be.
+        CREATE TABLE IF NOT EXISTS movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            market_period TEXT NOT NULL,
+            market_line TEXT,
+            outcome TEXT NOT NULL,
+            bookmaker_id TEXT NOT NULL,
+            bookmaker_name TEXT NOT NULL,
+            previous_odds TEXT NOT NULL,
+            current_odds TEXT NOT NULL,
+            change_percent TEXT NOT NULL,
+            previous_observed_at TEXT NOT NULL,
+            current_observed_at TEXT NOT NULL,
+            detected_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_movements_transition
+            ON movements(
+                event_id,
+                bookmaker_id,
+                market_type,
+                market_period,
+                COALESCE(market_line, ''),
+                outcome,
+                previous_observed_at,
+                current_observed_at
+            );
+
+        CREATE INDEX IF NOT EXISTS idx_movements_event
+            ON movements(event_id, detected_at);
         """
     )
 

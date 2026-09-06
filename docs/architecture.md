@@ -43,9 +43,10 @@ Freshness / Temporal Validation
       ↓
 Analysis Engine
       ↓
-Anomaly Classification
+Detection (unconditional candidates)
       ↓
-Reporting
+      ├──→ Storage (SignalRepository / MovementRepository)
+      └──→ Anomaly Classification → Reporting
 ```
 
 ---
@@ -164,10 +165,12 @@ Persists historical observations and operational metadata.
 Current implementation:
 
 ```text
-SQLite
+SQLite (persistent file, see Storage Strategy -> DB_PATH)
 OddsRepository
 CollectorRunRepository
 RawPayloadRepository
+SignalRepository      stateful SUREBET/VALUE_GAP signals
+MovementRepository    append-only price-change transitions
 ```
 
 Potential future implementation:
@@ -197,15 +200,32 @@ Future modules:
 cross-market anomaly detection
 ```
 
+### Detection Layer
+
+`analysis.opportunity_detection` (`detect_surebet_candidates`,
+`detect_value_gap_candidates`) and `analysis.movement_detection`
+(`detect_movements`) sit between the primitive Analysis Layer modules
+(`calculate_arbitrage`, `detect_outliers`, `detect_rapid_movement`) and
+everything downstream. They answer "what is currently true" as
+structured candidates (`SurebetCandidate` with all three legs grouped
+together, not flattened; `ValueGapCandidate`; `MovementCandidate`) with
+no "worth telling someone" threshold baked in (SUREBET has none at all;
+VALUE_GAP keeps `detect_outliers`' own threshold, since that is part of
+what counts as an outlier, not a presentation filter). Both the
+Reporting Layer and the Storage Layer's `SignalRepository`/
+`MovementRepository` consume the same candidates, so detection logic
+exists in exactly one place regardless of what eventually happens to
+the result.
+
 ### Reporting Layer
 
-Consumes the Analysis Layer's output and applies an "is this worth a
-line in the report" threshold on top of it -- the Analysis Layer answers
-whether a condition holds (e.g. `is_surebet`, `detected`), the Reporting
-Layer decides whether it clears the bar to be worth a human's attention.
-This separation matters because the two questions have different
-answers for the same data: a mathematically real 0.05% surebet is still
-`is_surebet=True`, but noise for reporting purposes.
+Consumes the Detection Layer's candidates and applies an "is this worth
+a line in the report" threshold on top -- detection answers whether a
+condition holds, reporting decides whether it clears the bar to be
+worth a human's attention right now. This separation matters because the
+two questions have different answers for the same data: a mathematically
+real 0.05% surebet is still a real surebet, but noise for reporting
+purposes.
 
 Current reports:
 
@@ -218,7 +238,10 @@ movement_report       significant change between an outcome's last two
 Future:
 
 ```text
-web dashboard (currently text reports over the same repository data)
+web dashboard / notifications reading from SignalRepository /
+MovementRepository instead of recomputing candidates on demand
+(currently only the text reports above consume the Detection Layer;
+the persisted signals/movements tables have no presentation layer yet)
 ```
 
 ### Observability Layer
@@ -401,7 +424,11 @@ historical analysis
 reprocessing
 ```
 
-Current storage is optimized for PoC simplicity.
+Backed by a persistent SQLite file (`DB_PATH` env var, default
+`data/anomaly_detection.db`; `:memory:` still works for tests). The
+connection is opened with a 30s busy-timeout specifically because
+`scripts/watch_capture.py` can spawn concurrent `app.py` processes
+against the same file.
 
 Current tables:
 
@@ -420,6 +447,15 @@ events                    canonical event registry: sport, league,
 source_team_mappings      (source, sport, raw team name) -> team_id,
                           the permanent memory behind FixtureCatalog's
                           cross-source matching
+signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
+                          RESOLVED, first_seen_at/last_seen_at/
+                          resolved_at, unique-indexed on
+                          (signal_type, event, market, outcome) so a
+                          detection is upserted (reconciled) rather than
+                          duplicated across poll cycles
+movements                 append-only point-in-time transitions,
+                          unique-indexed on the full transition so a
+                          re-run detection sweep can't duplicate one
 ```
 
 Competitions/leagues and bookmakers are still plain strings (`league` on
@@ -430,7 +466,6 @@ above. Future tables may include:
 ```text
 competitions
 bookmakers
-anomalies
 ```
 
 ---
@@ -516,5 +551,26 @@ a bookmaker against its own earlier reading rather than across
 bookmakers at a point in time, and its own `max_window` parameter
 already bounds how far apart those two readings can be.
 
-A web dashboard (see Reporting Layer) remains the next open item -- the
-reports it would serve already exist as text.
+**Resolved:** where and how to persist derived information, not just raw
+odds. The Detection Layer's candidates (see above) are now the shared
+input to both Storage and Reporting instead of Reporting recomputing
+everything itself. `SignalRepository` gives SUREBET/VALUE_GAP a stateful
+lifecycle (`reconcile()`: ACTIVE -> still-ACTIVE -> RESOLVED when absent
+from a sweep -> reactivated if it reappears, without losing the original
+`first_seen_at`), while `MovementRepository` is append-only and
+deduplicates on the full transition since a price change has no
+lifecycle to track. Detection itself stays unconditional -- "worth
+reporting" thresholds are applied only at read time (Reporting Layer),
+so tightening or loosening them later never requires having discarded
+data. The one deliberate exception is VALUE_GAP's threshold, which is
+part of what defines an outlier, not a presentation filter, so the same
+`MIN_VALUE_GAP_PERCENT` value drives both detection and reporting.
+Verified end-to-end: a real 3-way surebet was persisted as ACTIVE, then
+correctly resolved (`status=RESOLVED`, `resolved_at` set) once a later
+odds change killed the arbitrage -- and that same price change was
+independently recorded in `movements`.
+
+A web dashboard / notification layer reading from `SignalRepository` /
+`MovementRepository` (see Reporting Layer) remains the next open item --
+the persisted tables exist but have no presentation layer of their own
+yet; only the text reports recompute candidates on demand.
