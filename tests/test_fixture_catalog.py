@@ -131,6 +131,56 @@ def test_dissimilar_spelling_below_threshold_creates_a_separate_team():
     assert teams == 2
 
 
+def test_ambiguous_fuzzy_match_creates_a_new_team_instead_of_guessing():
+    connection = make_connection()
+    # Seeded directly rather than via two catalog.match() calls: fuzzy
+    # matching "Manchester United U21" against a catalog that only knows
+    # "Manchester United" so far would itself resolve into that team
+    # (a separate, orthogonal fuzzy-matching quirk) before both ever
+    # coexist -- the scenario under test needs both to already exist.
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        ("team-mu", "Manchester United", "football"),
+    )
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        ("team-mu21", "Manchester United U21", "football"),
+    )
+    connection.commit()
+
+    catalog = FixtureCatalog(connection, source="src-a", fuzzy_threshold=80.0)
+
+    # "Man United" scores an almost exact tie between the two existing
+    # teams above -- must not be silently merged into either.
+    result = catalog.match(
+        sport="football", league="L", home_team_raw="Man United",
+        away_team_raw="Everton", start_time=T0,
+    )
+
+    assert result.event.home_team.canonical_name == "Man United"
+    teams = connection.execute(
+        "SELECT COUNT(*) AS n FROM teams WHERE canonical_name LIKE 'Man%United%'"
+    ).fetchone()["n"]
+    assert teams == 3
+
+
+def test_same_teams_different_league_are_different_events():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, source="src-a")
+
+    league_result = catalog.match(
+        sport="football", league="Premier League", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+    cup_result = catalog.match(
+        sport="football", league="FA Cup", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+
+    assert league_result.event.id != cup_result.event.id
+    assert league_result.event.home_team.id == cup_result.event.home_team.id
+
+
 def test_same_matchup_within_tolerance_reuses_the_event():
     connection = make_connection()
     catalog = FixtureCatalog(

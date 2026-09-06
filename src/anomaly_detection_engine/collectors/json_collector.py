@@ -5,17 +5,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from anomaly_detection_engine.collectors.base import OddsCollector
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 logger = logging.getLogger(__name__)
-
-# Current MVP scope (see README) is limited to pre-match full-time 1X2 markets,
-# and the sample/source payloads do not carry explicit market metadata yet.
-DEFAULT_MARKET = MarketIdentity(
-    market_type=MarketType.THREE_WAY,
-    period=MarketPeriod.FULL_TIME,
-)
 
 
 class JsonOddsCollector(OddsCollector):

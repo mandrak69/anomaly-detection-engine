@@ -24,3 +24,13 @@ class MarketIdentity:
     line: Decimal | None = None
     rules: str | None = None
     specifier: str | None = None
+
+
+# Current MVP scope (see README) is limited to pre-match full-time 1X2
+# markets, and the sample/source payloads do not carry explicit market
+# metadata yet. Lives here (not in a collector module) since it is a
+# domain default that collectors depend on, not the other way around.
+DEFAULT_MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY,
+    period=MarketPeriod.FULL_TIME,
+)

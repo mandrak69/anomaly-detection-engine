@@ -43,17 +43,20 @@ class MovementRepository:
         self._connection.execute(
             """
             INSERT OR IGNORE INTO movements (
-                event_id, market_type, market_period, market_line, outcome,
+                event_id, market_type, market_period, market_line,
+                market_rules, market_specifier, outcome,
                 bookmaker_id, bookmaker_name, previous_odds, current_odds,
                 change_percent, previous_observed_at, current_observed_at, detected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.event.id,
                 candidate.market.market_type.value,
                 candidate.market.period.value,
                 str(candidate.market.line) if candidate.market.line is not None else None,
+                candidate.market.rules,
+                candidate.market.specifier,
                 candidate.outcome,
                 candidate.bookmaker_id,
                 candidate.bookmaker_name,
@@ -82,6 +85,8 @@ class MovementRepository:
                 market_type=MarketType(row["market_type"]),
                 period=MarketPeriod(row["market_period"]),
                 line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
+                rules=row["market_rules"],
+                specifier=row["market_specifier"],
             ),
             outcome=row["outcome"],
             bookmaker_id=row["bookmaker_id"],

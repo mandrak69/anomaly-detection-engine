@@ -201,6 +201,67 @@ def test_metrics_are_updated_when_provided():
     assert snapshot["rejections_by_reason"] == {"semantic": 1}
 
 
+class _FlakyMatcher:
+    """Raises for one specific home_team, to simulate a matcher/
+    FixtureCatalog bug or transient error partway through a run -- not a
+    validation failure of the record itself."""
+
+    def __init__(self, event: Event, *, raises_for: str):
+        self._matcher = EventMatcher([event], TeamNormalizer([event.home_team.canonical_name, event.away_team.canonical_name]))
+        self._raises_for = raises_for
+
+    def match(self, **kwargs):
+        if kwargs["home_team_raw"] == self._raises_for:
+            raise RuntimeError("simulated matcher failure")
+        return self._matcher.match(**kwargs)
+
+
+def test_a_record_that_raises_during_matching_is_rejected_without_aborting_the_run():
+    good = build_raw_event()
+    poison = build_raw_event(home_team="Poison FC")
+
+    event = Event(
+        id="event-001",
+        sport="football",
+        league="demo-league",
+        home_team=Team("team-001", "Manchester United"),
+        away_team=Team("team-002", "Liverpool"),
+        start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),
+    )
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    initialize_database(connection)
+
+    odds_repository = OddsRepository(connection)
+    collector_run_repository = CollectorRunRepository(connection)
+    raw_payload_repository = RawPayloadRepository(connection)
+
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=[good, poison]),
+        matcher=_FlakyMatcher(event, raises_for="Poison FC"),
+        odds_repository=odds_repository,
+        collector_run_repository=collector_run_repository,
+        raw_payload_repository=raw_payload_repository,
+    )
+
+    # Must not raise -- the run has to reach a final CollectorRun state
+    # even though one record's processing raised an unexpected exception.
+    run = service.run()
+
+    assert run.status == CollectorRunStatus.PARTIAL
+    assert run.records_received == 2
+    assert run.records_accepted == 1
+    assert run.records_rejected == 1
+
+    assert len(odds_repository.find_by_event("event-001")) == 3
+
+    raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
+    assert len(raw_payloads) == 2
+    rejected = next(p for p in raw_payloads if not p.accepted)
+    assert rejected.rejection_reason.startswith("processing-error: RuntimeError")
+
+
 def test_collector_failure_produces_failed_run_with_error_details():
     collector = StubCollector(error=ValueError("source unreachable"))
     service, _, collector_run_repository, _ = build_service(collector)

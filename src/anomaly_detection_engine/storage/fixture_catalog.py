@@ -31,11 +31,13 @@ class FixtureCatalog:
     label is fixed at construction, matching how OddsIngestionService is
     already constructed once per collector).
 
-    Trade-off: a raw name that fuzzy-matches below fuzzy_threshold
-    becomes a brand-new canonical team rather than being merged into an
-    existing one. That is the conservative choice -- a harmless
-    near-duplicate team is better than silently merging two different
-    real teams because a threshold was set too loose.
+    Trade-off: a raw name that fuzzy-matches below fuzzy_threshold, or
+    whose top two candidates score within fuzzy_ambiguity_margin of each
+    other (see TeamNormalizer), becomes a brand-new canonical team rather
+    than being merged into an existing one. That is the conservative
+    choice -- a harmless near-duplicate team is better than silently
+    merging two different real teams because a threshold was set too
+    loose, or guessing between two candidates that were both plausible.
     """
 
     def __init__(
@@ -45,12 +47,14 @@ class FixtureCatalog:
         source: str,
         aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 85.0,
+        fuzzy_ambiguity_margin: float = 5.0,
         start_time_tolerance: timedelta = timedelta(minutes=30),
     ) -> None:
         self._connection = connection
         self._source = source
         self._aliases = aliases or {}
         self._fuzzy_threshold = fuzzy_threshold
+        self._fuzzy_ambiguity_margin = fuzzy_ambiguity_margin
         self._start_time_tolerance = start_time_tolerance
 
     def match(
@@ -101,11 +105,27 @@ class FixtureCatalog:
 
         existing = self._teams_for_sport(sport)
         normalizer = TeamNormalizer(
-            existing.keys(), aliases=self._aliases, fuzzy_threshold=self._fuzzy_threshold
+            existing.keys(),
+            aliases=self._aliases,
+            fuzzy_threshold=self._fuzzy_threshold,
+            ambiguity_margin=self._fuzzy_ambiguity_margin,
         )
         result = normalizer.normalize(raw_name)
 
-        if result.canonical_name is not None:
+        if result.method == "ambiguous":
+            # Two existing teams scored too close together to safely pick
+            # one (see TeamNormalizer) -- the conservative choice is the
+            # same as "unknown": a new team under the raw name, not a
+            # guessed merge into either candidate. Logged distinctly since
+            # this is exactly the kind of borderline call worth a human
+            # noticing, unlike a routine first-sighting.
+            logger.warning(
+                "fixture_catalog.team.ambiguous_fuzzy_match",
+                extra={"raw_name": raw_name, "sport": sport, "score": result.confidence},
+            )
+            team = self._create_team(canonical_name=raw_name, sport=sport)
+            confidence = result.confidence
+        elif result.canonical_name is not None:
             # The alias/fuzzy target may not exist as a team row yet (e.g.
             # the first-ever sighting of this team arrives under an alias
             # like "Man Utd" -> "Manchester United") -- create it under
@@ -169,7 +189,7 @@ class FixtureCatalog:
         self, *, sport: str, league: str, home: Team, away: Team, start_time: datetime
     ) -> Event:
         existing = self._find_event(
-            home_team_id=home.id, away_team_id=away.id, start_time=start_time
+            league=league, home_team_id=home.id, away_team_id=away.id, start_time=start_time
         )
         if existing is not None:
             return existing
@@ -204,19 +224,25 @@ class FixtureCatalog:
         return event
 
     def _find_event(
-        self, *, home_team_id: str, away_team_id: str, start_time: datetime
+        self, *, league: str, home_team_id: str, away_team_id: str, start_time: datetime
     ) -> Event | None:
+        # league is part of an event's identity, not just descriptive
+        # metadata: the same two teams can play each other in more than
+        # one competition (league + cup, or two age groups) within the
+        # start_time tolerance window, and those must not be merged into
+        # one canonical event just because the team IDs and kickoff time
+        # happen to line up.
         lower = (start_time - self._start_time_tolerance).isoformat()
         upper = (start_time + self._start_time_tolerance).isoformat()
         row = self._connection.execute(
             """
             SELECT * FROM events
-            WHERE home_team_id = ? AND away_team_id = ?
+            WHERE league = ? AND home_team_id = ? AND away_team_id = ?
               AND start_time BETWEEN ? AND ?
             ORDER BY ABS(julianday(start_time) - julianday(?))
             LIMIT 1
             """,
-            (home_team_id, away_team_id, lower, upper, start_time.isoformat()),
+            (league, home_team_id, away_team_id, lower, upper, start_time.isoformat()),
         ).fetchone()
         return self._map_event_row(row) if row else None
 

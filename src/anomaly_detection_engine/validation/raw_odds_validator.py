@@ -1,12 +1,15 @@
 from datetime import datetime
 from decimal import Decimal
 
+from anomaly_detection_engine.models.market import MarketType
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.validation.result import (
     DataValidationResult,
     ValidationIssue,
     ValidationStage,
 )
+
+_THREE_WAY_OUTCOMES = {"1", "X", "2"}
 
 
 def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
@@ -52,7 +55,7 @@ def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
             )
         )
 
-    if raw.home_team.strip() == raw.away_team.strip():
+    if raw.home_team.strip().casefold() == raw.away_team.strip().casefold():
         structural_errors.append(
             ValidationIssue(
                 code="same-home-away-team",
@@ -103,6 +106,19 @@ def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
             )
             continue
 
+        if not odds.is_finite():
+            # NaN/Infinity would otherwise reach the "> 1.0"/">1000"
+            # comparisons below, where NaN raises decimal.InvalidOperation
+            # (an unhandled crash, not a clean rejection) and Infinity
+            # silently passes as merely "suspiciously high".
+            semantic_errors.append(
+                ValidationIssue(
+                    code="invalid-odds-value",
+                    message=f"Odds for outcome '{outcome}' must be a finite number, got {odds}.",
+                )
+            )
+            continue
+
         if odds <= Decimal("1.0"):
             semantic_errors.append(
                 ValidationIssue(
@@ -120,6 +136,24 @@ def validate_raw_event_odds(raw: RawEventOdds) -> DataValidationResult:
                     code="suspiciously-high-odds",
                     message=(
                         f"Odds for outcome '{outcome}' are unusually high: {odds}."
+                    ),
+                )
+            )
+
+    if raw.market is not None and raw.market.market_type == MarketType.THREE_WAY:
+        # Domain invariant of the market itself, not just a collector's
+        # own quirk: a THREE_WAY (1X2) market has exactly these three
+        # outcomes, never more or fewer -- catching this here means every
+        # collector benefits, not just whichever one happened to have a
+        # test for it.
+        actual_outcomes = set(raw.odds.keys())
+        if actual_outcomes != _THREE_WAY_OUTCOMES:
+            semantic_errors.append(
+                ValidationIssue(
+                    code="invalid-three-way-outcomes",
+                    message=(
+                        f"THREE_WAY market must have exactly outcomes "
+                        f"{sorted(_THREE_WAY_OUTCOMES)}, got {sorted(actual_outcomes)}."
                     ),
                 )
             )

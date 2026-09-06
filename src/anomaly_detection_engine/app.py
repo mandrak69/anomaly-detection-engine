@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -15,10 +16,7 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
     detect_value_gap_candidates,
 )
 from anomaly_detection_engine.collectors.base import OddsCollector
-from anomaly_detection_engine.collectors.json_collector import (
-    DEFAULT_MARKET,
-    JsonOddsCollector,
-)
+from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
@@ -26,7 +24,7 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import (
 )
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.models.event import Event
-from anomaly_detection_engine.models.market import MarketIdentity
+from anomaly_detection_engine.models.market import DEFAULT_MARKET, MarketIdentity
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.reporting.movement_report import (
@@ -63,6 +61,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "anomaly_detect
 # the second one wait instead of failing outright.
 DB_BUSY_TIMEOUT_SECONDS = 30
 
+_VALID_ODDS_SOURCES = ("demo", "the-odds-api")
 
 # Known variant spellings fed to every FixtureCatalog instance below --
 # harmless where irrelevant (e.g. for Mozzart's own Serbian team names),
@@ -88,7 +87,73 @@ DEMO_FRESHNESS_POLICY = FreshnessPolicy(
 )
 
 
-def _the_odds_api_collector() -> OddsCollector:
+@dataclass(frozen=True)
+class AppConfig:
+    """Every environment-variable-driven decision, resolved exactly once
+    at startup -- so nothing downstream (run_ingestion, run_analysis,
+    persist_detected_signals) reads os.environ directly, and every choice
+    fails loudly here rather than silently deep inside a poll cycle.
+    """
+
+    db_path: str
+    odds_source: str
+    sport_key: str
+    min_surebet_profit_percent: Decimal
+    min_value_gap_percent: Decimal
+
+
+def load_config() -> AppConfig:
+    odds_source = os.environ.get("ODDS_SOURCE", "demo")
+    if odds_source not in _VALID_ODDS_SOURCES:
+        # A typo here (e.g. "the-odds-ap1") must not silently fall back to
+        # demo data -- that is exactly the kind of thing that would go
+        # unnoticed once this runs unattended.
+        raise ValueError(
+            f"ODDS_SOURCE={odds_source!r} must be one of {_VALID_ODDS_SOURCES}."
+        )
+
+    return AppConfig(
+        db_path=os.environ.get("DB_PATH", str(DEFAULT_DB_PATH)),
+        odds_source=odds_source,
+        sport_key=os.environ.get("ODDS_SPORT_KEY", "soccer_epl"),
+        min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
+        min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
+    )
+
+
+@dataclass
+class Runtime:
+    """Every wired-up dependency a poll/analysis cycle needs, built once
+    by build_runtime() -- plain data, no framework/DI container."""
+
+    connection: sqlite3.Connection
+    odds_repository: OddsRepository
+    collector_run_repository: CollectorRunRepository
+    raw_payload_repository: RawPayloadRepository
+    signal_repository: SignalRepository
+    movement_repository: MovementRepository
+    metrics: IngestionMetrics
+
+
+def build_runtime(config: AppConfig) -> Runtime:
+    if config.db_path != ":memory:":
+        Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(config.db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
+    connection.row_factory = sqlite3.Row
+    initialize_database(connection)
+
+    return Runtime(
+        connection=connection,
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+        signal_repository=SignalRepository(connection),
+        movement_repository=MovementRepository(connection),
+        metrics=IngestionMetrics(),
+    )
+
+
+def _the_odds_api_collector(config: AppConfig) -> OddsCollector:
     """Builds the live-source primary collector according to ODDS_API_MODE.
 
     "auto" (default) fetches over HTTP. "manual" reads a manually-saved
@@ -99,11 +164,10 @@ def _the_odds_api_collector() -> OddsCollector:
     env vars happen to be set, so a misconfigured mode fails loudly here
     rather than silently doing the wrong thing.
     """
-    sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
     mode = os.environ.get("ODDS_API_MODE", "auto")
 
     if mode == "auto":
-        return TheOddsApiCollector(sport_key)
+        return TheOddsApiCollector(config.sport_key)
 
     if mode == "manual":
         capture_dir = os.environ.get("ODDS_API_CAPTURE_DIR")
@@ -111,7 +175,7 @@ def _the_odds_api_collector() -> OddsCollector:
             raise ValueError(
                 "ODDS_API_MODE=manual requires ODDS_API_CAPTURE_DIR to be set."
             )
-        return TheOddsApiManualCollector(Path(capture_dir), sport_key=sport_key)
+        return TheOddsApiManualCollector(Path(capture_dir), sport_key=config.sport_key)
 
     raise ValueError(f"ODDS_API_MODE={mode!r} must be 'auto' or 'manual'.")
 
@@ -161,7 +225,7 @@ def _supplemental_collectors() -> list[OddsCollector]:
     return collectors
 
 
-def build_collectors() -> list[OddsCollector]:
+def build_collectors(config: AppConfig) -> list[OddsCollector]:
     """Returns the poll cycle(s) to run this invocation.
 
     The JSON demo path runs two polls against two fixed sample files (a
@@ -173,12 +237,12 @@ def build_collectors() -> list[OddsCollector]:
 
     Unlike the old build_collectors_and_events(), no discovery pass or
     replay wrapping is needed here: FixtureCatalog resolves events on the
-    fly as records are ingested (see main()), so each collector's
+    fly as records are ingested (see run_ingestion()), so each collector's
     collect() only ever needs to run once, called naturally by
     OddsIngestionService.run() itself.
     """
-    if os.environ.get("ODDS_SOURCE") == "the-odds-api":
-        primary_collectors: list[OddsCollector] = [_the_odds_api_collector()]
+    if config.odds_source == "the-odds-api":
+        primary_collectors: list[OddsCollector] = [_the_odds_api_collector(config)]
     else:
         samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
         primary_collectors = [
@@ -189,6 +253,65 @@ def build_collectors() -> list[OddsCollector]:
     return [*primary_collectors, *_supplemental_collectors()]
 
 
+def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
+    """Runs every configured collector's poll cycle and returns every
+    event known to the shared FixtureCatalog afterward, ready for
+    analysis -- the "collect -> validate -> match -> persist" half of the
+    pipeline, deliberately separate from analysis/reporting below.
+    """
+    collectors = build_collectors(config)
+    sources = ", ".join(collector.source for collector in collectors)
+    print(f"Sources: {sources} ({len(collectors)} poll(s))")
+
+    catalog: FixtureCatalog | None = None
+
+    for poll_number, collector in enumerate(collectors, start=1):
+        # One FixtureCatalog per collector, scoped to that collector's own
+        # source label (its team-name mapping cache is per-source), but
+        # all sharing the same connection/tables -- so a team or event
+        # resolved by one collector is immediately visible to the next.
+        catalog = FixtureCatalog(runtime.connection, source=collector.source, aliases=ALIASES)
+
+        service = OddsIngestionService(
+            collector=collector,
+            matcher=catalog,
+            odds_repository=runtime.odds_repository,
+            collector_run_repository=runtime.collector_run_repository,
+            raw_payload_repository=runtime.raw_payload_repository,
+            collector_version="0.1.0",
+            metrics=runtime.metrics,
+        )
+        run = service.run()
+        print(
+            f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
+            f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
+        )
+
+    return catalog.list_events() if catalog is not None else []
+
+
+def _demo_analysis_time(events: list[Event], odds_repository: OddsRepository) -> datetime:
+    """The demo dataset uses fixed calendar timestamps rather than live
+    polling, so "now" for freshness purposes is the newest observation
+    across everything ingested this run -- not wall-clock time, which
+    would make demo data look permanently stale.
+
+    Deliberately kept local to this demo-only code path rather than being
+    the default inside detect_surebet_candidates/detect_value_gap_candidates
+    themselves: those must always receive an explicit analysis_time from
+    their caller (real wall-clock time in any live deployment), never
+    silently fall back to "newest observation in the batch" -- that would
+    hide genuinely stale data behind snapshots that are merely close to
+    each other in time (see analysis.opportunity_detection).
+    """
+    all_observed_at = [
+        snapshot.observed_at
+        for event in events
+        for snapshot in odds_repository.find_by_event(event.id)
+    ]
+    return max(all_observed_at) if all_observed_at else datetime.now(timezone.utc)
+
+
 def persist_detected_signals(
     events: list[Event],
     odds_repository: OddsRepository,
@@ -197,6 +320,8 @@ def persist_detected_signals(
     *,
     market: MarketIdentity,
     freshness_policy: FreshnessPolicy,
+    analysis_time: datetime,
+    min_value_gap_percent: Decimal = Decimal("15.0"),
 ) -> dict:
     """Runs one detection sweep and persists the result -- the "where and
     how to keep derived information" half of the pipeline, deliberately
@@ -211,7 +336,7 @@ def persist_detected_signals(
     not a fact about whether the arbitrage exists, and persisting
     everything keeps that decision revisitable later without having
     discarded the underlying data. VALUE_GAP uses the same
-    MIN_VALUE_GAP_PERCENT threshold as the report, since that one *is*
+    min_value_gap_percent threshold as the report, since that one *is*
     part of the outlier detection itself (see
     analysis.opportunity_detection).
 
@@ -221,10 +346,10 @@ def persist_detected_signals(
     modules for why the two need different lifecycle handling.
     """
     observed_at = datetime.now(timezone.utc)
-    min_value_gap_percent = Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0"))
 
     surebets = detect_surebet_candidates(
-        events, odds_repository, market, freshness_policy=freshness_policy
+        events, odds_repository, market, freshness_policy=freshness_policy,
+        analysis_time=analysis_time,
     )
     signal_repository.reconcile(
         SUREBET, [from_surebet(candidate) for candidate in surebets], observed_at=observed_at
@@ -235,6 +360,7 @@ def persist_detected_signals(
         odds_repository,
         market,
         freshness_policy=freshness_policy,
+        analysis_time=analysis_time,
         threshold_percent=min_value_gap_percent,
     )
     signal_repository.reconcile(
@@ -254,65 +380,28 @@ def persist_detected_signals(
     }
 
 
-def main() -> None:
-    configure_logging()
-
-    db_path = os.environ.get("DB_PATH", str(DEFAULT_DB_PATH))
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
-    connection.row_factory = sqlite3.Row
-    initialize_database(connection)
-
-    odds_repository = OddsRepository(connection)
-    collector_run_repository = CollectorRunRepository(connection)
-    raw_payload_repository = RawPayloadRepository(connection)
-    signal_repository = SignalRepository(connection)
-    movement_repository = MovementRepository(connection)
-
-    collectors = build_collectors()
-    sources = ", ".join(collector.source for collector in collectors)
-    print(f"Sources: {sources} ({len(collectors)} poll(s))")
-
-    metrics = IngestionMetrics()
-    catalog: FixtureCatalog | None = None
-
-    for poll_number, collector in enumerate(collectors, start=1):
-        # One FixtureCatalog per collector, scoped to that collector's own
-        # source label (its team-name mapping cache is per-source), but
-        # all sharing the same connection/tables -- so a team or event
-        # resolved by one collector is immediately visible to the next.
-        catalog = FixtureCatalog(connection, source=collector.source, aliases=ALIASES)
-
-        service = OddsIngestionService(
-            collector=collector,
-            matcher=catalog,
-            odds_repository=odds_repository,
-            collector_run_repository=collector_run_repository,
-            raw_payload_repository=raw_payload_repository,
-            collector_version="0.1.0",
-            metrics=metrics,
-        )
-        run = service.run()
-        print(
-            f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
-            f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
-        )
-
-    events = catalog.list_events() if catalog is not None else []
+def run_analysis(runtime: Runtime, events: list[Event], config: AppConfig) -> None:
+    """Prints the per-event breakdown and the opportunity/movement
+    reports, then persists the same detection sweep -- everything
+    downstream of ingestion.
+    """
+    analysis_time = (
+        datetime.now(timezone.utc)
+        if config.odds_source == "the-odds-api"
+        else _demo_analysis_time(events, runtime.odds_repository)
+    )
 
     for event in events:
-        snapshots = odds_repository.find_latest_for_market(
+        snapshots = runtime.odds_repository.find_latest_for_market(
             event_id=event.id,
-            market_type=DEFAULT_MARKET.market_type.value,
-            market_period=DEFAULT_MARKET.period.value,
+            market=DEFAULT_MARKET,
         )
         if not snapshots:
             continue
 
         freshness = validate_freshness(
             snapshots,
-            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
+            analysis_time=analysis_time,
             policy=DEMO_FRESHNESS_POLICY,
         )
         if not freshness.valid:
@@ -341,33 +430,46 @@ def main() -> None:
     print("=" * 72)
     opportunity_rows = build_opportunity_report(
         events,
-        odds_repository,
+        runtime.odds_repository,
         DEFAULT_MARKET,
         freshness_policy=DEMO_FRESHNESS_POLICY,
-        min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
-        min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
+        analysis_time=analysis_time,
+        min_surebet_profit_percent=config.min_surebet_profit_percent,
+        min_value_gap_percent=config.min_value_gap_percent,
     )
     print(render_opportunity_report(opportunity_rows))
 
     print("\n" + "=" * 72)
     print("ODDS MOVEMENT (significant change between the last two readings)")
     print("=" * 72)
-    movement_rows = build_movement_report(events, odds_repository, DEFAULT_MARKET)
+    movement_rows = build_movement_report(events, runtime.odds_repository, DEFAULT_MARKET)
     print(render_movement_report(movement_rows))
 
     sweep_summary = persist_detected_signals(
         events,
-        odds_repository,
-        signal_repository,
-        movement_repository,
+        runtime.odds_repository,
+        runtime.signal_repository,
+        runtime.movement_repository,
         market=DEFAULT_MARKET,
         freshness_policy=DEMO_FRESHNESS_POLICY,
+        analysis_time=analysis_time,
+        min_value_gap_percent=config.min_value_gap_percent,
     )
     print("\n" + "-" * 72)
     print(f"Signals: {sweep_summary}")
 
     print("\n" + "-" * 72)
-    print(f"Metrics: {metrics.snapshot()}")
+    print(f"Metrics: {runtime.metrics.snapshot()}")
+
+
+def main() -> None:
+    configure_logging()
+
+    config = load_config()
+    runtime = build_runtime(config)
+
+    events = run_ingestion(runtime, config)
+    run_analysis(runtime, events, config)
 
 
 if __name__ == "__main__":

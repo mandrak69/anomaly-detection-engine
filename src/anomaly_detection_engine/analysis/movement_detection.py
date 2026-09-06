@@ -59,8 +59,7 @@ def detect_movements(
     for event in events:
         latest = odds_repository.find_latest_for_market(
             event_id=event.id,
-            market_type=market.market_type.value,
-            market_period=market.period.value,
+            market=market,
         )
 
         seen: set[tuple[str, str]] = set()
@@ -73,8 +72,7 @@ def detect_movements(
             history = odds_repository.find_last_two(
                 event_id=event.id,
                 bookmaker_id=snapshot.bookmaker.id,
-                market_type=market.market_type.value,
-                market_period=market.period.value,
+                market=market,
                 outcome=snapshot.outcome,
             )
             if len(history) < 2:

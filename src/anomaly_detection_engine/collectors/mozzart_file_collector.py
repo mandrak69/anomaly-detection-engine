@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from anomaly_detection_engine.collectors.json_collector import DEFAULT_MARKET
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
+from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 FINAL_RESULT_GROUP_NAME = "Konačan ishod"

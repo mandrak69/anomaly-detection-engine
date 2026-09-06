@@ -34,8 +34,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             ON odds_snapshots(event_id, observed_at);
 
         CREATE INDEX IF NOT EXISTS idx_odds_event_market
-            ON odds_snapshots(event_id, market_type, market_period, market_line);
+            ON odds_snapshots(
+                event_id, market_type, market_period, market_line,
+                market_rules, market_specifier
+            );
 
+        -- Full MarketIdentity (type + period + line + rules + specifier),
+        -- not just type/period/line: two snapshots that only differ in
+        -- rules/specifier are genuinely different markets (see
+        -- models.market.MarketIdentity) and must not be deduped together.
         CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_snapshot_dedupe
             ON odds_snapshots(
                 event_id,
@@ -43,6 +50,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 market_type,
                 market_period,
                 COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
                 outcome,
                 observed_at
             );
@@ -120,6 +129,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             market_type TEXT NOT NULL,
             market_period TEXT NOT NULL,
             market_line TEXT,
+            market_rules TEXT,
+            market_specifier TEXT,
             outcome TEXT,
             status TEXT NOT NULL,
             edge_percent TEXT NOT NULL,
@@ -129,6 +140,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             resolved_at TEXT
         );
 
+        -- Full MarketIdentity, same rule as odds_snapshots above -- a
+        -- signal's identity must not conflate two different markets that
+        -- only differ in rules/specifier.
         CREATE UNIQUE INDEX IF NOT EXISTS uq_signals_identity
             ON signals(
                 signal_type,
@@ -136,6 +150,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 market_type,
                 market_period,
                 COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
                 COALESCE(outcome, '')
             );
 
@@ -155,6 +171,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             market_type TEXT NOT NULL,
             market_period TEXT NOT NULL,
             market_line TEXT,
+            market_rules TEXT,
+            market_specifier TEXT,
             outcome TEXT NOT NULL,
             bookmaker_id TEXT NOT NULL,
             bookmaker_name TEXT NOT NULL,
@@ -166,6 +184,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             detected_at TEXT NOT NULL
         );
 
+        -- Full MarketIdentity, same rule as odds_snapshots above.
         CREATE UNIQUE INDEX IF NOT EXISTS uq_movements_transition
             ON movements(
                 event_id,
@@ -173,6 +192,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 market_type,
                 market_period,
                 COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
                 outcome,
                 previous_observed_at,
                 current_observed_at

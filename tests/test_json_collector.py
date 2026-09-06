@@ -2,10 +2,8 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from anomaly_detection_engine.collectors.json_collector import (
-    DEFAULT_MARKET,
-    JsonOddsCollector,
-)
+from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
+from anomaly_detection_engine.models.market import DEFAULT_MARKET
 
 
 def test_json_collector_reads_sample_data():

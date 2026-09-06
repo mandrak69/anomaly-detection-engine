@@ -140,6 +140,19 @@ needs to be re-solved. `app.py` uses `FixtureCatalog` for every source;
 `EventMatcher` remains available (and tested) for callers that
 genuinely want a fixed, non-growing candidate list.
 
+`TeamNormalizer` also guards against a false-confidence fuzzy match: if
+the top two candidates score within `ambiguity_margin` (default 5
+points) of each other, the result is `"ambiguous"` rather than a
+confident `"fuzzy"` pick, even when the top score alone would clear
+`fuzzy_threshold` -- e.g. "Man United" scoring ~85.5 against both
+"Manchester United" and "Manchester United U21" is a near-tie, not a
+clear winner. `FixtureCatalog` treats `"ambiguous"` the same
+conservative way as `"unknown"`: create a new canonical team rather than
+guess. Event resolution additionally scopes by `league`, not just team
+pair + start-time tolerance -- the same two teams can play each other in
+more than one competition (league + cup, or two age groups) within the
+tolerance window, and those must stay separate canonical events.
+
 ### Domain Layer
 
 Contains canonical models such as:
@@ -345,6 +358,15 @@ FAILED
 
 This gives the system source-coverage and ingestion-quality context.
 
+A `CollectorRun` is guaranteed to be recorded even if an individual
+record's processing raises unexpectedly (a validator/matcher/
+`FixtureCatalog`/`OddsRepository` bug or transient error, not just an
+ordinary rejection) -- `OddsIngestionService._ingest_one` catches
+per-record failures and reports them as a rejected record
+(`processing-error: <ExceptionType>: <message>`) instead of letting them
+abort the run. Losing the `CollectorRun` itself would hide exactly the
+kind of failure this record exists to surface.
+
 ---
 
 ## MarketIdentity
@@ -369,7 +391,12 @@ TOTALS + FULL_TIME + 2.5
 HANDICAP + FULL_TIME + -1.5
 ```
 
-Observations with different identities must not be compared.
+Observations with different identities must not be compared -- enforced
+end to end: `odds_snapshots`' dedupe index, `OddsRepository.find_latest`/
+`find_last_two`/`find_latest_for_market`, and the `signals`/`movements`
+identity keys all filter/group on the full tuple above, not just
+`market_type`/`period`/`line`. Two snapshots differing only in
+`rules`/`specifier` are a different market.
 
 ---
 
@@ -381,7 +408,12 @@ Checks shape and parseability.
 
 ### SEMANTIC
 
-Checks whether values make domain sense.
+Checks whether values make domain sense: odds are a finite `Decimal`
+greater than 1.0 (`Decimal("NaN")`/`Decimal("Infinity")` are rejected
+explicitly, not left to raise `decimal.InvalidOperation` or slip through
+as merely "suspiciously high"), a `THREE_WAY` market has exactly outcomes
+`{"1", "X", "2"}`, home/away team names are compared case-insensitively
+(not just by whitespace), and every timestamp is timezone-aware.
 
 ### IDENTITY
 
@@ -397,7 +429,12 @@ The analysis layer should receive only observations that passed all required sta
 
 ## Time Model
 
-Internal runtime timestamps are UTC and timezone-aware.
+Internal runtime timestamps are UTC and timezone-aware -- enforced at
+one boundary, `OddsRepository.save()`/`save_all()`, which convert
+`observed_at`/`source_timestamp` to UTC before storing them as text. A
+source is free to report whatever offset it wants; two equally-valid but
+differently-offset timestamps for the same instant would otherwise sort
+incorrectly against each other under plain lexicographic `ORDER BY`.
 
 Important concepts:
 
@@ -408,7 +445,19 @@ source_timestamp
 analysis_time
 ```
 
-`analysis_time` should be created once per analysis execution and passed through the relevant processing steps.
+`analysis_time` is created once per analysis execution and passed
+through as an explicit, required parameter
+(`detect_surebet_candidates`, `detect_value_gap_candidates`,
+`build_opportunity_report`) -- never derived from the observations being
+analyzed (e.g. their own newest `observed_at`). Deriving it that way
+would make a batch of uniformly old-but-mutually-close snapshots look
+"fresh" relative to itself regardless of how much real time has passed,
+defeating the freshness check it feeds. `app.py`'s demo path is the one
+sanctioned exception: its fixed calendar timestamps would otherwise
+always register as ancient, so it explicitly computes a stand-in "now"
+(the newest observation across everything ingested that run) and passes
+it in like any other caller would -- the workaround lives in `app.py`,
+never as a fallback inside the detection functions themselves.
 
 ---
 
@@ -433,9 +482,10 @@ against the same file.
 Current tables:
 
 ```text
-odds_snapshots           unique-indexed on (event, bookmaker, market,
-                          outcome, observed_at); re-saving an identical
-                          snapshot is a no-op rather than a duplicate row
+odds_snapshots           unique-indexed on (event, bookmaker, full
+                          MarketIdentity, outcome, observed_at);
+                          re-saving an identical snapshot is a no-op
+                          rather than a duplicate row
 collector_runs
 raw_payloads              every ingested RawEventOdds, accepted or
                           rejected, with its rejection reason, linked to
@@ -450,13 +500,26 @@ source_team_mappings      (source, sport, raw team name) -> team_id,
 signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
                           RESOLVED, first_seen_at/last_seen_at/
                           resolved_at, unique-indexed on
-                          (signal_type, event, market, outcome) so a
-                          detection is upserted (reconciled) rather than
-                          duplicated across poll cycles
+                          (signal_type, event, full MarketIdentity,
+                          outcome) so a detection is upserted
+                          (reconciled) rather than duplicated across
+                          poll cycles
 movements                 append-only point-in-time transitions,
-                          unique-indexed on the full transition so a
-                          re-run detection sweep can't duplicate one
+                          unique-indexed on the full transition
+                          (including full MarketIdentity) so a re-run
+                          detection sweep can't duplicate one
 ```
+
+`OddsRepository.save_all()` persists every outcome of one raw ingested
+record in a single transaction, so a failure partway through never
+leaves a half-written market snapshot. `find_latest_for_market` selects
+the latest snapshot per (bookmaker, outcome) via a `ROW_NUMBER() OVER
+(PARTITION BY ... ORDER BY observed_at DESC, id DESC)` window query, not
+a join between separate `MAX(observed_at)`/`MAX(id)` subqueries -- the
+two maxima are not guaranteed to come from the same row (a
+later-arriving snapshot can report an *older* `observed_at` than one
+already stored), so that join could silently drop a (bookmaker, outcome)
+out of the result entirely.
 
 Competitions/leagues and bookmakers are still plain strings (`league` on
 `events`, `bookmaker_name` on `odds_snapshots`) rather than their own
@@ -569,6 +632,30 @@ Verified end-to-end: a real 3-way surebet was persisted as ACTIVE, then
 correctly resolved (`status=RESOLVED`, `resolved_at` set) once a later
 odds change killed the arbitrage -- and that same price change was
 independently recorded in `movements`.
+
+**Resolved:** a round of correctness fixes made ahead of adding more
+bookmakers/markets, so growth doesn't compound existing bugs rather than
+add to the open item below. `MarketIdentity` is now honored end to end
+(every dedupe/lookup key includes `rules`/`specifier`, not just
+`type`/`period`/`line`) across `odds_snapshots`, `signals`, and
+`movements` -- see MarketIdentity and Storage Strategy above.
+`find_latest_for_market`'s `MAX(observed_at)`/`MAX(id)` join, which could
+silently drop a (bookmaker, outcome) out of the result when a
+later-arriving snapshot reported an older `observed_at` than one already
+stored, is now a `ROW_NUMBER()` window query. `analysis_time` is now an
+explicit, required parameter everywhere freshness is checked instead of
+`max(observed_at)` within the batch itself -- see Time Model above for
+why that computation hid genuine staleness. `OddsIngestionService` now
+persists one raw record's outcomes in a single transaction
+(`OddsRepository.save_all`) and guarantees a `CollectorRun` is always
+recorded even if a record's processing raises unexpectedly -- see
+CollectorRun above. `FixtureCatalog`/`TeamNormalizer` no longer merge a
+fuzzy match when the top two candidates are nearly tied, and event
+resolution now scopes by league -- see Matching Layer above. `app.py`
+was split into `AppConfig`/`build_runtime`/`run_ingestion`/
+`run_analysis` (still plain functions/dataclasses, no framework/DI
+container), and `ODDS_SOURCE` now fails fast on an unrecognized value
+instead of silently falling back to demo data.
 
 A web dashboard / notification layer reading from `SignalRepository` /
 `MovementRepository` (see Reporting Layer) remains the next open item --

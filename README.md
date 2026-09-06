@@ -199,7 +199,14 @@ TOTALS + FULL_TIME + 2.5
 HANDICAP + FULL_TIME + -1.5
 ```
 
-Only semantically equivalent markets may be compared.
+Only semantically equivalent markets may be compared -- enforced end to
+end: every repository query that groups or deduplicates odds (the
+`odds_snapshots` unique index, `OddsRepository.find_latest`/
+`find_last_two`/`find_latest_for_market`, and the `signals`/`movements`
+identity used by `SignalRepository`/`MovementRepository`) filters/keys on
+the full `MarketIdentity` tuple, not just `market_type`/`period`/`line`.
+Two snapshots that only differ in `rules`/`specifier` are a different
+market and must never be merged together.
 
 ### RawEventOdds
 
@@ -244,6 +251,15 @@ SUCCESS
 PARTIAL
 FAILED
 ```
+
+`OddsIngestionService.run()` guarantees a `CollectorRun` is always
+recorded, even if an individual record's processing raises unexpectedly
+(a validator/matcher/`FixtureCatalog`/`OddsRepository` bug or transient
+error, not just an ordinary rejection). `_ingest_one` catches per-record
+failures and reports them as a rejected record
+(`processing-error: <ExceptionType>: <message>`) rather than letting
+them abort the whole run -- losing the `CollectorRun` here would hide
+exactly the kind of failure observability most needs to see.
 
 ### DataValidationResult
 
@@ -291,6 +307,15 @@ endpoint (h2h/1X2 markets, decimal odds) and maps bookmaker outcomes onto
 names, skipping any bookmaker whose line is missing an outcome. It needs a
 subscription API key: pass `api_key=` or set the `ODDS_API_KEY` environment
 variable (never hardcode a real key in source or commit it).
+
+Which primary source `build_collectors()` uses is chosen by
+`ODDS_SOURCE`, resolved once in `load_config()` and validated eagerly:
+`"demo"` (the default) or `"the-odds-api"`, anything else raises
+`ValueError` immediately at startup. A typo here
+(`ODDS_SOURCE=the-odds-ap1`) must not silently fall back to demo data --
+that is exactly the kind of misconfiguration that would go unnoticed
+once this runs unattended, the same reasoning `ODDS_API_MODE`/
+`MOZZART_MODE` below already followed.
 
 ### Manual capture: mode is an explicit flag, not an inferred default
 
@@ -512,12 +537,20 @@ Team resolution, per raw name:
 A fuzzy score just under the threshold creates a new team rather than
 merging into an existing one -- deliberately conservative: a harmless
 near-duplicate team is better than silently merging two different real
-teams because the threshold was set too loose.
+teams because the threshold was set too loose. The same conservatism
+applies when the top two fuzzy candidates score within
+`fuzzy_ambiguity_margin` (default 5 points) of each other -- e.g. "Man
+United" scoring ~85.5 against both "Manchester United" and "Manchester
+United U21" is a near-tie, not a clear winner, so it also creates a new
+team rather than guessing between two plausible candidates.
 
 Event resolution reuses the same start-time-tolerance idea as
-`EventMatcher` (default 30 minutes): given the two resolved teams, an
-existing event for that exact team pair within the tolerance window is
-reused; otherwise a new canonical event is created.
+`EventMatcher` (default 30 minutes): given the two resolved teams *and
+the same league*, an existing event for that exact team pair within the
+tolerance window is reused; otherwise a new canonical event is created.
+League is part of an event's identity, not just descriptive metadata --
+the same two teams can play each other in more than one competition
+(league + cup, or two age groups) within the tolerance window.
 
 `EventMatcher` still exists and is still tested -- it is the right tool
 when you genuinely want a fixed, non-growing candidate list (e.g. a
@@ -547,6 +580,14 @@ source_timestamp
 
 `source_timestamp` is optional metadata supplied by the source.
 
+UTC normalization is enforced at one boundary: `OddsRepository.save()`/
+`save_all()` convert `observed_at`/`source_timestamp` to UTC
+(`.astimezone(timezone.utc)`) before storing them as text. Without this,
+two equally-valid but differently-offset timestamps (`+00:00` vs
+`+02:00` for the same instant) would sort incorrectly against each other
+under plain lexicographic `ORDER BY` -- a source is free to report
+whatever offset it wants; storage always normalizes it.
+
 ---
 
 ## Freshness
@@ -561,6 +602,21 @@ maximum observation spread
 ```
 
 Cross-source analysis must not compare stale or temporally incoherent observations.
+
+`validate_freshness` measures age against an explicit `analysis_time`
+parameter, required everywhere it's used (`detect_surebet_candidates`,
+`detect_value_gap_candidates`, `build_opportunity_report`) -- callers
+must pass their own real notion of "now" (`datetime.now(timezone.utc)`
+in production). It must never be derived from the snapshots' own
+timestamps (e.g. their newest `observed_at`): a batch where every
+snapshot is old but mutually close together would then look "fresh"
+relative to itself no matter how much real time has actually passed.
+`app.py`'s demo path is the one legitimate exception -- its fixed
+calendar timestamps would otherwise always register as ancient, so it
+explicitly passes the newest observation across everything ingested that
+run as its stand-in "now" (`_demo_analysis_time`), kept local to that
+demo-only code path rather than being a default inside the detection
+functions themselves.
 
 ---
 
@@ -735,11 +791,27 @@ immediately failing with "database is locked".
 
 ```text
 save
+save_all
 find_by_event
 find_latest
 find_last_two
 find_latest_for_market
 ```
+
+`save_all` persists every outcome of a single raw ingested record (a
+market's several outcomes) in one transaction/commit, so a failure
+partway through never leaves a half-written market snapshot the way
+calling `save()` once per outcome could -- `OddsIngestionService` uses it
+for exactly this reason.
+
+`find_latest_for_market` selects the single latest snapshot per
+(bookmaker, outcome) using a `ROW_NUMBER() OVER (PARTITION BY ...  ORDER
+BY observed_at DESC, id DESC)` window function, not a join between
+separate `MAX(observed_at)`/`MAX(id)` subqueries -- the two maxima are
+not guaranteed to come from the same row (a later-arriving snapshot can
+carry an *older* `observed_at` than one already stored), so that join
+could silently return no row at all for a given (bookmaker, outcome),
+dropping it out of every downstream detection.
 
 `FixtureCatalog` (see Matching above) owns three more tables --
 `teams`, `events`, `source_team_mappings` -- the persistent canonical
@@ -938,6 +1010,13 @@ rate limiting
 [x] Fail loud on wrong-shaped manual captures (MozzartResponseError, TheOddsApiError)
 [x] Persistent runtime database (DB_PATH)
 [x] Persisted derived signals (SignalRepository, MovementRepository) -- decoupled from reporting
+[x] MarketIdentity enforced everywhere (dedupe index, latest/last-two/latest-for-market queries, signal/movement identity) instead of just type/period/line
+[x] Fixed find_latest_for_market's MAX(observed_at)/MAX(id) join bug with a ROW_NUMBER() window query
+[x] Explicit, required analysis_time for freshness checks (real wall-clock time in production; no longer silently derivable from the snapshots' own timestamps)
+[x] Transactional per-record ingestion (OddsRepository.save_all) + guaranteed CollectorRun finalization even if a record's processing raises unexpectedly
+[x] FixtureCatalog hardening: fuzzy-match ambiguity margin, league as part of event identity
+[x] app.py split into AppConfig / build_runtime / run_ingestion / run_analysis
+[x] ODDS_SOURCE fail-fast (explicit "demo"/"the-odds-api", no silent fallback on a typo)
 ```
 
 ---
@@ -1016,6 +1095,32 @@ change -- it always compares a bookmaker against its own earlier
 reading (never across bookmakers at a point in time), and its own
 `max_window` parameter already bounds how far apart those two readings
 can be.
+
+**Done:** a round of correctness fixes ahead of adding more bookmakers/
+markets, so growth doesn't compound existing bugs. `MarketIdentity` is
+now honored end to end (every dedupe/lookup key includes `rules`/
+`specifier`, not just `type`/`period`/`line`) across `odds_snapshots`,
+`signals`, and `movements`. `find_latest_for_market`'s
+`MAX(observed_at)`/`MAX(id)` join -- which could silently drop a
+(bookmaker, outcome) out of the result entirely when a later-arriving
+snapshot reported an *older* `observed_at` than one already stored -- is
+now a `ROW_NUMBER()` window query, always returning a real row.
+`analysis_time` is now an explicit, required parameter everywhere
+freshness is checked, instead of being derived from `max(observed_at)`
+within the batch itself -- that computation made a batch of uniformly
+old-but-mutually-close snapshots look "fresh" relative to itself no
+matter how much real time had passed, which is precisely the kind of
+stale signal freshness exists to catch. `OddsIngestionService` now
+saves one raw record's outcomes in a single transaction
+(`OddsRepository.save_all`) and guarantees a `CollectorRun` is always
+recorded even if a record's processing raises unexpectedly.
+`FixtureCatalog` no longer merges a fuzzy match when the top two
+candidates are nearly tied (ambiguity margin), and treats league as part
+of an event's identity rather than only team pair + kickoff time.
+`app.py` was split into `AppConfig`/`build_runtime`/`run_ingestion`/
+`run_analysis` (still no framework/DI container), and `ODDS_SOURCE` now
+fails fast on an unrecognized value instead of silently falling back to
+demo data.
 
 ---
 

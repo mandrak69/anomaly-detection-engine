@@ -69,7 +69,9 @@ def test_report_surfaces_a_real_surebet():
         save(repository, "e1", bookmaker, "X", "4.00")
         save(repository, "e1", bookmaker, "2", "4.00")
 
-    rows = build_opportunity_report([event], repository, MARKET, freshness_policy=FRESH)
+    rows = build_opportunity_report(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
 
     surebet_rows = [r for r in rows if r.signal == SUREBET]
     assert len(surebet_rows) == 3
@@ -94,7 +96,9 @@ def test_report_surfaces_a_value_gap_but_not_a_surebet():
     for bookmaker, odds in [("Bet1", "2.65"), ("Bet2", "2.68"), ("Bet3", "2.70")]:
         save(repository, "e2", bookmaker, "2", odds)
 
-    rows = build_opportunity_report([event], repository, MARKET, freshness_policy=FRESH)
+    rows = build_opportunity_report(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
 
     assert not any(r.signal == SUREBET for r in rows)
 
@@ -126,6 +130,7 @@ def test_report_excludes_noise_below_thresholds():
         repository,
         MARKET,
         freshness_policy=FRESH,
+        analysis_time=NOW,
         min_surebet_profit_percent=Decimal("0.1"),
     )
 
@@ -146,7 +151,7 @@ def test_default_threshold_excludes_a_thin_real_world_margin():
     save(repository, "e5", "Soccer", "2", "3.65")
 
     default_rows = build_opportunity_report(
-        [event], repository, MARKET, freshness_policy=FRESH
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
     )
     assert default_rows == []
 
@@ -155,6 +160,7 @@ def test_default_threshold_excludes_a_thin_real_world_margin():
         repository,
         MARKET,
         freshness_policy=FRESH,
+        analysis_time=NOW,
         min_surebet_profit_percent=Decimal("0.1"),
     )
     surebet_rows = [r for r in lenient_rows if r.signal == SUREBET]
@@ -195,6 +201,7 @@ def test_rows_sorted_by_edge_descending():
         repository,
         MARKET,
         freshness_policy=FRESH,
+        analysis_time=NOW,
         min_value_gap_percent=Decimal("10.0"),
     )
 
@@ -222,7 +229,7 @@ def test_freshness_gate_excludes_a_stale_cross_source_mix():
         max_observation_spread=timedelta(minutes=5),
     )
     rows = build_opportunity_report(
-        [event], repository, MARKET, freshness_policy=strict_policy
+        [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
     )
     assert rows == []
 
@@ -238,6 +245,7 @@ def test_freshness_gate_excludes_a_stale_cross_source_mix():
         repository,
         MARKET,
         freshness_policy=lenient_policy,
+        analysis_time=NOW,
         min_surebet_profit_percent=Decimal("0.1"),
     )
     assert any(r.signal == SUREBET for r in lenient_rows)
@@ -255,7 +263,9 @@ def test_render_includes_key_fields():
         save(repository, "e1", bookmaker, "X", "4.00")
         save(repository, "e1", bookmaker, "2", "4.00")
 
-    rows = build_opportunity_report([event], repository, MARKET, freshness_policy=FRESH)
+    rows = build_opportunity_report(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
     text = render_opportunity_report(rows)
 
     assert "SUREBET" in text

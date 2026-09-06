@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
@@ -63,11 +64,23 @@ def detect_surebet_candidates(
     market: MarketIdentity,
     *,
     freshness_policy: FreshnessPolicy,
+    analysis_time: datetime,
 ) -> list[SurebetCandidate]:
     """Finds every real arbitrage (calculate_arbitrage.is_surebet) across
     the given events, gated by freshness the same way opportunity_report
     is (see that module for why: comparing odds across bookmakers only
     means something if they were simultaneously valid).
+
+    analysis_time is the "now" freshness is measured against, and is
+    required rather than defaulted to real wall-clock time: it must be
+    the caller's actual notion of "now" (real time in production), never
+    derived from the snapshots themselves (e.g. their own newest
+    observed_at) -- doing that would make every batch of snapshots look
+    fresh relative to itself no matter how old they all actually are,
+    which defeats the freshness check entirely. A demo/test harness
+    replaying fixed historical data is expected to pass its own explicit
+    stand-in "now" here; only such a caller should ever do that, not this
+    function itself.
 
     Deliberately does not apply a "minimum profit worth reporting"
     threshold -- that is a presentation-layer decision
@@ -82,15 +95,14 @@ def detect_surebet_candidates(
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
             event_id=event.id,
-            market_type=market.market_type.value,
-            market_period=market.period.value,
+            market=market,
         )
         if not snapshots:
             continue
 
         freshness = validate_freshness(
             snapshots,
-            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
+            analysis_time=analysis_time,
             policy=freshness_policy,
         )
         if not freshness.valid:
@@ -126,11 +138,15 @@ def detect_value_gap_candidates(
     market: MarketIdentity,
     *,
     freshness_policy: FreshnessPolicy,
+    analysis_time: datetime,
     threshold_percent: Decimal = Decimal("15.0"),
     min_bookmakers: int = 3,
 ) -> list[ValueGapCandidate]:
     """Finds every outcome priced well above its peers' consensus
     (detect_outliers, favorable direction only), gated by freshness.
+
+    See detect_surebet_candidates for why analysis_time is required
+    rather than derived from the snapshots themselves.
 
     threshold_percent/min_bookmakers are passed straight through to
     detect_outliers -- unlike SUREBET's profit threshold, this is part
@@ -143,15 +159,14 @@ def detect_value_gap_candidates(
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
             event_id=event.id,
-            market_type=market.market_type.value,
-            market_period=market.period.value,
+            market=market,
         )
         if not snapshots:
             continue
 
         freshness = validate_freshness(
             snapshots,
-            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
+            analysis_time=analysis_time,
             policy=freshness_policy,
         )
         if not freshness.valid:

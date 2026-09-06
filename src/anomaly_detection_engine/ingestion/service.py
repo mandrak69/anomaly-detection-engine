@@ -76,35 +76,66 @@ class OddsIngestionService:
                 error_message=str(exc),
             )
 
+        records_received = 0
         records_accepted = 0
         records_rejected = 0
         rejection_reasons: list[str] = []
 
-        for raw in raw_events:
-            accepted, reason = self._ingest_one(raw)
-            self._save_raw_payload(
-                run_id=run_id,
-                raw=raw,
-                accepted=accepted,
-                reason=reason,
-                received_at=started_at,
-            )
+        try:
+            for raw in raw_events:
+                records_received += 1
+                accepted, reason = self._ingest_one(raw)
 
-            if accepted:
-                records_accepted += 1
-            else:
-                records_rejected += 1
-                rejection_reasons.append(reason)
-                logger.warning(
-                    "ingestion.record.rejected",
-                    extra={
-                        "run_id": run_id,
-                        "source": raw.source,
-                        "home_team": raw.home_team,
-                        "away_team": raw.away_team,
-                        "reason": reason,
-                    },
-                )
+                try:
+                    self._save_raw_payload(
+                        run_id=run_id,
+                        raw=raw,
+                        accepted=accepted,
+                        reason=reason,
+                        received_at=started_at,
+                    )
+                except Exception as exc:
+                    # Audit-trail write failing must not also lose the
+                    # CollectorRun itself -- log and keep going rather
+                    # than letting this exception escape the loop.
+                    logger.error(
+                        "ingestion.raw_payload.save_failed",
+                        extra={
+                            "run_id": run_id,
+                            "source": raw.source,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                        },
+                    )
+
+                if accepted:
+                    records_accepted += 1
+                else:
+                    records_rejected += 1
+                    rejection_reasons.append(reason)
+                    logger.warning(
+                        "ingestion.record.rejected",
+                        extra={
+                            "run_id": run_id,
+                            "source": raw.source,
+                            "home_team": raw.home_team,
+                            "away_team": raw.away_team,
+                            "reason": reason,
+                        },
+                    )
+        except Exception:
+            # Should be unreachable given _ingest_one's own exception
+            # handling below, but the run's final state (however partial)
+            # must never depend on that holding true forever -- losing the
+            # CollectorRun record here would hide exactly the failure
+            # observability most needs to see. Deliberately catches
+            # Exception, not BaseException: a real KeyboardInterrupt/
+            # SystemExit should still propagate, not be swallowed here.
+            logger.error(
+                "ingestion.run.aborted_unexpectedly",
+                extra={"run_id": run_id, "source": source},
+                exc_info=True,
+            )
 
         if records_accepted == 0 and records_rejected > 0:
             status = CollectorRunStatus.FAILED
@@ -117,32 +148,42 @@ class OddsIngestionService:
             run_id=run_id,
             started_at=started_at,
             status=status,
-            records_received=len(raw_events),
+            records_received=records_received,
             records_accepted=records_accepted,
             records_rejected=records_rejected,
             rejection_reasons=rejection_reasons,
         )
 
     def _ingest_one(self, raw: RawEventOdds) -> tuple[bool, str | None]:
-        validation = validate_raw_event_odds(raw)
-        if not validation.valid:
-            codes = ", ".join(error.code for error in validation.errors)
-            return False, f"{validation.stage.value}: {codes}"
+        """Validates, matches, and persists one raw record.
 
-        match = self._matcher.match(
-            sport=raw.sport,
-            league=raw.league,
-            home_team_raw=raw.home_team,
-            away_team_raw=raw.away_team,
-            start_time=raw.start_time,
-        )
-        if match.event is None:
-            return False, f"identity: {match.reason}"
+        Catches everything (validator, matcher/FixtureCatalog, or
+        OddsRepository can all raise for reasons that have nothing to do
+        with this particular record being invalid, e.g. a transient
+        matcher/DB error) and reports it as a rejected record with a
+        distinguishable reason, rather than letting it escape and abort
+        the whole run -- see run()'s docstring/comments for why the run
+        must always reach a final state.
+        """
+        try:
+            validation = validate_raw_event_odds(raw)
+            if not validation.valid:
+                codes = ", ".join(error.code for error in validation.errors)
+                return False, f"{validation.stage.value}: {codes}"
 
-        bookmaker = Bookmaker(raw.source.lower(), raw.source)
+            match = self._matcher.match(
+                sport=raw.sport,
+                league=raw.league,
+                home_team_raw=raw.home_team,
+                away_team_raw=raw.away_team,
+                start_time=raw.start_time,
+            )
+            if match.event is None:
+                return False, f"identity: {match.reason}"
 
-        for outcome, odds in raw.odds.items():
-            self._odds_repository.save(
+            bookmaker = Bookmaker(raw.source.lower(), raw.source)
+
+            snapshots = [
                 OddsSnapshot(
                     event_id=match.event.id,
                     bookmaker=bookmaker,
@@ -152,9 +193,26 @@ class OddsIngestionService:
                     observed_at=raw.observed_at,
                     source_timestamp=raw.source_timestamp,
                 )
-            )
+                for outcome, odds in raw.odds.items()
+            ]
+            # One transaction for every outcome of this record, so a
+            # failure partway through never leaves a partial market
+            # snapshot (e.g. "1" and "X" saved but "2" missing).
+            self._odds_repository.save_all(snapshots)
 
-        return True, None
+            return True, None
+        except Exception as exc:
+            logger.error(
+                "ingestion.record.processing_failed",
+                extra={
+                    "source": raw.source,
+                    "home_team": raw.home_team,
+                    "away_team": raw.away_team,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return False, f"processing-error: {type(exc).__name__}: {exc}"
 
     def _save_raw_payload(
         self,

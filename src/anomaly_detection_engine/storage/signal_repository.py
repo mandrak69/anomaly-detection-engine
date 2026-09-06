@@ -149,6 +149,8 @@ class SignalRepository:
               AND market_type = ?
               AND market_period = ?
               AND COALESCE(market_line, '') = COALESCE(?, '')
+              AND COALESCE(market_rules, '') = COALESCE(?, '')
+              AND COALESCE(market_specifier, '') = COALESCE(?, '')
               AND COALESCE(outcome, '') = COALESCE(?, '')
             """,
             (
@@ -157,6 +159,8 @@ class SignalRepository:
                 candidate.market.market_type.value,
                 candidate.market.period.value,
                 _line_str(candidate.market),
+                candidate.market.rules,
+                candidate.market.specifier,
                 candidate.outcome,
             ),
         ).fetchone()
@@ -167,10 +171,11 @@ class SignalRepository:
             """
             INSERT INTO signals (
                 id, signal_type, event_id, market_type, market_period,
-                market_line, outcome, status, edge_percent, details,
+                market_line, market_rules, market_specifier, outcome,
+                status, edge_percent, details,
                 first_seen_at, last_seen_at, resolved_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 signal_id,
@@ -179,6 +184,8 @@ class SignalRepository:
                 candidate.market.market_type.value,
                 candidate.market.period.value,
                 _line_str(candidate.market),
+                candidate.market.rules,
+                candidate.market.specifier,
                 candidate.outcome,
                 ACTIVE,
                 str(candidate.edge_percent),
@@ -239,6 +246,8 @@ class SignalRepository:
                 market_type=MarketType(row["market_type"]),
                 period=MarketPeriod(row["market_period"]),
                 line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
+                rules=row["market_rules"],
+                specifier=row["market_specifier"],
             ),
             outcome=row["outcome"],
             status=row["status"],

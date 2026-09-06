@@ -59,7 +59,9 @@ def test_detect_surebet_candidates_groups_all_three_legs_into_one_candidate():
     save(repository, "e1", "Bet1", "X", "4.00")
     save(repository, "e1", "Bet1", "2", "4.00")
 
-    candidates = detect_surebet_candidates([event], repository, MARKET, freshness_policy=FRESH)
+    candidates = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
 
     assert len(candidates) == 1
     candidate = candidates[0]
@@ -80,7 +82,9 @@ def test_detect_surebet_candidates_has_no_minimum_profit_threshold():
     save(repository, "e1", "Bet1", "X", "3.001")
     save(repository, "e1", "Bet1", "2", "3.001")
 
-    candidates = detect_surebet_candidates([event], repository, MARKET, freshness_policy=FRESH)
+    candidates = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
 
     assert len(candidates) == 1
     assert candidates[0].profit_percent > Decimal("0")
@@ -100,7 +104,34 @@ def test_detect_surebet_candidates_respects_freshness():
         max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
     )
     candidates = detect_surebet_candidates(
-        [event], repository, MARKET, freshness_policy=strict_policy
+        [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
+    )
+
+    assert candidates == []
+
+
+def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():
+    # The exact bug analysis_time being explicit fixes: every snapshot
+    # here is mutually close together (no internal spread), which is what
+    # previously made analysis_time=max(observed_at within the batch)
+    # trivially "fresh" relative to itself no matter how long ago the
+    # whole batch actually happened. With a real, later analysis_time
+    # (NOW, three hours after all of them), the same batch is correctly
+    # caught as stale.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    old_time = NOW - timedelta(hours=3)
+    save(repository, "e1", "Bet1", "1", "2.50", observed_at=old_time)
+    save(repository, "e1", "Bet2", "X", "4.00", observed_at=old_time + timedelta(seconds=30))
+    save(repository, "e1", "Bet3", "2", "4.00", observed_at=old_time + timedelta(minutes=1))
+
+    strict_policy = FreshnessPolicy(
+        max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
+    )
+
+    candidates = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
     )
 
     assert candidates == []
@@ -120,7 +151,12 @@ def test_detect_value_gap_candidates_finds_favorable_outliers_only():
         save(repository, "e2", bookmaker, "2", odds)
 
     candidates = detect_value_gap_candidates(
-        [event], repository, MARKET, freshness_policy=FRESH, threshold_percent=Decimal("3.0")
+        [event],
+        repository,
+        MARKET,
+        freshness_policy=FRESH,
+        analysis_time=NOW,
+        threshold_percent=Decimal("3.0"),
     )
 
     assert len(candidates) == 1
@@ -130,10 +166,10 @@ def test_detect_value_gap_candidates_finds_favorable_outliers_only():
 
 
 def test_detect_value_gap_candidates_respects_freshness():
-    # freshness is relative to the newest observed_at *within the batch*,
-    # so all-identical timestamps (however old) trivially pass -- staleness
-    # only shows up as a real spread between old and fresh readings for
-    # the same outcome, same as detect_surebet's freshness test above.
+    # analysis_time is explicit (NOW), not derived from the batch, so a
+    # stale reading is caught even though it shares the batch with a
+    # genuinely fresh one -- StaleBook here is 30 days older than NOW,
+    # comfortably outside the 5-minute policy below.
     repository = make_repository()
     event = make_event("e2", "C", "D")
 
@@ -151,6 +187,7 @@ def test_detect_value_gap_candidates_respects_freshness():
         repository,
         MARKET,
         freshness_policy=strict_policy,
+        analysis_time=NOW,
         threshold_percent=Decimal("3.0"),
     )
 

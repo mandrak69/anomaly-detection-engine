@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
@@ -39,6 +40,7 @@ def build_opportunity_report(
     market: MarketIdentity,
     *,
     freshness_policy: FreshnessPolicy,
+    analysis_time: datetime,
     min_surebet_profit_percent: Decimal = Decimal("1.0"),
     min_value_gap_percent: Decimal = Decimal("15.0"),
     min_value_gap_bookmakers: int = 3,
@@ -49,6 +51,12 @@ def build_opportunity_report(
     module finds every real arbitrage/outlier unconditionally (raw
     facts), this applies the "is it worth a line in the report"
     threshold on top and flattens each into a display row.
+
+    analysis_time is required, not defaulted to real wall-clock time: it
+    is the "now" freshness is measured against (see
+    analysis.opportunity_detection.detect_surebet_candidates for why it
+    must be the caller's actual notion of "now", not derived from the
+    snapshots' own timestamps).
 
     freshness_policy is required, not defaulted: this report compares
     odds *across bookmakers at a point in time* (best odds, arbitrage,
@@ -80,7 +88,11 @@ def build_opportunity_report(
     rows: list[OpportunityRow] = []
 
     for surebet in detect_surebet_candidates(
-        events, odds_repository, market, freshness_policy=freshness_policy
+        events,
+        odds_repository,
+        market,
+        freshness_policy=freshness_policy,
+        analysis_time=analysis_time,
     ):
         if surebet.profit_percent < min_surebet_profit_percent:
             continue
@@ -102,6 +114,7 @@ def build_opportunity_report(
         odds_repository,
         market,
         freshness_policy=freshness_policy,
+        analysis_time=analysis_time,
         threshold_percent=min_value_gap_percent,
         min_bookmakers=min_value_gap_bookmakers,
     ):
