@@ -536,6 +536,15 @@ The detector evaluates percentage change and elapsed time.
 noise-filtered, at-a-glance table: who (bookmaker), where (event/outcome),
 how much (odds and edge %), sorted by edge descending.
 
+`build_opportunity_report` requires a `freshness_policy: FreshnessPolicy`
+argument (no default -- there's no one sensible window across
+deployments) and skips any event that fails `validate_freshness` before
+computing anything: this report compares odds *across bookmakers at a
+point in time*, which only means something if those odds were actually
+simultaneously valid. Without this, an event shared by a fast-moving
+source and a source with old/fixed timestamps could produce a SUREBET or
+VALUE_GAP built from odds that were never really available together.
+
 Two signal types, each with its own "is this worth a line in the report"
 threshold so ordinary bookmaker-margin spread doesn't flood it:
 
@@ -782,15 +791,12 @@ rate limiting
 [x] Add a manual-capture collector for a source that can't be fetched automatically (MozzartFileCollector)
 [x] Wire manual-capture sources into app.py's demo as supplemental collectors (MOZZART_CAPTURE_DIR)
 [x] Persistent event/fixtures catalog (FixtureCatalog: teams, events, source_team_mappings)
+[x] Wire freshness checks into build_opportunity_report (required freshness_policy parameter)
 ```
 
 Everything above is done. Genuinely open next:
 
 ```text
-[ ] Wire freshness checks into build_opportunity_report/build_movement_report
-    (only main()'s per-event display loop checks freshness today; the
-    reports don't, and can compare odds that were never actually
-    simultaneously available -- see Next Architectural Milestone below)
 [ ] Web dashboard (reports are text-only so far)
 [ ] Source-specific validation rules
 [ ] Database growth / retention policy for high-frequency polling
@@ -818,13 +824,20 @@ canonical event, verified end-to-end with a Mozzart capture merging into
 the JSON demo's "Manchester United vs Liverpool" and producing a real
 cross-source surebet in the opportunity report.
 
-One gap this surfaced rather than solved: `build_opportunity_report`
-and `build_movement_report` don't run a freshness check the way the
-per-event display loop in `main()` does. Combining a source with
-wall-clock-fresh `observed_at` (Mozzart, TheOddsApi) against the JSON
-demo's fixed historical timestamps can produce a report row comparing
-odds that were never actually simultaneously available -- open item,
-not yet fixed.
+**Done:** `build_opportunity_report` now takes a required
+`freshness_policy: FreshnessPolicy` parameter and skips any event that
+fails `validate_freshness` before computing best odds / arbitrage /
+outliers -- required rather than defaulted, since there's no one
+sensible freshness window across deployments (it depends on real
+polling frequency). Confirmed fixed against the exact case that
+surfaced it: re-running the Mozzart-merges-into-the-JSON-demo-fixture
+scenario above now correctly reports "No opportunities above
+threshold" instead of the cross-source SUREBET/VALUE_GAP rows it
+produced before this. `build_movement_report` did not need the same
+change -- it always compares a bookmaker against its own earlier
+reading (never across bookmakers at a point in time), and its own
+`max_window` parameter already bounds how far apart those two readings
+can be.
 
 ---
 

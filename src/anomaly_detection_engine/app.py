@@ -190,6 +190,7 @@ def main() -> None:
         events,
         odds_repository,
         DEFAULT_MARKET,
+        freshness_policy=DEMO_FRESHNESS_POLICY,
         min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
     )

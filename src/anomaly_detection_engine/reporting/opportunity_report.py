@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
+from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
 from anomaly_detection_engine.analysis.outlier_detector import detect_outliers
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import MarketIdentity
@@ -29,11 +30,24 @@ def build_opportunity_report(
     odds_repository: OddsRepository,
     market: MarketIdentity,
     *,
+    freshness_policy: FreshnessPolicy,
     min_surebet_profit_percent: Decimal = Decimal("1.0"),
     min_value_gap_percent: Decimal = Decimal("15.0"),
     min_value_gap_bookmakers: int = 3,
 ) -> list[OpportunityRow]:
     """Surfaces real betting opportunities and filters out noise.
+
+    freshness_policy is required, not defaulted: this report compares
+    odds *across bookmakers at a point in time* (best odds, arbitrage,
+    consensus deviation), which is only meaningful if those odds were
+    actually simultaneously valid. Without this gate, a fast-moving
+    source (a live API, a fresh manual capture) sharing an event with a
+    source that has old/fixed timestamps can produce a SUREBET or
+    VALUE_GAP built from odds that were never really available at the
+    same time -- confirmed during development: a manual capture merged
+    into a demo fixture with month-old snapshots produced exactly this.
+    There's no single sensible default across deployments (it depends on
+    real polling frequency), so callers must decide.
 
     Two signal types, both already-vetted analysis modules -- this just
     applies a "is it worth a line in the report" threshold on top:
@@ -66,6 +80,14 @@ def build_opportunity_report(
             market_period=market.period.value,
         )
         if not snapshots:
+            continue
+
+        freshness = validate_freshness(
+            snapshots,
+            analysis_time=max(snapshot.observed_at for snapshot in snapshots),
+            policy=freshness_policy,
+        )
+        if not freshness.valid:
             continue
 
         best = find_best_odds(snapshots, event_id=event.id, market=market)

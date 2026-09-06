@@ -477,17 +477,22 @@ opportunity report found a real surebet combining a Mozzart leg with a
 JSON-demo-bookmaker leg -- cross-source matching that was not possible
 before this.
 
-That work surfaced the next open item: `build_opportunity_report` and
-`build_movement_report` don't run a freshness check the way `main()`'s
-per-event display loop does (`validate_freshness` against
-`DEMO_FRESHNESS_POLICY`). Once a fast-moving source (Mozzart, live
-`the-odds-api`, both `observed_at`-stamped near wall-clock "now") shares
-an event with the JSON demo's fixed historical timestamps, the reports
-can present a signal comparing odds that were never actually
-simultaneously available. `main()`'s display loop already guards against
-exactly this (it correctly printed `SKIP ... not fresh` for that event
-during verification); the reports should apply the same gate before
-computing best odds / arbitrage / outliers, not just before printing.
+**Resolved:** that work surfaced a gap -- `build_opportunity_report`
+compared odds across bookmakers without checking whether they were ever
+actually simultaneously valid, the way `main()`'s per-event display loop
+already did via `validate_freshness`. Fixed by making
+`freshness_policy: FreshnessPolicy` a required parameter of
+`build_opportunity_report`, applied per event before computing best
+odds / arbitrage / outliers -- required rather than defaulted, since the
+right window depends on real polling frequency and there's no sensible
+one-size-fits-all value. Confirmed against the exact case that surfaced
+it: re-running the Mozzart-merges-into-the-JSON-demo-fixture scenario
+now correctly reports no opportunities instead of the cross-source
+SUREBET/VALUE_GAP rows it produced before the fix.
+`build_movement_report` did not need the same change: it always compares
+a bookmaker against its own earlier reading rather than across
+bookmakers at a point in time, and its own `max_window` parameter
+already bounds how far apart those two readings can be.
 
-A web dashboard (see Reporting Layer) remains a separate, smaller-scoped
-open item -- the reports it would serve already exist as text.
+A web dashboard (see Reporting Layer) remains the next open item -- the
+reports it would serve already exist as text.

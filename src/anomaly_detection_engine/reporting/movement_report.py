@@ -47,6 +47,15 @@ def build_movement_report(
     Rows are sorted by the size of the move (either direction), largest
     first -- a drop (odds getting cheaper, implying the market now
     thinks that outcome more likely) is just as reportable as a rise.
+
+    Unlike opportunity_report, this does not take a FreshnessPolicy.
+    Freshness there guards against comparing odds *across bookmakers*
+    that were never simultaneously valid; this report always compares
+    one bookmaker against its own earlier reading, and max_window
+    already bounds how far apart those two readings can be -- a pair
+    further apart than max_window is excluded by detect_rapid_movement
+    itself (time_delta <= max_window), so there is no equivalent gap
+    here to close.
     """
     rows: list[MovementRow] = []
 
