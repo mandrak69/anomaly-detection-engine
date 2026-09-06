@@ -9,6 +9,7 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import (
     API_KEY_ENV_VAR,
     TheOddsApiCollector,
     TheOddsApiError,
+    TheOddsApiManualCollector,
 )
 
 SAMPLE_RESPONSE = [
@@ -140,3 +141,35 @@ def test_http_error_is_wrapped_in_the_odds_api_error():
     with patch("urllib.request.urlopen", side_effect=http_error):
         with pytest.raises(TheOddsApiError, match="401"):
             collector.collect()
+
+
+def test_manual_collector_parses_the_same_response_shape_as_the_auto_one(tmp_path):
+    (tmp_path / "capture.json").write_text(json.dumps(SAMPLE_RESPONSE), encoding="utf-8")
+
+    collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+    result = collector.collect()
+
+    assert len(result) == 1
+    raw = result[0]
+    assert raw.source == "Bet365"
+    assert raw.league == "EPL"
+    assert raw.odds == {
+        "1": Decimal("2.15"),
+        "2": Decimal("3.20"),
+        "X": Decimal("3.45"),
+    }
+    # Acquired from a file, not the network, so observed_at should be
+    # the capture's own modification time, not read from the payload.
+    assert raw.observed_at.tzinfo is not None
+    assert not (tmp_path / "capture.json").exists()
+    assert list((tmp_path / "history").glob("capture_*.json"))
+
+
+def test_manual_collector_source_label_includes_sport_key(tmp_path):
+    collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+    assert collector.source == "the-odds-api-manual:soccer_epl"
+
+
+def test_manual_collector_returns_empty_when_no_capture_waiting(tmp_path):
+    collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+    assert collector.collect() == []

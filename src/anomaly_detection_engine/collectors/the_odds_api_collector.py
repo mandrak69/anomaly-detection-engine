@@ -5,10 +5,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable
 
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import DEFAULT_MARKET
+from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,87 @@ class TheOddsApiError(RuntimeError):
     """Raised for any failure talking to the-odds-api.com (network, HTTP, auth)."""
 
 
+def parse_the_odds_api_response(
+    raw: str | bytes, observed_at: datetime, *, league_fallback: str = ""
+) -> list[RawEventOdds]:
+    """Maps a the-odds-api.com /v4/sports/{sport}/odds response (h2h,
+    decimal odds) onto RawEventOdds, one per bookmaker per event.
+
+    Shared by TheOddsApiCollector (auto, fetched over HTTP) and
+    TheOddsApiManualCollector (a manually-captured copy of the identical
+    response shape) so both go through exactly the same mapping.
+    league_fallback is used when an event has no sport_title field.
+    """
+    events = json.loads(raw, parse_float=Decimal)
+    result: list[RawEventOdds] = []
+
+    for event in events:
+        home_team = event["home_team"]
+        away_team = event["away_team"]
+        start_time = datetime.fromisoformat(event["commence_time"])
+        league = event.get("sport_title", league_fallback)
+
+        for bookmaker in event.get("bookmakers", []):
+            odds = _extract_1x2_odds(bookmaker, home_team, away_team)
+            if odds is None:
+                continue
+
+            last_update = bookmaker.get("last_update")
+            source_timestamp = (
+                datetime.fromisoformat(last_update) if last_update else None
+            )
+
+            result.append(
+                RawEventOdds(
+                    source=bookmaker.get("title") or bookmaker.get("key", "unknown"),
+                    sport="football",
+                    league=league,
+                    home_team=home_team,
+                    away_team=away_team,
+                    start_time=start_time,
+                    observed_at=observed_at,
+                    market=DEFAULT_MARKET,
+                    odds=odds,
+                    source_timestamp=source_timestamp,
+                )
+            )
+
+    return result
+
+
+def _extract_1x2_odds(
+    bookmaker: dict, home_team: str, away_team: str
+) -> dict[str, Decimal] | None:
+    h2h_market = next(
+        (m for m in bookmaker.get("markets", []) if m.get("key") == "h2h"),
+        None,
+    )
+    if h2h_market is None:
+        return None
+
+    odds: dict[str, Decimal] = {}
+    for outcome in h2h_market.get("outcomes", []):
+        name = outcome.get("name", "")
+        price = outcome.get("price")
+        if price is None:
+            continue
+
+        if name == home_team:
+            odds["1"] = Decimal(price)
+        elif name == away_team:
+            odds["2"] = Decimal(price)
+        elif name.strip().lower() in _DRAW_OUTCOME_NAMES:
+            odds["X"] = Decimal(price)
+
+    # A bookmaker publishing an incomplete 1X2 line (e.g. draw missing)
+    # isn't usable for this market's analysis; skip it rather than
+    # producing a RawEventOdds with a hole in its odds dict.
+    if set(odds) != {"1", "X", "2"}:
+        return None
+
+    return odds
+
+
 class TheOddsApiCollector(OddsCollector):
     """Collector for https://the-odds-api.com h2h (1X2) football markets.
 
@@ -33,6 +116,11 @@ class TheOddsApiCollector(OddsCollector):
     returning the raw response body as bytes) so tests can supply a
     canned response instead of making a real network call. It defaults
     to a real HTTP GET via urllib.
+
+    For when the API itself is temporarily unavailable (rate limit,
+    outage, exhausted quota) but a response body can still be obtained
+    by hand, see TheOddsApiManualCollector below -- same response
+    schema, same parsing, different acquisition.
     """
 
     def __init__(
@@ -71,85 +159,18 @@ class TheOddsApiCollector(OddsCollector):
             extra={"sport_key": self._sport_key, "regions": self._regions},
         )
 
-        events = json.loads(self._fetch(url), parse_float=Decimal)
-
+        raw = self._fetch(url)
         observed_at = datetime.now(timezone.utc)
-        result: list[RawEventOdds] = []
-
-        for event in events:
-            home_team = event["home_team"]
-            away_team = event["away_team"]
-            start_time = datetime.fromisoformat(event["commence_time"])
-            league = event.get("sport_title", self._sport_key)
-
-            for bookmaker in event.get("bookmakers", []):
-                odds = self._extract_1x2_odds(bookmaker, home_team, away_team)
-                if odds is None:
-                    continue
-
-                last_update = bookmaker.get("last_update")
-                source_timestamp = (
-                    datetime.fromisoformat(last_update) if last_update else None
-                )
-
-                result.append(
-                    RawEventOdds(
-                        source=bookmaker.get("title") or bookmaker.get("key", "unknown"),
-                        sport="football",
-                        league=league,
-                        home_team=home_team,
-                        away_team=away_team,
-                        start_time=start_time,
-                        observed_at=observed_at,
-                        market=DEFAULT_MARKET,
-                        odds=odds,
-                        source_timestamp=source_timestamp,
-                    )
-                )
+        result = parse_the_odds_api_response(
+            raw, observed_at, league_fallback=self._sport_key
+        )
 
         logger.info(
             "the_odds_api.response",
-            extra={
-                "sport_key": self._sport_key,
-                "events_returned": len(events),
-                "raw_records_produced": len(result),
-            },
+            extra={"sport_key": self._sport_key, "raw_records_produced": len(result)},
         )
 
         return result
-
-    @staticmethod
-    def _extract_1x2_odds(
-        bookmaker: dict, home_team: str, away_team: str
-    ) -> dict[str, Decimal] | None:
-        h2h_market = next(
-            (m for m in bookmaker.get("markets", []) if m.get("key") == "h2h"),
-            None,
-        )
-        if h2h_market is None:
-            return None
-
-        odds: dict[str, Decimal] = {}
-        for outcome in h2h_market.get("outcomes", []):
-            name = outcome.get("name", "")
-            price = outcome.get("price")
-            if price is None:
-                continue
-
-            if name == home_team:
-                odds["1"] = Decimal(price)
-            elif name == away_team:
-                odds["2"] = Decimal(price)
-            elif name.strip().lower() in _DRAW_OUTCOME_NAMES:
-                odds["X"] = Decimal(price)
-
-        # A bookmaker publishing an incomplete 1X2 line (e.g. draw missing)
-        # isn't usable for this market's analysis; skip it rather than
-        # producing a RawEventOdds with a hole in its odds dict.
-        if set(odds) != {"1", "X", "2"}:
-            return None
-
-        return odds
 
     @staticmethod
     def _http_get(url: str) -> bytes:
@@ -164,3 +185,35 @@ class TheOddsApiCollector(OddsCollector):
             ) from exc
         except urllib.error.URLError as exc:
             raise TheOddsApiError(f"The Odds API request failed: {exc.reason}") from exc
+
+
+class TheOddsApiManualCollector(ManualCaptureCollector):
+    """Manual-capture fallback for TheOddsApiCollector's exact response shape.
+
+    For when the API itself can't be reached automatically right now
+    (rate limit, outage, exhausted quota) but you can still obtain one
+    response body by hand and want it ingested through the identical
+    parsing path as the live collector -- same 1X2 mapping, same
+    RawEventOdds output, just acquired differently. Save the response
+    body to `capture_dir/filename` (default "capture.json"); the rest
+    (archiving, no-file-yet handling, parse-failure handling) is the
+    same drop-file mechanism MozzartFileCollector uses.
+    """
+
+    def __init__(
+        self,
+        capture_dir: Path,
+        *,
+        sport_key: str,
+        filename: str = "capture.json",
+        history_dirname: str = "history",
+    ) -> None:
+        super().__init__(
+            capture_dir,
+            parse=lambda raw_text, observed_at: parse_the_odds_api_response(
+                raw_text, observed_at, league_fallback=sport_key
+            ),
+            source_label=f"the-odds-api-manual:{sport_key}",
+            filename=filename,
+            history_dirname=history_dirname,
+        )

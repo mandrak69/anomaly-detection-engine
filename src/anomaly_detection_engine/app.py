@@ -13,7 +13,10 @@ from anomaly_detection_engine.collectors.json_collector import (
     JsonOddsCollector,
 )
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
-from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiCollector
+from anomaly_detection_engine.collectors.the_odds_api_collector import (
+    TheOddsApiCollector,
+    TheOddsApiManualCollector,
+)
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.observability.logging_config import configure_logging
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
@@ -56,23 +59,75 @@ DEMO_FRESHNESS_POLICY = FreshnessPolicy(
 )
 
 
+def _the_odds_api_collector() -> OddsCollector:
+    """Builds the live-source primary collector according to ODDS_API_MODE.
+
+    "auto" (default) fetches over HTTP. "manual" reads a manually-saved
+    copy of the identical response shape from ODDS_API_CAPTURE_DIR
+    instead -- for when the API itself is temporarily unreachable (rate
+    limit, outage, exhausted quota) but a response body can still be
+    obtained by hand. Both modes are explicit, not inferred from which
+    env vars happen to be set, so a misconfigured mode fails loudly here
+    rather than silently doing the wrong thing.
+    """
+    sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
+    mode = os.environ.get("ODDS_API_MODE", "auto")
+
+    if mode == "auto":
+        return TheOddsApiCollector(sport_key)
+
+    if mode == "manual":
+        capture_dir = os.environ.get("ODDS_API_CAPTURE_DIR")
+        if not capture_dir:
+            raise ValueError(
+                "ODDS_API_MODE=manual requires ODDS_API_CAPTURE_DIR to be set."
+            )
+        return TheOddsApiManualCollector(Path(capture_dir), sport_key=sport_key)
+
+    raise ValueError(f"ODDS_API_MODE={mode!r} must be 'auto' or 'manual'.")
+
+
+def _mozzart_collector() -> OddsCollector | None:
+    """Builds the Mozzart supplemental collector, if MOZZART_CAPTURE_DIR is set.
+
+    MOZZART_MODE exists (default and currently only valid value:
+    "manual") so the mode is an explicit, visible flag rather than
+    something inferred from which env vars happen to be set -- the same
+    reasoning as _the_odds_api_collector's ODDS_API_MODE, even though
+    Mozzart has no working automatic mode yet (mozzartbet.com's
+    Cloudflare bot-management, see MozzartFileCollector).
+    """
+    capture_dir = os.environ.get("MOZZART_CAPTURE_DIR")
+    if not capture_dir:
+        return None
+
+    mode = os.environ.get("MOZZART_MODE", "manual")
+    if mode != "manual":
+        raise ValueError(
+            f"MOZZART_MODE={mode!r} is not supported -- Mozzart has no "
+            "automatic mode yet (see README.md's Data Collection section)."
+        )
+
+    return MozzartFileCollector(Path(capture_dir))
+
+
 def _supplemental_collectors() -> list[OddsCollector]:
     """Manual-capture collectors layered on top of whichever primary
     source is active in build_collectors(), so they land in the same
     ingestion cycle and get matched against the same FixtureCatalog as
     everyone else instead of running in isolation. Each is opt-in via
-    its own env var, so a run with none configured behaves exactly as
-    before.
+    its own *_CAPTURE_DIR env var, so a run with none configured behaves
+    exactly as before.
 
     Adding another manual-capture source (MaxBet, Soccer, ...) later is
-    the same two lines: read its own env var, construct its
-    FileCollector, append it here -- no other wiring changes needed.
+    the same shape: its own _xxx_collector() helper reading its own env
+    vars, appended here -- no other wiring changes needed.
     """
     collectors: list[OddsCollector] = []
 
-    mozzart_dir = os.environ.get("MOZZART_CAPTURE_DIR")
-    if mozzart_dir:
-        collectors.append(MozzartFileCollector(Path(mozzart_dir)))
+    mozzart = _mozzart_collector()
+    if mozzart is not None:
+        collectors.append(mozzart)
 
     return collectors
 
@@ -94,8 +149,7 @@ def build_collectors() -> list[OddsCollector]:
     OddsIngestionService.run() itself.
     """
     if os.environ.get("ODDS_SOURCE") == "the-odds-api":
-        sport_key = os.environ.get("ODDS_SPORT_KEY", "soccer_epl")
-        primary_collectors: list[OddsCollector] = [TheOddsApiCollector(sport_key)]
+        primary_collectors: list[OddsCollector] = [_the_odds_api_collector()]
     else:
         samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
         primary_collectors = [

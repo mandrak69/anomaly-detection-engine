@@ -115,6 +115,7 @@ anomaly-detection-engine/
 │       ├── collectors/
 │       │   ├── base.py
 │       │   ├── json_collector.py
+│       │   ├── manual_capture_collector.py
 │       │   ├── mozzart_file_collector.py
 │       │   └── the_odds_api_collector.py
 │       ├── ingestion/
@@ -147,6 +148,8 @@ anomaly-detection-engine/
 │       │   └── raw_odds_validator.py
 │       └── app.py
 ├── tests/
+├── scripts/
+│   └── watch_capture.py
 ├── pyproject.toml
 ├── requirements.txt
 └── README.md
@@ -272,8 +275,10 @@ Current implementations:
 
 ```text
 JsonOddsCollector
-TheOddsApiCollector
+TheOddsApiCollector          + TheOddsApiManualCollector
 MozzartFileCollector
+ManualCaptureCollector        generic drop-file + archive base the two
+                              manual collectors above are built on
 ```
 
 `TheOddsApiCollector` talks to https://the-odds-api.com's `/v4/sports/{sport}/odds`
@@ -283,54 +288,111 @@ names, skipping any bookmaker whose line is missing an outcome. It needs a
 subscription API key: pass `api_key=` or set the `ODDS_API_KEY` environment
 variable (never hardcode a real key in source or commit it).
 
-`MozzartFileCollector` reads a manually-captured Mozzart response (their
-internal `/live/matches`-shaped JSON) from a fixed drop file -- it does
-not fetch anything itself. mozzartbet.com sits behind Cloudflare
-bot-management (`cf_clearance`/`__cf_bm` cookies observed on the captured
-request), so an automated fetch would mean scripting around that
-protection, which this project won't do. The capture step is manual: save
-the response body from your own browser session (DevTools -> Network) to
-`<capture_dir>/live.json`, overwriting the same filename each time you
-capture a new reading. Each `collect()` call:
+### Manual capture: mode is an explicit flag, not an inferred default
+
+`ManualCaptureCollector` is the shared mechanism behind every
+manually-captured source: it fetches nothing itself, just watches a fixed
+drop file, hands its contents to a source-specific `parse` function, and
+archives it. Two collectors are built on it:
+
+```text
+MozzartFileCollector          drop file: <capture_dir>/live.json
+TheOddsApiManualCollector      drop file: <capture_dir>/capture.json
+```
+
+`MozzartFileCollector` exists because mozzartbet.com sits behind
+Cloudflare bot-management (`cf_clearance`/`__cf_bm` cookies observed on
+the captured request) -- an automated fetch would mean scripting around
+that protection, which this project won't do regardless of technical
+feasibility. It has no automatic mode.
+
+`TheOddsApiManualCollector` exists for a different reason: **even a
+source with a perfectly good API can need a manual fallback sometimes**
+-- a rate limit, an outage, an exhausted quota. It parses the identical
+response shape as the live `TheOddsApiCollector` (same function,
+`parse_the_odds_api_response`), just acquired from a file you saved by
+hand instead of a live HTTP call.
+
+For both, the capture step is manual: in your own browser, open DevTools
+-> Network, find the relevant request, save its response body to the
+drop file, overwriting the same filename each time you capture a new
+reading. Each `collect()` call:
 
 ```text
 no file waiting     -> returns [] (not an error, just nothing new yet)
-file present         -> parses it, maps "Konačan ishod" onto 1/X/2, then
-                         moves it into <capture_dir>/history/ under a
-                         timestamped name (drop slot freed, raw capture
-                         kept for traceability/replay)
+file present         -> parses it, then moves it into
+                         <capture_dir>/history/ under a timestamped +
+                         unique-suffixed name (drop slot freed, raw
+                         capture kept for traceability/replay)
 parse failure         -> raises (surfaces as a FAILED CollectorRun) and
                          leaves the file in place instead of archiving a
                          capture that couldn't be read
 ```
 
-Run the app again after dropping in a newer capture and the movement
-report picks up the difference, same as the two JSON demo polls do.
+**Mode is a visible, explicit flag per source**, not something inferred
+from which env vars happen to be set -- a misconfigured mode fails
+loudly in `app.py` rather than silently doing the wrong thing:
 
-Set `MOZZART_CAPTURE_DIR=<path>` and `app.py`'s demo picks it up as a
-**supplemental** source alongside whichever primary source (`ODDS_SOURCE`)
-is active -- it's collected in the same cycle and matched against the same
-`FixtureCatalog` (see Matching below) as everyone else, so its odds are
-compared against everyone else's (best odds, opportunity report, movement
-report all see it):
+```text
+ODDS_API_MODE=auto|manual      default "auto" (TheOddsApiCollector).
+                                "manual" needs ODDS_API_CAPTURE_DIR and
+                                uses TheOddsApiManualCollector instead.
+MOZZART_MODE=manual            the only value that exists today --
+                                Mozzart has no automatic mode yet, but
+                                the flag is explicit anyway rather than
+                                silently assumed.
+```
 
 ```bash
+# Live API, normal case
+ODDS_SOURCE=the-odds-api ODDS_API_KEY=<key> python -m anomaly_detection_engine.app
+
+# Live API forced into manual mode (e.g. rate-limited right now)
+ODDS_SOURCE=the-odds-api ODDS_API_MODE=manual ODDS_API_CAPTURE_DIR=./odds-api-capture \
+    python -m anomaly_detection_engine.app
+
+# Mozzart as a supplemental source alongside whichever primary is active
 MOZZART_CAPTURE_DIR=./mozzart python -m anomaly_detection_engine.app
 ```
 
-Adding another manual-capture source later (MaxBet, Soccer, ...) is the
-same shape: its own env var, its own `FileCollector`, appended in
-`app.py`'s `_supplemental_collectors()` -- no other wiring changes.
+Mozzart (and `TheOddsApiManualCollector` in manual mode) run as
+**supplemental** sources alongside whichever primary source is active --
+collected in the same cycle and matched against the same `FixtureCatalog`
+(see Matching below) as everyone else, so their odds are compared against
+everyone else's (best odds, opportunity report, movement report all see
+them). Adding another manual-capture source later (MaxBet, Soccer, ...)
+is the same shape: its own `parse` function, wrapped in
+`ManualCaptureCollector`, its own mode env var, appended in `app.py`'s
+`_supplemental_collectors()` -- no other wiring changes.
 
 Because matching goes through `FixtureCatalog`, Mozzart and another
 active source reporting the *same* real match under differently-spelled
 team names ("Manchester United" vs a hypothetical "Man Utd" from another
-source) now resolve to **one** shared canonical event once that spelling
-has been seen once (exact/alias/fuzzy match, cached permanently) --
-verified during development: a Mozzart capture reporting the demo's
-"Manchester United vs Liverpool" merged into the same event as the JSON
-demo data, and the opportunity report found a real cross-source surebet
-combining a Mozzart leg with a JSON-demo-bookmaker leg.
+source) resolve to **one** shared canonical event once that spelling has
+been seen once (exact/alias/fuzzy match, cached permanently) -- verified
+during development: a Mozzart capture reporting the demo's "Manchester
+United vs Liverpool" merged into the same event as the JSON demo data,
+and the opportunity report found a real cross-source surebet combining a
+Mozzart leg with a JSON-demo-bookmaker leg.
+
+### Watching a capture directory automatically
+
+`scripts/watch_capture.py` polls a capture directory (default every 5s)
+and runs the app itself as soon as a new drop file appears, instead of
+you having to re-run it by hand after every capture. Source-agnostic --
+it just takes a directory/filename to watch and which env var to expose
+that directory as:
+
+```bash
+python scripts/watch_capture.py --dir ./mozzart --env MOZZART_CAPTURE_DIR
+```
+
+It polls rather than using a filesystem-events library: a human dropping
+a file every few minutes at most doesn't need sub-second reaction time,
+and polling avoids a new dependency for what is otherwise a
+zero-dependency project. Any other env vars the app needs (`ODDS_SOURCE`,
+thresholds, ...) should already be set in the shell this runs in, same as
+running the app directly.
 
 Future implementations may include:
 
@@ -767,6 +829,8 @@ rate limiting
 [x] Dirty-data test fixtures
 [x] Persistent event/fixtures catalog (FixtureCatalog)
 [x] Manual-capture sources wired in as supplemental collectors
+[x] Generalized manual-capture mechanism (ManualCaptureCollector) + explicit per-source mode flags (ODDS_API_MODE, MOZZART_MODE)
+[x] Directory watcher for manual captures (scripts/watch_capture.py)
 ```
 
 ---

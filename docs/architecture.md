@@ -253,23 +253,45 @@ RawEventOdds
 The collector may internally use any acquisition method:
 
 ```text
-JsonOddsCollector        local file, source-independent demo format
-TheOddsApiCollector       documented public API, HTTP GET
-MozzartFileCollector      manually-captured response read from a fixed
-                          drop file, archived after each read -- no
-                          fetching of its own
+JsonOddsCollector           local file, source-independent demo format
+TheOddsApiCollector          documented public API, HTTP GET
+ManualCaptureCollector        generic: watches a fixed drop file, hands
+                              its contents to an injected parse
+                              function, archives it -- fetches nothing
+                              itself
+  MozzartFileCollector          parse_mozzart_response
+  TheOddsApiManualCollector     parse_the_odds_api_response (the same
+                                 function TheOddsApiCollector's HTTP
+                                 path uses)
 ```
 
-`MozzartFileCollector` exists specifically because not every source can
-be fetched automatically. mozzartbet.com sits behind Cloudflare
-bot-management (`cf_clearance`/`__cf_bm` cookies observed on their
-`/live/matches` request); scripting around that would mean bypassing
-active bot-detection, which this project does not do regardless of
-technical feasibility. The acquisition step for such a source stays
-manual (a human-driven browser session saves the response to disk); only
-the parsing/mapping step is automated. This is a legitimate, permanent
-collector shape for sources that cannot or should not be fetched
-programmatically -- not a workaround to be replaced later.
+`ManualCaptureCollector` separates *acquisition* (watch a drop file,
+archive after reading) from *parsing* (source-specific, injected as a
+plain function) so "capture manually instead of fetching" is a mode any
+source can have, not a bespoke rewrite per source. Two reasons a source
+ends up in manual mode, both legitimate and permanent (not a workaround
+to be replaced later):
+
+```text
+no automatic mode exists      MozzartFileCollector: mozzartbet.com sits
+                               behind Cloudflare bot-management
+                               (cf_clearance/__cf_bm cookies observed on
+                               their /live/matches request); scripting
+                               around that would mean bypassing active
+                               bot-detection, which this project does
+                               not do regardless of technical
+                               feasibility.
+automatic mode is unavailable   TheOddsApiManualCollector: the API
+right now                      normally works fine, but a rate limit,
+                               an outage, or an exhausted quota can make
+                               a manual fallback useful sometimes even
+                               for a source that can be automatic.
+```
+
+Which mode a source runs in is an explicit flag in `app.py`
+(`ODDS_API_MODE`, `MOZZART_MODE`), not inferred from which env vars
+happen to be set -- an unsupported mode value fails loudly rather than
+silently falling back to something unintended.
 
 The rest of the system does not need to know how the data was obtained.
 
