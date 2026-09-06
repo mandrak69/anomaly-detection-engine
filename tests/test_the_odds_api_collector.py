@@ -143,6 +143,34 @@ def test_http_error_is_wrapped_in_the_odds_api_error():
             collector.collect()
 
 
+def test_error_body_shape_raises_instead_of_silently_returning_empty():
+    # The Odds API's own error responses are a JSON object, not the
+    # array their /odds endpoint normally returns (e.g. a bad API key
+    # accidentally left pointed at a captured error body). Must not be
+    # mistaken for "zero events this cycle".
+    collector = TheOddsApiCollector(
+        sport_key="soccer_epl",
+        api_key="test-key",
+        fetch=fetch_stub({"message": "Invalid API key"}),
+    )
+
+    with pytest.raises(TheOddsApiError):
+        collector.collect()
+
+
+def test_manual_collector_error_body_capture_raises_and_leaves_file_in_place(tmp_path):
+    drop_path = tmp_path / "capture.json"
+    drop_path.write_text(json.dumps({"message": "Invalid API key"}), encoding="utf-8")
+
+    collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+
+    with pytest.raises(TheOddsApiError):
+        collector.collect()
+
+    assert drop_path.exists()
+    assert not (tmp_path / "history").exists()
+
+
 def test_manual_collector_parses_the_same_response_shape_as_the_auto_one(tmp_path):
     (tmp_path / "capture.json").write_text(json.dumps(SAMPLE_RESPONSE), encoding="utf-8")
 

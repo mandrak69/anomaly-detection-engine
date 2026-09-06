@@ -324,10 +324,22 @@ file present         -> parses it, then moves it into
                          <capture_dir>/history/ under a timestamped +
                          unique-suffixed name (drop slot freed, raw
                          capture kept for traceability/replay)
-parse failure         -> raises (surfaces as a FAILED CollectorRun) and
-                         leaves the file in place instead of archiving a
-                         capture that couldn't be read
+parse failure or       -> raises (surfaces as a FAILED CollectorRun) and
+wrong response shape      leaves the file in place instead of archiving
+                          a capture that couldn't be read
 ```
+
+"Wrong response shape" is deliberate, not just malformed JSON: both
+parsers check the top-level structure they expect (a `dict` with an
+`"items"` key for Mozzart, a `list` for the-odds-api.com) and raise
+(`MozzartResponseError`, `TheOddsApiError`) if it doesn't match, instead
+of silently treating an unrecognized shape as "zero matches this cycle".
+That distinction matters: the wrong bookmaker's capture landing in this
+collector's drop directory, or an API error body (`{"message": "Invalid
+API key"}`) saved where a real response was expected, would otherwise
+look identical to a legitimate quiet moment in the logs and
+`CollectorRun` -- stopping loudly beats silently ingesting nothing while
+believing everything is fine.
 
 **Mode is a visible, explicit flag per source**, not something inferred
 from which env vars happen to be set -- a misconfigured mode fails
@@ -364,6 +376,18 @@ them). Adding another manual-capture source later (MaxBet, Soccer, ...)
 is the same shape: its own `parse` function, wrapped in
 `ManualCaptureCollector`, its own mode env var, appended in `app.py`'s
 `_supplemental_collectors()` -- no other wiring changes.
+
+**What actually binds a drop directory to a bookmaker** is the env var
+you point at it (`MOZZART_CAPTURE_DIR=./whatever`), not the directory's
+name -- call it `mozzart`, `banana`, doesn't matter. What *does* matter:
+the file inside it must be named exactly what that collector expects
+(`live.json` for Mozzart, `capture.json` for `TheOddsApiManualCollector`,
+both configurable via `filename=` if you construct one directly), and
+nothing checks that the *content* actually matches the bookmaker the
+directory is "for" -- dropping the wrong file in the wrong place either
+raises (a differently-shaped response, per the parse-failure row above)
+or, worse, parses under the wrong label if the shapes happen to overlap.
+One directory per bookmaker, by convention you maintain yourself.
 
 Because matching goes through `FixtureCatalog`, Mozzart and another
 active source reporting the *same* real match under differently-spelled

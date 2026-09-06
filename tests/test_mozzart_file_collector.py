@@ -3,7 +3,10 @@ from decimal import Decimal
 
 import pytest
 
-from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
+from anomaly_detection_engine.collectors.mozzart_file_collector import (
+    MozzartFileCollector,
+    MozzartResponseError,
+)
 
 
 def odds_group(name: str, outcomes: dict[str, tuple[str, str, str]]) -> dict:
@@ -124,6 +127,37 @@ def test_corrupt_capture_is_left_in_place_not_archived(tmp_path):
 
     assert drop_path.exists()
     assert not (tmp_path / "history").exists()
+
+
+def test_wrong_shaped_json_raises_instead_of_silently_returning_empty(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    drop_path = tmp_path / "live.json"
+    # Valid JSON, but not shaped like a Mozzart response at all -- e.g.
+    # the wrong bookmaker's capture landed here by mistake. Must not be
+    # mistaken for "zero matches this cycle" (which would look identical
+    # to a legitimate quiet moment).
+    drop_path.write_text(json.dumps({"someOtherKey": []}), encoding="utf-8")
+
+    collector = MozzartFileCollector(tmp_path)
+
+    with pytest.raises(MozzartResponseError):
+        collector.collect()
+
+    assert drop_path.exists()
+    assert not (tmp_path / "history").exists()
+
+
+def test_non_object_json_raises_instead_of_silently_returning_empty(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    drop_path = tmp_path / "live.json"
+    drop_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    collector = MozzartFileCollector(tmp_path)
+
+    with pytest.raises(MozzartResponseError):
+        collector.collect()
+
+    assert drop_path.exists()
 
 
 def test_skips_matches_missing_the_final_result_group(tmp_path):

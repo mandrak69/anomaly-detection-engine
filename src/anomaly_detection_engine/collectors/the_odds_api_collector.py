@@ -21,7 +21,9 @@ _DRAW_OUTCOME_NAMES = {"draw", "tie"}
 
 
 class TheOddsApiError(RuntimeError):
-    """Raised for any failure talking to the-odds-api.com (network, HTTP, auth)."""
+    """Raised for any failure talking to the-odds-api.com (network, HTTP,
+    auth), or for a response/capture whose top-level shape doesn't even
+    look like one of their responses."""
 
 
 def parse_the_odds_api_response(
@@ -34,8 +36,26 @@ def parse_the_odds_api_response(
     TheOddsApiManualCollector (a manually-captured copy of the identical
     response shape) so both go through exactly the same mapping.
     league_fallback is used when an event has no sport_title field.
+
+    Raises TheOddsApiError if the top-level shape isn't even a
+    the-odds-api.com response (their /odds endpoint always returns a
+    JSON array; a dict here is most likely their own error body, e.g.
+    {"message": "Invalid API key"}, or the wrong capture in the wrong
+    place). Deliberately does not fall back to "treat it as zero events
+    this cycle": that would look identical to a legitimate quiet moment
+    in the logs/CollectorRun, silently hiding that something was wrong
+    with the response itself.
     """
     events = json.loads(raw, parse_float=Decimal)
+
+    if not isinstance(events, list):
+        raise TheOddsApiError(
+            "This response/capture doesn't look like a the-odds-api.com "
+            "odds response (expected a JSON array of events) -- check the "
+            "API key/response for an error body, or that the right capture "
+            "was saved to this collector's drop file."
+        )
+
     result: list[RawEventOdds] = []
 
     for event in events:

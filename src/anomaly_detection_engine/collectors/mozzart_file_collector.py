@@ -11,6 +11,10 @@ FINAL_RESULT_GROUP_NAME = "Konačan ishod"
 _SPORT_NAME_MAP = {"Fudbal": "football"}
 
 
+class MozzartResponseError(ValueError):
+    """Raised when a capture doesn't look like a Mozzart response at all."""
+
+
 def parse_mozzart_response(
     raw_text: str, observed_at: datetime, *, source_name: str = "Mozzart"
 ) -> list[RawEventOdds]:
@@ -21,9 +25,26 @@ def parse_mozzart_response(
     ignored. Matches missing that group, with an incomplete or
     non-ACTIVE 1X2 line, or outside the current football-only MVP scope
     are skipped.
+
+    Raises MozzartResponseError if the top-level shape isn't even a
+    Mozzart response (no "items" key) -- e.g. the wrong bookmaker's
+    capture landed in this collector's drop directory by mistake.
+    Deliberately does NOT fall back to "treat it as zero matches this
+    cycle": that would look identical to a legitimate quiet moment (no
+    live matches right now) in the logs/CollectorRun, silently hiding
+    that the wrong file was captured. Better to stop the run than
+    ingest nothing while believing everything is fine.
     """
     data = json.loads(raw_text, parse_float=Decimal)
-    matches = data.get("items", [])
+
+    if not isinstance(data, dict) or "items" not in data:
+        raise MozzartResponseError(
+            "This capture doesn't look like a Mozzart response (expected a "
+            "JSON object with an 'items' key) -- check that the right "
+            "response was saved to this collector's drop file."
+        )
+
+    matches = data["items"]
 
     return [
         raw
