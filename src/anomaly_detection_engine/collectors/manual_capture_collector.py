@@ -1,8 +1,8 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
@@ -74,7 +74,7 @@ class ManualCaptureCollector(OddsCollector):
             )
             return []
 
-        observed_at = datetime.fromtimestamp(drop_path.stat().st_mtime, tz=timezone.utc)
+        observed_at = datetime.fromtimestamp(drop_path.stat().st_mtime, tz=UTC)
         raw_text = drop_path.read_text(encoding="utf-8")
 
         result = self._parse(raw_text, observed_at)

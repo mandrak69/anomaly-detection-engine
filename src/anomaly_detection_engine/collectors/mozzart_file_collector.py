@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -87,7 +87,7 @@ def _map_match(match: dict, observed_at: datetime, source_name: str) -> RawEvent
             league=match["competition"]["name"],
             home_team=match["home"]["name"],
             away_team=match["visitor"]["name"],
-            start_time=datetime.fromtimestamp(match["startTime"] / 1000, tz=timezone.utc),
+            start_time=datetime.fromtimestamp(match["startTime"] / 1000, tz=UTC),
             observed_at=observed_at,
             market=DEFAULT_MARKET,
             odds=odds,

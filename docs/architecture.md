@@ -123,22 +123,37 @@ contract:
 ```text
 EventMatcher      fixed, in-memory candidate list -- rejects anything
                   it doesn't already know
-FixtureCatalog     persistent (teams/events/source_team_mappings
-                   tables) -- resolves a never-seen team or event by
-                   creating a canonical row instead of rejecting it,
-                   and remembers every (source, sport, raw name)
-                   resolution permanently
+FixtureCatalog     persistent (teams/events/competitions/
+                   source_team_mappings/source_competition_mappings
+                   tables) -- resolves a never-seen team, competition,
+                   or event by creating a canonical row instead of
+                   rejecting it, and remembers every (source, sport,
+                   raw name) resolution permanently
 ```
 
 `FixtureCatalog` reuses `TeamNormalizer` (the same exact/alias/fuzzy
-logic `EventMatcher` uses) internally, run against the durable `teams`
-table instead of a candidate list scoped to one run. The permanent
-mapping cache is what lets two different sources report the same real
-match under different team-name spellings and still resolve to one
+logic `EventMatcher` uses) internally for both teams and competitions,
+run against the durable `teams`/`competitions` tables instead of a
+candidate list scoped to one run. The permanent mapping cache is what
+lets two different sources report the same real match under different
+team-name spellings ("Man Utd" vs "Manchester United") or league names
+("Premier League" vs "England Premier League") and still resolve to one
 shared canonical event -- once a spelling has been resolved, it never
-needs to be re-solved. `app.py` uses `FixtureCatalog` for every source;
-`EventMatcher` remains available (and tested) for callers that
+needs to be re-solved. `pipeline.py` uses `FixtureCatalog` for every
+source; `EventMatcher` remains available (and tested) for callers that
 genuinely want a fixed, non-growing candidate list.
+
+Competition resolution (`_resolve_competition`) mirrors team resolution
+exactly, one level up: without it, league being part of an event's
+identity (below) would work against cross-source matching instead of
+for it -- the same real match reported under different league spellings
+by different sources would resolve to two canonical events that could
+never be compared, silently defeating the entire point of tracking
+league at all. `Event.league` stays a plain string (the canonical name),
+not a separate object -- `competitions`/`source_competition_mappings`
+exist purely as this resolution's persistent memory. A separate
+`league_aliases` constructor param (distinct from `aliases`, team-name
+only) seeds known league-name variants.
 
 `TeamNormalizer` also guards against a false-confidence fuzzy match: if
 the top two candidates score within `ambiguity_margin` (default 5
@@ -336,7 +351,8 @@ right now                      normally works fine, but a rate limit,
                                for a source that can be automatic.
 ```
 
-Which mode a source runs in is an explicit flag in `app.py`
+Which mode a source runs in is an explicit flag, resolved in
+`config.AppConfig` and read by `pipeline.py`'s collector construction
 (`ODDS_API_MODE`, `MOZZART_MODE`), not inferred from which env vars
 happen to be set -- an unsupported mode value fails loudly rather than
 silently falling back to something unintended.
@@ -378,6 +394,29 @@ per-record failures and reports them as a rejected record
 (`processing-error: <ExceptionType>: <message>`) instead of letting them
 abort the run. Losing the `CollectorRun` itself would hide exactly the
 kind of failure this record exists to surface.
+
+Status is not purely a function of accept/reject counts:
+
+```text
+some rejected, some accepted    PARTIAL
+some rejected, none accepted    FAILED
+raw-payload audit write failed for any record,
+even if every record was otherwise accepted     PARTIAL
+run() itself aborted mid-iteration (an exception
+genuinely escaped the loop, not one record's own
+processing)                                     PARTIAL if anything
+                                                 accepted first, else
+                                                 FAILED; error_type/
+                                                 error_message set
+none of the above                               SUCCESS
+```
+
+Raw payload retention is part of this system's auditability, not a
+nicety a run can silently lose while still reporting `SUCCESS`.
+Likewise, a run that aborted mid-loop is never `SUCCESS` even if every
+record processed before the abort happened to succeed -- the loop not
+finishing is itself the failure being reported, distinct from any
+individual record's own outcome.
 
 ---
 
@@ -454,22 +493,35 @@ Important concepts:
 event_start_time
 observed_at
 source_timestamp
+quote_time
 analysis_time
 ```
+
+`quote_time` (`OddsSnapshot.quote_time`, a property, not a stored
+column) is `source_timestamp` if the source provided one, else
+`observed_at` -- freshness is measured against this, not `observed_at`
+directly. `observed_at` is only "when our poll happened", which can look
+arbitrarily fresh even for a price the source itself computed or cached
+well before the request landed; a source that timestamps its own prices
+(the-odds-api's per-bookmaker `last_update`) is reporting something
+age-relevant a poll timestamp alone can't capture. A source with no such
+timestamp (the JSON demo, Mozzart) falls back to `observed_at`, the same
+behavior as before `quote_time` existed.
 
 `analysis_time` is created once per analysis execution and passed
 through as an explicit, required parameter
 (`detect_surebet_candidates`, `detect_value_gap_candidates`,
 `build_opportunity_report`) -- never derived from the observations being
-analyzed (e.g. their own newest `observed_at`). Deriving it that way
-would make a batch of uniformly old-but-mutually-close snapshots look
-"fresh" relative to itself regardless of how much real time has passed,
-defeating the freshness check it feeds. `app.py`'s demo path is the one
-sanctioned exception: its fixed calendar timestamps would otherwise
-always register as ancient, so it explicitly computes a stand-in "now"
-(the newest observation across everything ingested that run) and passes
-it in like any other caller would -- the workaround lives in `app.py`,
-never as a fallback inside the detection functions themselves.
+analyzed (e.g. their own newest `observed_at`/`quote_time`). Deriving it
+that way would make a batch of uniformly old-but-mutually-close
+snapshots look "fresh" relative to itself regardless of how much real
+time has passed, defeating the freshness check it feeds. `pipeline.py`'s
+demo path is the one sanctioned exception: its fixed calendar timestamps
+would otherwise always register as ancient, so it explicitly computes a
+stand-in "now" (the newest `quote_time` across everything ingested that
+run) and passes it in like any other caller would -- the workaround
+lives in `pipeline.py`, never as a fallback inside the detection
+functions themselves.
 
 ---
 
@@ -498,8 +550,7 @@ cannot just be a `CREATE TABLE IF NOT EXISTS` script and call it
 done -- that only ever adds new tables/indexes, it never changes an
 *existing* table already on an older shape. `storage.migrations` tracks
 schema version via `PRAGMA user_version` and a `MIGRATIONS` list, each
-applied at most once (guarded by the version check, not by the SQL
-itself being idempotent):
+applied at most once (guarded by the version check):
 
 ```text
 migrate(connection):
@@ -513,10 +564,26 @@ migrate(connection):
 `initialize_database()` calls `migrate()` on every startup: a brand-new
 database runs every migration, an up-to-date one runs none, and an older
 persistent file (e.g. `signals`/`movements` from before they had
-`market_rules`/`market_specifier`) is upgraded in place without losing
-what it already had. Once shipped, a migration's SQL is immutable -- a
-database that recorded it as applied never runs it again, so a
-correction is a new migration, not an edit to an old one.
+`market_rules`/`market_specifier`, or before `competitions`/
+`source_competition_mappings` existed) is upgraded in place without
+losing what it already had. Once shipped, a migration's SQL is
+immutable -- a database that recorded it as applied never runs it again,
+so a correction is a new migration, not an edit to an old one.
+
+This is not wrapped in a transaction with its `PRAGMA user_version`
+write, and deliberately so: verified directly that Python's sqlite3
+module does not roll back DDL (`CREATE`/`ALTER`/`DROP`) or `PRAGMA`
+statements the way it does plain DML, even inside `with connection:` (a
+`CREATE TABLE` survives an exception raised right after it in the same
+`with` block; an `INSERT` in the same position does not). True
+cross-statement atomicity would need Python 3.12's `autocommit=False`,
+unavailable here (`requires-python >=3.11`). So each migration is made
+idempotent instead: `_add_column_if_missing()` only `ALTER`s a column
+that isn't already there, and every index rebuild `DROP`s (`IF EXISTS`)
+immediately before recreating it -- a retry after a crash between any
+two statements, including one between a migration finishing and its
+`PRAGMA user_version` write landing, converges to the same end state
+rather than erroring on "duplicate column name" or similar.
 
 Current tables:
 
@@ -535,7 +602,15 @@ events                    canonical event registry: sport, league,
                           home_team_id, away_team_id, start_time
 source_team_mappings      (source, sport, raw team name) -> team_id,
                           the permanent memory behind FixtureCatalog's
-                          cross-source matching
+                          cross-source team matching
+competitions              canonical competition/league registry, unique
+                          per (canonical_name, sport) -- same shape as
+                          teams, one level up
+source_competition_mappings  (source, sport, raw league name) ->
+                          competition_id, the permanent memory behind
+                          FixtureCatalog's cross-source league matching;
+                          events.league stores the resolved canonical
+                          name (a plain string), not a foreign key
 signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
                           RESOLVED, first_seen_at/last_seen_at/
                           resolved_at, unique-indexed on
@@ -543,12 +618,12 @@ signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
                           outcome) so a detection is upserted
                           (reconciled) rather than duplicated across
                           poll cycles. reconcile() only resolves a
-                          signal whose (signal_type, market) matches
-                          this sweep AND whose event_id is in
-                          evaluated_event_ids -- an event this sweep
-                          couldn't evaluate (stale/missing data) must
-                          not be silently resolved just because it
-                          produced no candidate
+                          signal whose own (event, market, outcome)
+                          identity is in evaluated_keys -- something
+                          this sweep couldn't evaluate (stale/missing
+                          data, or too few bookmakers for that specific
+                          outcome) must not be silently resolved just
+                          because it produced no candidate
 movements                 append-only point-in-time transitions,
                           unique-indexed on the full transition
                           (including full MarketIdentity) so a re-run
@@ -738,6 +813,38 @@ see Matching Layer and Time Model above. `AppConfig` was extended to
 cover every remaining env var (`ODDS_API_MODE`, capture dirs,
 `MOZZART_MODE`), so its own docstring's claim that nothing downstream
 reads `os.environ` directly is now actually true.
+
+**Resolved:** a third round, closing gaps the second round's own fixes
+surfaced. Freshness compared `analysis_time` against `observed_at`
+(when *we* polled) rather than `quote_time` (`source_timestamp` when the
+source provides one) -- see Time Model above; a source-reported price
+computed hours earlier but fetched by a fast poll looked fresh under the
+old comparison. `reconcile()`'s `market`/`evaluated_event_ids` pair (see
+the previous entry) was itself still event-granularity, too coarse for
+VALUE_GAP, where one outcome can have enough bookmakers to evaluate
+while a sibling outcome for the same event does not (`detect_outliers`
+already skips under-quoted outcomes) -- both parameters were replaced by
+`evaluated_keys: Collection[SignalIdentity]` (`event_id` + `market` +
+`outcome`, see Storage Strategy above), strictly more precise since a
+`SignalIdentity` already encodes its own market. League/competition
+names went through the same canonicalization team names already had
+(`FixtureCatalog`, migration 3) -- closing a gap the *previous* round's
+own league-scoped event matching had opened: two sources spelling one
+competition differently would otherwise resolve to two canonical events
+that could never be compared, see Matching Layer above.
+`RawEventOdds.source_id` lets `Bookmaker.id` come from a source's own
+stable identifier instead of one derived from a display name that can
+legitimately change. Migration 2's "wrapped in one transaction" claim
+turned out to be false for DDL/PRAGMA under Python's sqlite3 (verified
+directly, see Storage Strategy above) -- migrations are idempotent
+instead, the guarantee actually achievable here.
+`OddsIngestionService.run()`'s status now reflects raw-payload audit
+failures and the run's own possible mid-loop abort, not just per-record
+accept/reject counts, see CollectorRun above. `app.py` (446 lines) was
+split into `config.py` (`AppConfig`/`load_config`), `runtime.py`
+(`Runtime`/`build_runtime`), and `pipeline.py` (collector construction,
+`run_ingestion`/`run_analysis`/`persist_detected_signals`), leaving
+`app.py` as just `main()`.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)

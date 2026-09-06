@@ -24,3 +24,18 @@ class OddsSnapshot:
     def __post_init__(self) -> None:
         if self.odds <= Decimal("1.0"):
             raise ValueError("Decimal odds must be greater than 1.0")
+
+    @property
+    def quote_time(self) -> datetime:
+        """When this price actually was/is current, for freshness
+        purposes -- source_timestamp if the source provided one (e.g.
+        the-odds-api's per-bookmaker last_update), otherwise observed_at.
+
+        observed_at is when *we* saw the data, not when the quote itself
+        was last current -- a poll can retrieve a response the source
+        computed or cached well before the request. A source-reported
+        last_update of 14:00 fetched by us at 16:00 is a two-hour-old
+        quote regardless of how quickly our own poll completed, so
+        freshness must be measured against quote_time, not observed_at.
+        """
+        return self.source_timestamp or self.observed_at

@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 
-class CollectorRunStatus(str, Enum):
+class CollectorRunStatus(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"

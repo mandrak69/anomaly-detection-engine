@@ -13,7 +13,9 @@ POLICY = FreshnessPolicy(
 )
 
 
-def snapshot(bookmaker_name: str, observed_at: datetime) -> OddsSnapshot:
+def snapshot(
+    bookmaker_name: str, observed_at: datetime, *, source_timestamp: datetime | None = None
+) -> OddsSnapshot:
     return OddsSnapshot(
         event_id="e1",
         bookmaker=Bookmaker(bookmaker_name.lower(), bookmaker_name),
@@ -21,6 +23,7 @@ def snapshot(bookmaker_name: str, observed_at: datetime) -> OddsSnapshot:
         outcome="1",
         odds=Decimal("2.00"),
         observed_at=observed_at,
+        source_timestamp=source_timestamp,
     )
 
 
@@ -76,3 +79,43 @@ def test_invalid_when_no_snapshots():
 
     assert result.valid is False
     assert result.reason == "no-snapshots"
+
+
+def test_stale_source_timestamp_is_caught_even_with_a_fresh_observed_at():
+    # The bug this guards against: a bookmaker's own last_update was
+    # hours ago, but our poll (observed_at) happened moments ago -- age
+    # must be measured against the quote's own timestamp, not merely
+    # when we happened to fetch it.
+    snapshots = [
+        snapshot(
+            "A",
+            observed_at=NOW,
+            source_timestamp=NOW - timedelta(hours=2),
+        ),
+        snapshot("B", observed_at=NOW - timedelta(seconds=30)),
+    ]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
+
+    assert result.valid is False
+    assert result.reason == "stale-snapshots"
+    assert result.stale_sources == ("a",)
+
+
+def test_fresh_source_timestamp_passes_even_if_far_from_observed_at():
+    # Mirror of the above: a genuinely fresh quote_time must not be
+    # penalized just because observed_at (when we happened to poll)
+    # differs from it.
+    snapshots = [
+        snapshot(
+            "A",
+            observed_at=NOW - timedelta(hours=2),
+            source_timestamp=NOW - timedelta(seconds=20),
+        ),
+        snapshot("B", observed_at=NOW - timedelta(seconds=30)),
+    ]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
+
+    assert result.valid is True
+    assert result.reason is None

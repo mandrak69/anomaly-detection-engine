@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -7,9 +8,6 @@ from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.collector_run import CollectorRunStatus
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
-
-import sqlite3
-
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository

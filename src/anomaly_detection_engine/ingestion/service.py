@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from anomaly_detection_engine.collectors.base import OddsCollector
@@ -47,7 +47,7 @@ class OddsIngestionService:
 
     def run(self) -> CollectorRun:
         run_id = str(uuid4())
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         source = self._collector.source
 
         logger.info("ingestion.run.started", extra={"run_id": run_id, "source": source})
@@ -79,7 +79,9 @@ class OddsIngestionService:
         records_received = 0
         records_accepted = 0
         records_rejected = 0
+        audit_failures = 0
         rejection_reasons: list[str] = []
+        unexpected_error: Exception | None = None
 
         try:
             for raw in raw_events:
@@ -97,7 +99,12 @@ class OddsIngestionService:
                 except Exception as exc:
                     # Audit-trail write failing must not also lose the
                     # CollectorRun itself -- log and keep going rather
-                    # than letting this exception escape the loop.
+                    # than letting this exception escape the loop. Still
+                    # counted (audit_failures below): raw-payload
+                    # retention is part of this system's auditability,
+                    # not a nicety a run can silently lose and still
+                    # report SUCCESS.
+                    audit_failures += 1
                     logger.error(
                         "ingestion.raw_payload.save_failed",
                         extra={
@@ -123,7 +130,7 @@ class OddsIngestionService:
                             "reason": reason,
                         },
                     )
-        except Exception:
+        except Exception as exc:
             # Should be unreachable given _ingest_one's own exception
             # handling below, but the run's final state (however partial)
             # must never depend on that holding true forever -- losing the
@@ -131,15 +138,25 @@ class OddsIngestionService:
             # observability most needs to see. Deliberately catches
             # Exception, not BaseException: a real KeyboardInterrupt/
             # SystemExit should still propagate, not be swallowed here.
+            unexpected_error = exc
             logger.error(
                 "ingestion.run.aborted_unexpectedly",
                 extra={"run_id": run_id, "source": source},
                 exc_info=True,
             )
 
-        if records_accepted == 0 and records_rejected > 0:
+        if unexpected_error is not None:
+            # An aborted run is never SUCCESS, even if every record
+            # processed before the abort happened to succeed -- the loop
+            # not finishing is itself the failure being reported here.
+            status = (
+                CollectorRunStatus.PARTIAL
+                if records_accepted > 0
+                else CollectorRunStatus.FAILED
+            )
+        elif records_accepted == 0 and records_rejected > 0:
             status = CollectorRunStatus.FAILED
-        elif records_rejected > 0:
+        elif records_rejected > 0 or audit_failures > 0:
             status = CollectorRunStatus.PARTIAL
         else:
             status = CollectorRunStatus.SUCCESS
@@ -152,6 +169,8 @@ class OddsIngestionService:
             records_accepted=records_accepted,
             records_rejected=records_rejected,
             rejection_reasons=rejection_reasons,
+            error_type=type(unexpected_error).__name__ if unexpected_error else None,
+            error_message=str(unexpected_error) if unexpected_error else None,
         )
 
     def _ingest_one(self, raw: RawEventOdds) -> tuple[bool, str | None]:
@@ -181,7 +200,15 @@ class OddsIngestionService:
             if match.event is None:
                 return False, f"identity: {match.reason}"
 
-            bookmaker = Bookmaker(raw.source.lower(), raw.source)
+            # Prefer the source's own stable identifier (raw.source_id,
+            # e.g. the-odds-api's "bet365") over deriving one from the
+            # display name -- a display name can change ("Bet365" ->
+            # "Bet365 UK") without the underlying bookmaker changing,
+            # which would otherwise make the same real bookmaker look
+            # like a new one. Collectors with no such stable id (JSON
+            # demo, Mozzart) leave source_id unset, keeping the old
+            # derived-from-name behavior.
+            bookmaker = Bookmaker(raw.source_id or raw.source.lower(), raw.source)
 
             snapshots = [
                 OddsSnapshot(
@@ -249,7 +276,7 @@ class OddsIngestionService:
             id=run_id,
             source=self._collector.source,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
             status=status,
             records_received=records_received,
             records_accepted=records_accepted,

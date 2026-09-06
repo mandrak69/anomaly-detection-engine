@@ -12,19 +12,22 @@ logger = logging.getLogger(__name__)
 
 
 class FixtureCatalog:
-    """Persistent, auto-growing canonical event/team registry.
+    """Persistent, auto-growing canonical event/team/competition registry.
 
     Unlike EventMatcher (a fixed, in-memory candidate list that rejects
-    anything it doesn't already know), this resolves-or-creates: a team
-    or event it hasn't seen before gets a new canonical row instead of
-    being rejected. Every (source, sport, raw team name) resolution is
-    cached permanently in source_team_mappings so it is never re-solved
-    on a later run -- that cache is what lets two different sources
-    reporting the same real match under different team-name spellings
-    ("Man Utd" vs "Manchester United") end up sharing one canonical
-    Event, once that particular spelling has been resolved once (by
-    exact/alias/fuzzy match against the existing catalog, or simply
-    replayed from a prior run's mapping).
+    anything it doesn't already know), this resolves-or-creates: a team,
+    competition, or event it hasn't seen before gets a new canonical row
+    instead of being rejected. Every (source, sport, raw team name)
+    resolution is cached permanently in source_team_mappings (and every
+    (source, sport, raw league name) resolution in
+    source_competition_mappings) so it is never re-solved on a later run
+    -- that cache is what lets two different sources reporting the same
+    real match under different team-name spellings ("Man Utd" vs
+    "Manchester United") or league names ("Premier League" vs "England
+    Premier League") end up sharing one canonical Event, once that
+    particular spelling has been resolved once (by exact/alias/fuzzy
+    match against the existing catalog, or simply replayed from a prior
+    run's mapping).
 
     Implements the same match(...) -> EventMatchResult shape as
     EventMatcher, so OddsIngestionService can use either interchangeably
@@ -47,6 +50,7 @@ class FixtureCatalog:
         *,
         source: str,
         aliases: dict[str, str] | None = None,
+        league_aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 85.0,
         fuzzy_ambiguity_margin: float = 5.0,
         start_time_tolerance: timedelta = timedelta(minutes=30),
@@ -54,6 +58,7 @@ class FixtureCatalog:
         self._connection = connection
         self._source = source
         self._aliases = aliases or {}
+        self._league_aliases = league_aliases or {}
         self._fuzzy_threshold = fuzzy_threshold
         self._fuzzy_ambiguity_margin = fuzzy_ambiguity_margin
         self._start_time_tolerance = start_time_tolerance
@@ -77,10 +82,11 @@ class FixtureCatalog:
 
         home, home_confidence = self._resolve_team(raw_name=home_raw, sport=sport)
         away, away_confidence = self._resolve_team(raw_name=away_raw, sport=sport)
+        canonical_league = self._resolve_competition(raw_league=league.strip(), sport=sport)
 
         event = self._resolve_event(
             sport=sport,
-            league=league,
+            league=canonical_league,
             home=home,
             away=away,
             start_time=start_time,
@@ -183,6 +189,103 @@ class FixtureCatalog:
             extra={"team_id": team.id, "canonical_name": team.canonical_name, "sport": sport},
         )
         return team
+
+    # -- competition resolution --------------------------------------------
+
+    def _resolve_competition(self, *, raw_league: str, sport: str) -> str:
+        """Resolves a raw league/competition string to its canonical
+        name, the same exact/alias/fuzzy pattern _resolve_team uses for
+        team names. Without this, "Premier League" (the-odds-api),
+        "England Premier League" (a different source), and "Engleska
+        Premier Liga" (Mozzart, in Serbian) would each resolve to their
+        own separate canonical event even for the exact same real match
+        -- league was made part of an event's identity specifically to
+        stop *different* competitions from being merged together, which
+        only works if same-competition spelling variants first collapse
+        to one canonical name.
+
+        Returns the canonical name (a string), not a Competition
+        object -- Event.league stays a plain string, matching every
+        existing caller/test; the competitions/source_competition_mappings
+        tables exist purely as this resolution's persistent memory,
+        the same role source_team_mappings plays for teams.
+        """
+        mapped = self._find_competition_mapping(raw_league, sport)
+        if mapped is not None:
+            return mapped
+
+        existing = self._competitions_for_sport(sport)
+        normalizer = TeamNormalizer(
+            existing.keys(),
+            aliases=self._league_aliases,
+            fuzzy_threshold=self._fuzzy_threshold,
+            ambiguity_margin=self._fuzzy_ambiguity_margin,
+        )
+        result = normalizer.normalize(raw_league)
+
+        if result.method == "ambiguous":
+            logger.warning(
+                "fixture_catalog.competition.ambiguous_fuzzy_match",
+                extra={"raw_league": raw_league, "sport": sport, "score": result.confidence},
+            )
+            canonical_name = raw_league
+            competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+        elif result.canonical_name is not None:
+            canonical_name = result.canonical_name
+            competition_id = existing.get(canonical_name) or self._create_competition(
+                canonical_name=canonical_name, sport=sport
+            )
+        else:
+            canonical_name = raw_league
+            competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+
+        self._save_competition_mapping(raw_league, sport, competition_id)
+        return canonical_name
+
+    def _find_competition_mapping(self, raw_league: str, sport: str) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT c.canonical_name FROM source_competition_mappings m
+            JOIN competitions c ON c.id = m.competition_id
+            WHERE m.source = ? AND m.sport = ? AND m.source_competition_name = ?
+            """,
+            (self._source, sport, raw_league),
+        ).fetchone()
+        return row["canonical_name"] if row else None
+
+    def _save_competition_mapping(self, raw_league: str, sport: str, competition_id: str) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO source_competition_mappings
+                (source, sport, source_competition_name, competition_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (self._source, sport, raw_league, competition_id),
+        )
+        self._connection.commit()
+
+    def _competitions_for_sport(self, sport: str) -> dict[str, str]:
+        rows = self._connection.execute(
+            "SELECT * FROM competitions WHERE sport = ?", (sport,)
+        ).fetchall()
+        return {row["canonical_name"]: row["id"] for row in rows}
+
+    def _create_competition(self, *, canonical_name: str, sport: str) -> str:
+        competition_id = f"competition-{uuid4().hex[:10]}"
+        self._connection.execute(
+            "INSERT INTO competitions (id, canonical_name, sport) VALUES (?, ?, ?)",
+            (competition_id, canonical_name, sport),
+        )
+        self._connection.commit()
+        logger.info(
+            "fixture_catalog.competition.created",
+            extra={
+                "competition_id": competition_id,
+                "canonical_name": canonical_name,
+                "sport": sport,
+            },
+        )
+        return competition_id
 
     # -- event resolution --------------------------------------------------
 

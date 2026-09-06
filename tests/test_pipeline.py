@@ -4,7 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-import anomaly_detection_engine.app as app
+import anomaly_detection_engine.config as config
+import anomaly_detection_engine.pipeline as pipeline
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
@@ -32,7 +33,7 @@ def _clear_source_env(monkeypatch):
 def test_default_source_uses_two_json_collector_polls(monkeypatch):
     _clear_source_env(monkeypatch)
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 2
     assert all(isinstance(c, JsonOddsCollector) for c in collectors)
@@ -53,9 +54,9 @@ def test_the_odds_api_source_used_when_configured(monkeypatch):
         def source(self):
             return f"the-odds-api:{self._sport_key}"
 
-    monkeypatch.setattr(app, "TheOddsApiCollector", FakeLiveCollector)
+    monkeypatch.setattr(pipeline, "TheOddsApiCollector", FakeLiveCollector)
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 1
     assert collectors[0].source == "the-odds-api:soccer_epl"
@@ -66,7 +67,7 @@ def test_invalid_odds_source_raises(monkeypatch):
     monkeypatch.setenv("ODDS_SOURCE", "the-odds-ap1")
 
     with pytest.raises(ValueError, match="the-odds-ap1"):
-        app.load_config()
+        config.load_config()
 
 
 def test_odds_api_mode_manual_uses_manual_collector(monkeypatch, tmp_path):
@@ -76,7 +77,7 @@ def test_odds_api_mode_manual_uses_manual_collector(monkeypatch, tmp_path):
     monkeypatch.setenv("ODDS_API_MODE", "manual")
     monkeypatch.setenv("ODDS_API_CAPTURE_DIR", str(tmp_path))
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 1
     assert isinstance(collectors[0], TheOddsApiManualCollector)
@@ -89,7 +90,7 @@ def test_odds_api_mode_manual_without_capture_dir_raises(monkeypatch):
     monkeypatch.setenv("ODDS_API_MODE", "manual")
 
     with pytest.raises(ValueError, match="ODDS_API_CAPTURE_DIR"):
-        app.build_collectors(app.load_config())
+        pipeline.build_collectors(config.load_config())
 
 
 def test_odds_api_mode_invalid_value_raises(monkeypatch):
@@ -98,14 +99,14 @@ def test_odds_api_mode_invalid_value_raises(monkeypatch):
     monkeypatch.setenv("ODDS_API_MODE", "telepathic")
 
     with pytest.raises(ValueError, match="telepathic"):
-        app.build_collectors(app.load_config())
+        pipeline.build_collectors(config.load_config())
 
 
 def test_mozzart_capture_dir_adds_a_supplemental_collector(monkeypatch, tmp_path):
     _clear_source_env(monkeypatch)
     monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(tmp_path))
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 3
     assert isinstance(collectors[2], MozzartFileCollector)
@@ -117,7 +118,7 @@ def test_mozzart_mode_defaults_to_manual_explicitly(monkeypatch, tmp_path):
     monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(tmp_path))
     monkeypatch.setenv("MOZZART_MODE", "manual")
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert isinstance(collectors[2], MozzartFileCollector)
 
@@ -128,13 +129,13 @@ def test_mozzart_mode_auto_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("MOZZART_MODE", "auto")
 
     with pytest.raises(ValueError, match="MOZZART_MODE"):
-        app.build_collectors(app.load_config())
+        pipeline.build_collectors(config.load_config())
 
 
 def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
     _clear_source_env(monkeypatch)
 
-    collectors = app.build_collectors(app.load_config())
+    collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 2
 
@@ -181,7 +182,7 @@ def test_persist_detected_signals_creates_then_resolves_a_surebet():
     save("X", "4.00", now)
     save("2", "4.00", now)
 
-    first_sweep = app.persist_detected_signals(
+    first_sweep = pipeline.persist_detected_signals(
         [event],
         odds_repository,
         signal_repository,
@@ -200,7 +201,7 @@ def test_persist_detected_signals_creates_then_resolves_a_surebet():
     # recorded as a movement.
     save("1", "2.00", now + timedelta(minutes=5))
 
-    second_sweep = app.persist_detected_signals(
+    second_sweep = pipeline.persist_detected_signals(
         [event],
         odds_repository,
         signal_repository,

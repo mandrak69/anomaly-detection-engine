@@ -25,6 +25,14 @@ def validate_freshness(
     analysis_time: datetime,
     policy: FreshnessPolicy,
 ) -> FreshnessResult:
+    """Age and spread are measured against each snapshot's quote_time
+    (source_timestamp if the source provided one, else observed_at), not
+    observed_at directly -- see OddsSnapshot.quote_time. observed_at is
+    only "when we polled", which can look arbitrarily fresh even for a
+    quote the source itself computed or cached hours earlier; a source
+    that timestamps its own prices is telling us something age-relevant
+    that a poll timestamp alone can't.
+    """
     if not snapshots:
         return FreshnessResult(
             valid=False,
@@ -38,7 +46,7 @@ def validate_freshness(
     ages: list[timedelta] = []
 
     for snapshot in snapshots:
-        age = analysis_time - snapshot.observed_at
+        age = analysis_time - snapshot.quote_time
 
         if age.total_seconds() < 0:
             return FreshnessResult(
@@ -54,7 +62,7 @@ def validate_freshness(
         if age > policy.max_snapshot_age:
             stale_sources.add(snapshot.bookmaker.id)
 
-    observed_times = [snapshot.observed_at for snapshot in snapshots]
+    observed_times = [snapshot.quote_time for snapshot in snapshots]
 
     oldest_observation = min(observed_times)
     newest_observation = max(observed_times)

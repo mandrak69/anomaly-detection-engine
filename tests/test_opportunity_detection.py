@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.opportunity_detection import (
+    SignalIdentity,
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
@@ -69,7 +70,8 @@ def test_detect_surebet_candidates_groups_all_three_legs_into_one_candidate():
     assert candidate.profit_percent == Decimal("10")
     assert len(candidate.legs) == 3
     assert {leg.outcome for leg in candidate.legs} == {"1", "X", "2"}
-    assert sweep.evaluated_event_ids == frozenset({"e1"})
+    # SUREBET has no per-outcome identity -- outcome=None (see SignalIdentity).
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", MARKET, None)})
 
 
 def test_detect_surebet_candidates_has_no_minimum_profit_threshold():
@@ -112,7 +114,7 @@ def test_detect_surebet_candidates_respects_freshness():
     # Failed freshness means this event was *not* evaluated this sweep --
     # a caller reconciling persisted signals must not treat this the same
     # as "evaluated, genuinely no surebet".
-    assert sweep.evaluated_event_ids == frozenset()
+    assert sweep.evaluated_keys == frozenset()
 
 
 def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():
@@ -140,10 +142,10 @@ def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():
     )
 
     assert sweep.candidates == []
-    assert sweep.evaluated_event_ids == frozenset()
+    assert sweep.evaluated_keys == frozenset()
 
 
-def test_evaluated_event_ids_excludes_events_with_no_snapshots_yet():
+def test_evaluated_keys_excludes_events_with_no_snapshots_yet():
     # A brand-new event with no odds saved for this market at all -- not
     # even attempted, so it must not count as "evaluated" either.
     repository = make_repository()
@@ -154,10 +156,10 @@ def test_evaluated_event_ids_excludes_events_with_no_snapshots_yet():
     )
 
     assert sweep.candidates == []
-    assert sweep.evaluated_event_ids == frozenset()
+    assert sweep.evaluated_keys == frozenset()
 
 
-def test_evaluated_event_ids_includes_a_fresh_event_with_no_surebet():
+def test_evaluated_keys_includes_a_fresh_event_with_no_surebet():
     # Good, fresh data that simply doesn't contain an arbitrage -- this
     # *is* a genuine "evaluated, absent" case, unlike the two tests above.
     repository = make_repository()
@@ -172,7 +174,7 @@ def test_evaluated_event_ids_includes_a_fresh_event_with_no_surebet():
     )
 
     assert sweep.candidates == []
-    assert sweep.evaluated_event_ids == frozenset({"e1"})
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", MARKET, None)})
 
 
 def test_detect_value_gap_candidates_finds_favorable_outliers_only():
@@ -201,7 +203,13 @@ def test_detect_value_gap_candidates_finds_favorable_outliers_only():
     assert sweep.candidates[0].bookmaker == "BigPrice"
     assert sweep.candidates[0].outcome == "1"
     assert sweep.candidates[0].deviation_percent > Decimal("0")
-    assert sweep.evaluated_event_ids == frozenset({"e2"})
+    assert sweep.evaluated_keys == frozenset(
+        {
+            SignalIdentity("e2", MARKET, "1"),
+            SignalIdentity("e2", MARKET, "X"),
+            SignalIdentity("e2", MARKET, "2"),
+        }
+    )
 
 
 def test_detect_value_gap_candidates_respects_freshness():
@@ -231,4 +239,28 @@ def test_detect_value_gap_candidates_respects_freshness():
     )
 
     assert sweep.candidates == []
-    assert sweep.evaluated_event_ids == frozenset()
+    assert sweep.evaluated_keys == frozenset()
+
+
+def test_value_gap_evaluated_keys_are_scoped_per_outcome_not_per_event():
+    # The exact scenario this granularity exists for: outcome "1" has
+    # enough bookmakers to evaluate, but "X" only has one -- an event
+    # passing freshness overall must not imply every one of its outcomes
+    # was actually evaluated.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    for bookmaker, odds in [("Bet1", "2.00"), ("Bet2", "2.05"), ("Bet3", "2.10")]:
+        save(repository, "e1", bookmaker, "1", odds)
+    save(repository, "e1", "Bet1", "X", "3.50")  # only one bookmaker quotes X
+
+    sweep = detect_value_gap_candidates(
+        [event],
+        repository,
+        MARKET,
+        freshness_policy=FRESH,
+        analysis_time=NOW,
+        min_bookmakers=3,
+    )
+
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", MARKET, "1")})

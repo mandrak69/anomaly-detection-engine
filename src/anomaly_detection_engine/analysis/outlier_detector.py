@@ -1,7 +1,7 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from statistics import median
-from typing import Iterable
 
 from anomaly_detection_engine.models.market import MarketIdentity
 from anomaly_detection_engine.models.odds import OddsSnapshot

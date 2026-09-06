@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
@@ -20,8 +20,8 @@ def test_saves_and_finds_collector_run():
     run = CollectorRun(
         id="run-001",
         source="json:odds_sample.json",
-        started_at=datetime(2026, 8, 27, 8, 0, 0, tzinfo=timezone.utc),
-        finished_at=datetime(2026, 8, 27, 8, 0, 4, tzinfo=timezone.utc),
+        started_at=datetime(2026, 8, 27, 8, 0, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 8, 27, 8, 0, 4, tzinfo=UTC),
         status=CollectorRunStatus.PARTIAL,
         records_received=6,
         records_accepted=5,

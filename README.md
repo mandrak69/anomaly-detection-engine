@@ -143,14 +143,19 @@ anomaly-detection-engine/
 │       │   ├── database.py
 │       │   ├── collector_run_repository.py
 │       │   ├── fixture_catalog.py
+│       │   ├── migrations.py
 │       │   ├── movement_repository.py
 │       │   ├── odds_repository.py
 │       │   ├── raw_payload_repository.py
-│       │   └── signal_repository.py
+│       │   ├── signal_repository.py
+│       │   └── time_utils.py
 │       ├── validation/
 │       │   ├── result.py
 │       │   └── raw_odds_validator.py
-│       └── app.py
+│       ├── app.py
+│       ├── config.py
+│       ├── pipeline.py
+│       └── runtime.py
 ├── tests/
 ├── scripts/
 │   └── watch_capture.py
@@ -210,7 +215,13 @@ market and must never be merged together.
 
 ### RawEventOdds
 
-Common source-independent representation produced by collectors.
+Common source-independent representation produced by collectors. Includes
+an optional `source_id` -- a source's own stable per-bookmaker identifier
+(e.g. the-odds-api's `"bet365"`), distinct from `source` (a display name
+like `"Bet365"` that can legitimately change without the underlying
+bookmaker changing). `OddsIngestionService` uses `source_id` for
+`Bookmaker.id` when a collector provides one, falling back to a
+normalized form of `source` otherwise (see Data Collection below).
 
 ### OddsSnapshot
 
@@ -225,6 +236,10 @@ observed_at
 ```
 
 Snapshots are stored historically so the engine can analyze changes through time.
+
+`quote_time` (a property, not a stored column) is `source_timestamp` if
+the source provided one, otherwise `observed_at` -- see Freshness below
+for why this distinction matters and where it's actually used.
 
 ### CollectorRun
 
@@ -260,6 +275,29 @@ failures and reports them as a rejected record
 (`processing-error: <ExceptionType>: <message>`) rather than letting
 them abort the whole run -- losing the `CollectorRun` here would hide
 exactly the kind of failure observability most needs to see.
+
+Status reflects more than just record counts:
+
+```text
+records_rejected > 0 (but some accepted)   PARTIAL
+records_rejected > 0 (none accepted)       FAILED
+raw-payload audit write failed for any
+record, even if every record was
+otherwise accepted                         PARTIAL
+the run itself aborted mid-iteration
+(an exception genuinely escaped the loop,
+not just one record's own processing)      PARTIAL if anything was
+                                            accepted first, else FAILED
+                                            (error_type/error_message set)
+neither of the above                       SUCCESS
+```
+
+Raw payload retention is part of this system's auditability, not a
+nicety -- a run that silently lost part of its audit trail must not
+report the same `SUCCESS` it would if nothing had gone wrong. Likewise,
+an aborted run is never `SUCCESS` even if every record processed before
+the abort happened to succeed: the loop not finishing is itself the
+failure being reported.
 
 ### DataValidationResult
 
@@ -308,25 +346,36 @@ names, skipping any bookmaker whose line is missing an outcome. It needs a
 subscription API key: pass `api_key=` or set the `ODDS_API_KEY` environment
 variable (never hardcode a real key in source or commit it).
 
-Which primary source `build_collectors()` uses is chosen by
-`ODDS_SOURCE`, resolved once in `load_config()` and validated eagerly:
-`"demo"` (the default) or `"the-odds-api"`, anything else raises
+Each parsed bookmaker also carries the-odds-api's own stable `"key"`
+(e.g. `"bet365"`) as `RawEventOdds.source_id`, separate from `source`
+(the display name, e.g. `"Bet365"`). `OddsIngestionService` uses
+`source_id` for `Bookmaker.id` when a collector provides one, instead of
+deriving an id from the display name (`raw.source.lower()`) -- a display
+name can change (`"Bet365"` -> `"Bet365 UK"`) without the underlying
+bookmaker changing, which would otherwise make ingestion treat it as a
+brand-new, unrelated bookmaker. Collectors with no such stable identifier
+(the JSON demo, Mozzart) leave `source_id` unset and keep the old
+derived-from-name behavior.
+
+Which primary source `pipeline.build_collectors()` uses is chosen by
+`ODDS_SOURCE`, resolved once in `config.load_config()` and validated
+eagerly: `"demo"` (the default) or `"the-odds-api"`, anything else raises
 `ValueError` immediately at startup. A typo here
 (`ODDS_SOURCE=the-odds-ap1`) must not silently fall back to demo data --
 that is exactly the kind of misconfiguration that would go unnoticed
 once this runs unattended, the same reasoning `ODDS_API_MODE`/
 `MOZZART_MODE` below already followed.
 
-`AppConfig` (built by `load_config()`) is every environment-variable
-decision this app makes, resolved exactly once at startup -- including
-`ODDS_API_MODE`/`ODDS_API_CAPTURE_DIR`/`MOZZART_CAPTURE_DIR`/
-`MOZZART_MODE`, not just `ODDS_SOURCE`/`DB_PATH`/the threshold env vars.
-`_the_odds_api_collector()`/`_mozzart_collector()` read these off the
-`AppConfig` they're passed rather than calling `os.environ.get(...)`
-themselves, so nothing downstream of `load_config()` reads `os.environ`
-directly -- one place to look for what an env var actually resolves to,
-and one place a future config source (a file, a secrets manager) would
-need to change.
+`AppConfig` (`config.py`, built by `load_config()`) is every
+environment-variable decision this app makes, resolved exactly once at
+startup -- including `ODDS_API_MODE`/`ODDS_API_CAPTURE_DIR`/
+`MOZZART_CAPTURE_DIR`/`MOZZART_MODE`, not just `ODDS_SOURCE`/`DB_PATH`/
+the threshold env vars. `pipeline._the_odds_api_collector()`/
+`_mozzart_collector()` read these off the `AppConfig` they're passed
+rather than calling `os.environ.get(...)` themselves, so nothing
+downstream of `load_config()` reads `os.environ` directly -- one place
+to look for what an env var actually resolves to, and one place a future
+config source (a file, a secrets manager) would need to change.
 
 ### Manual capture: mode is an explicit flag, not an inferred default
 
@@ -568,6 +617,24 @@ two sources reporting the same real kickoff under different but equally
 valid offsets (`+00:00` vs `+02:00`) still resolve to the same canonical
 event instead of being compared as differently-offset text.
 
+The "league" going into that comparison is itself canonicalized first,
+the same exact/alias/fuzzy pattern as team names: `FixtureCatalog`
+resolves a raw league/competition string (the-odds-api's `"Premier
+League"`, another source's `"England Premier League"`, Mozzart's
+`"Engleska Premier Liga"`) against a `competitions` table, caching every
+`(source, sport, raw league name)` resolution in
+`source_competition_mappings` -- without this, the same real match
+reported under different league spellings by different sources would
+resolve to two different canonical events that never get compared
+against each other, defeating the entire cross-source point of league
+being part of an event's identity in the first place. `Event.league`
+stays a plain string (the canonical name), not a separate object --
+`competitions`/`source_competition_mappings` exist purely as this
+resolution's persistent memory, the same role `teams`/
+`source_team_mappings` play for team names. A second, independent
+`league_aliases` constructor param (distinct from `aliases`, which is
+team-name-only) lets a caller seed known league-name variants.
+
 `EventMatcher` still exists and is still tested -- it is the right tool
 when you genuinely want a fixed, non-growing candidate list (e.g. a
 controlled test), not a mistake left behind by the switch to
@@ -629,12 +696,24 @@ in production). It must never be derived from the snapshots' own
 timestamps (e.g. their newest `observed_at`): a batch where every
 snapshot is old but mutually close together would then look "fresh"
 relative to itself no matter how much real time has actually passed.
-`app.py`'s demo path is the one legitimate exception -- its fixed
+`pipeline.py`'s demo path is the one legitimate exception -- its fixed
 calendar timestamps would otherwise always register as ancient, so it
 explicitly passes the newest observation across everything ingested that
 run as its stand-in "now" (`_demo_analysis_time`), kept local to that
 demo-only code path rather than being a default inside the detection
 functions themselves.
+
+Age and spread are measured against each snapshot's `quote_time`
+(`source_timestamp` if the source provided one, else `observed_at`), not
+`observed_at` directly. `observed_at` is only "when our poll happened",
+which can look arbitrarily fresh even for a price the source itself
+computed or cached well before our request landed --
+`the-odds-api`'s per-bookmaker `last_update` fetched by a poll a full two
+hours later is a two-hour-old quote regardless of how quickly the poll
+itself completed. A source that timestamps its own prices is telling us
+something age-relevant that a poll timestamp alone can't; a source with
+no such timestamp (the JSON demo, Mozzart) falls back to `observed_at`,
+the same behavior as before `quote_time` existed.
 
 ---
 
@@ -837,12 +916,31 @@ migrate(connection):
 startup -- a brand-new database runs every migration; an already
 up-to-date one runs none; an older persistent file left over from a
 previous version of this schema (e.g. `signals`/`movements` from before
-they had `market_rules`/`market_specifier` columns) is upgraded in place,
-preserving whatever it already had. Once a migration has shipped, its SQL
-must never be edited -- a database that already recorded it as applied
-will never run it again, so a later fix has to be its own new migration.
-"Just delete the file" remains fine for a scratch/test database, but is
-no longer the architectural answer to a schema change.
+they had `market_rules`/`market_specifier` columns, or before the
+`competitions`/`source_competition_mappings` tables existed) is upgraded
+in place, preserving whatever it already had. Once a migration has
+shipped, its SQL must never be edited -- a database that already
+recorded it as applied will never run it again, so a later fix has to be
+its own new migration. "Just delete the file" remains fine for a
+scratch/test database, but is no longer the architectural answer to a
+schema change.
+
+Each migration is idempotent, not wrapped in a transaction with its
+`PRAGMA user_version` bump -- verified directly that Python's sqlite3
+module does not roll back DDL (`CREATE`/`ALTER`/`DROP`) or `PRAGMA`
+statements the way it does plain DML, even inside `with connection:` (a
+`CREATE TABLE` survives an exception raised right after it in the same
+`with` block, unlike an `INSERT` in the same position). True
+cross-statement atomicity for this would need Python 3.12's
+`autocommit=False`, which this project can't rely on
+(`requires-python >=3.11`). So instead every migration is safe to re-run:
+`_add_column_if_missing()` only `ALTER`s a column that isn't already
+there (a bare second `ALTER TABLE ADD COLUMN` raises "duplicate column
+name"), and every index rebuild `DROP`s (`IF EXISTS`) immediately before
+recreating it -- a retry after a crash between any two statements,
+including one between a migration finishing and its `PRAGMA
+user_version` write landing, converges to the same end state rather than
+erroring.
 
 `OddsRepository` supports operations such as:
 
@@ -900,20 +998,19 @@ table:
 ```text
 signals table      status ACTIVE/RESOLVED, first_seen_at, last_seen_at,
                     resolved_at. SignalRepository.reconcile(signal_type,
-                    market, candidates, observed_at=..., evaluated_
-                    event_ids=...) upserts every currently-detected
-                    candidate of that type (new -> insert ACTIVE; still
-                    there -> update last_seen_at/edge/details;
-                    previously RESOLVED -> reactivate, keeping the
-                    original first_seen_at) and marks an ACTIVE signal of
-                    that exact (signal_type, market) as RESOLVED *only
-                    if* its event_id is in evaluated_event_ids and it
-                    wasn't seen this sweep. Identity excludes which
-                    bookmaker/odds are currently involved -- those are
-                    updated in place, not part of what makes two
-                    detections "the same" opportunity. The whole
-                    reconcile() call is one transaction (rolls back
-                    entirely if anything in it raises).
+                    candidates, observed_at=..., evaluated_keys=...)
+                    upserts every currently-detected candidate of that
+                    type (new -> insert ACTIVE; still there -> update
+                    last_seen_at/edge/details; previously RESOLVED ->
+                    reactivate, keeping the original first_seen_at) and
+                    marks an ACTIVE signal as RESOLVED *only if* its own
+                    (event, market, outcome) identity is in
+                    evaluated_keys and it wasn't seen this sweep.
+                    Identity excludes which bookmaker/odds are currently
+                    involved -- those are updated in place, not part of
+                    what makes two detections "the same" opportunity.
+                    The whole reconcile() call is one transaction (rolls
+                    back entirely if anything in it raises).
 
 movements table     append-only, no status. MovementRepository.save()
                     per detected transition, deduped on the full
@@ -922,35 +1019,45 @@ movements table     append-only, no status. MovementRepository.save()
                     same idempotency approach OddsRepository.save uses.
 ```
 
-`market` and `evaluated_event_ids` are both required, not defaulted,
-because getting either wrong means resolving something that shouldn't
-be:
+`evaluated_keys` (a set of `SignalIdentity(event_id, market, outcome)`)
+is required, not defaulted, because getting it wrong means resolving
+something that shouldn't be. It replaced an earlier, coarser
+`(market, evaluated_event_ids)` pair of parameters -- a real
+`SignalIdentity` already carries its own market, so scoping by market is
+now just one more thing a key encodes rather than a separate check, and
+every candidate's own identity is required to already be a member of
+`evaluated_keys` (`reconcile()` raises otherwise: a real candidate can
+only exist for something that was, by definition, evaluated). Two
+distinct problems this closes:
 
-- **market** scopes resolution to the exact market this sweep actually
-  analyzed. Without it, reconciling THREE_WAY could resolve an unrelated
-  ACTIVE TOTALS signal that this sweep never looked at, purely because
-  both happen to match on `(signal_type, event_id)`.
-- **evaluated_event_ids** is which events this sweep's detection
-  functions actually got usable data for -- an event with no snapshots
-  yet, or whose snapshots failed freshness, is absent from both
-  `candidates` *and* `evaluated_event_ids`
-  (`analysis.opportunity_detection`'s `SurebetDetectionSweep`/
-  `ValueGapDetectionSweep` return both). Without this distinction, a
-  signal for an event whose bookmaker feed is simply lagging would get
-  silently resolved -- "couldn't tell this sweep" is not the same claim
-  as "confirmed gone", and conflating them would be actively dangerous
-  ahead of any real alerting on top of this table.
+- **Market scoping.** A sweep over THREE_WAY must never resolve an
+  ACTIVE signal for a market it never analyzed (e.g. TOTALS), even
+  though both would otherwise match on `(signal_type, event_id)` alone.
+- **Per-outcome granularity for VALUE_GAP.** An event passing freshness
+  overall doesn't mean every one of its outcomes had enough bookmakers
+  to evaluate -- `detect_outliers` itself skips any outcome with fewer
+  than `min_bookmakers` snapshots. `evaluated_keys` reflects that
+  per-outcome, not just per-event: outcome `"1"` can be genuinely
+  evaluated (and resolved if it disappears) while a sibling outcome
+  `"X"` for the very same event, with only one bookmaker quoting it,
+  stays untouched. Getting this wrong (resolving at event granularity)
+  would have silently resolved `"X"`'s signal just because the *event*
+  looked fine, even though `"X"` itself was never actually checked.
+
+Either way, "couldn't tell this sweep" is not the same claim as
+"confirmed gone", and conflating them would be actively dangerous ahead
+of any real alerting on top of this table.
 
 Detection itself lives in `analysis.opportunity_detection`
 (`detect_surebet_candidates`, `detect_value_gap_candidates`) and
 `analysis.movement_detection` (`detect_movements`) -- the same functions
 `opportunity_report`/`movement_report` call to build their display rows,
-now shared with `app.py`'s persistence sweep
+now shared with `pipeline.py`'s persistence sweep
 (`persist_detected_signals`) so detection logic exists in exactly one
 place regardless of what eventually consumes the result.
 `detect_surebet_candidates`/`detect_value_gap_candidates` return a
 `SurebetDetectionSweep`/`ValueGapDetectionSweep` (`.candidates` plus
-`.evaluated_event_ids`, see above); `opportunity_report` only needs
+`.evaluated_keys`, see above); `opportunity_report` only needs
 `.candidates` (it recomputes fresh every call, so there's nothing to
 reconcile), while `persist_detected_signals` needs both. Persisted
 SUREBET candidates carry no minimum-profit threshold (that's a
@@ -1105,10 +1212,18 @@ rate limiting
 [x] ODDS_SOURCE fail-fast (explicit "demo"/"the-odds-api", no silent fallback on a typo)
 [x] Schema migrations (storage.migrations, PRAGMA user_version) -- a persistent DB no longer needs "delete the file" to pick up a schema change
 [x] save/save_all and SignalRepository.reconcile() are real transactions (with self._connection:, roll back entirely on failure, not just a commit() at the end)
-[x] Signal resolution scoped to (signal_type, market, evaluated_event_ids) -- stale/missing data can no longer cause a false RESOLVED
+[x] Signal resolution scoped to (signal_type, evaluated_keys) -- stale/missing data can no longer cause a false RESOLVED
 [x] PRAGMA foreign_keys = ON on every connection (storage.database.configure_connection)
 [x] FixtureCatalog.start_time normalized to UTC, same as OddsSnapshot's timestamps
 [x] AppConfig covers every env var the app reads (ODDS_API_MODE, capture dirs, MOZZART_MODE included) -- nothing downstream reads os.environ directly
+[x] Freshness measured against quote_time (source_timestamp when the source provides one) instead of observed_at
+[x] Per-outcome evaluated_keys (SignalIdentity: event + market + outcome) for VALUE_GAP, not just per-event
+[x] Canonical competition/league registry (FixtureCatalog + competitions/source_competition_mappings), same pattern as team resolution
+[x] Stable bookmaker ids (RawEventOdds.source_id) instead of deriving Bookmaker.id from a display name that can change
+[x] Migration idempotency fix: DDL/PRAGMA aren't rolled back by Python's sqlite3, so migrations are made safe to re-run instead of wrapped in a transaction that wouldn't actually protect them
+[x] Ingestion failure taxonomy: audit_failures (raw-payload write failures) and an aborted-run's own status/error_type/error_message are now reflected in CollectorRun, not just per-record rejection counts
+[x] app.py split into config.py (AppConfig/load_config) / runtime.py (Runtime/build_runtime) / pipeline.py (build_collectors/run_ingestion/run_analysis/persist_detected_signals) / app.py (main() only)
+[x] ruff added to the dev/CI pipeline; .idea/ untracked (was committed despite being commented out in .gitignore)
 ```
 
 ---
@@ -1154,9 +1269,7 @@ Everything above is done. Genuinely open next:
     orchestration reads snapshots and hands pure data to the detectors)
     -- worth doing before this becomes a generic (non-sports-odds)
     anomaly engine, not before
-[ ] CI: add ruff check (and maybe Pyright) alongside the existing
-    import + pytest pipeline -- cheap given how consistently this
-    codebase already uses type hints
+[ ] Pyright (or mypy) in CI alongside ruff, now that both are wired in
 ```
 
 ---
@@ -1247,6 +1360,38 @@ in SQLite even though the schema declares `REFERENCES`), and
 `ODDS_API_MODE`/capture dirs/`MOZZART_MODE`, so `_the_odds_api_collector`/
 `_mozzart_collector` no longer read `os.environ` directly, matching what
 `AppConfig`'s own docstring already claimed.
+
+**Done:** a third round, closing gaps the previous one's own fixes
+surfaced. Freshness compared `analysis_time` against `observed_at` (when
+*we* polled), not `quote_time` (`source_timestamp` if the source
+provided one) -- a bookmaker's price computed hours earlier but fetched
+by a fast poll looked fresh under the old comparison; `OddsSnapshot.
+quote_time` and `validate_freshness` now use the source's own timestamp
+when available. `reconcile()`'s `(market, evaluated_event_ids)` pair (see
+the previous entry) was still event-granularity, too coarse for
+VALUE_GAP: an event passing freshness doesn't mean every outcome had
+enough bookmakers to evaluate. Both parameters were replaced by a single
+`evaluated_keys: Collection[SignalIdentity]` (`event_id` + `market` +
+`outcome`, the same triple a signal's own identity already uses) --
+strictly more precise, since a `SignalIdentity` already encodes its own
+market, and every candidate is now required to itself be a member of
+`evaluated_keys`. League/competition names went through the same
+canonicalization team names already had: `FixtureCatalog` now resolves a
+raw league string against a `competitions`/`source_competition_mappings`
+registry (migration 3), closing a gap the previous round's own
+league-scoped event matching had opened -- two sources spelling the same
+competition differently would otherwise resolve to two canonical events
+that could never be compared. `Bookmaker.id` now prefers a source's own
+stable identifier (`RawEventOdds.source_id`, e.g. the-odds-api's `"key"`)
+over one derived from its display name, which can legitimately change.
+Migration 2's own docstring claim of "wrapped in one transaction" turned
+out to be false for DDL/PRAGMA under Python's sqlite3 (verified
+directly) -- migrations are now idempotent instead, the actually
+achievable guarantee. `OddsIngestionService.run()`'s status now reflects
+raw-payload audit failures and the run's own possible mid-loop abort, not
+just per-record accept/reject counts. Finally, `app.py` (working out to
+446 lines) was split into `config.py`/`runtime.py`/`pipeline.py`, leaving
+`app.py` as just `main()`.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

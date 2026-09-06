@@ -10,6 +10,7 @@ from uuid import uuid4
 from anomaly_detection_engine.analysis.opportunity_detection import (
     SUREBET,
     VALUE_GAP,
+    SignalIdentity,
     SurebetCandidate,
     ValueGapCandidate,
 )
@@ -39,6 +40,10 @@ class SignalCandidate:
     outcome: str | None
     edge_percent: Decimal
     details: dict
+
+    @property
+    def identity(self) -> SignalIdentity:
+        return SignalIdentity(event_id=self.event_id, market=self.market, outcome=self.outcome)
 
 
 @dataclass(frozen=True)
@@ -89,15 +94,14 @@ class SignalRepository:
     MovementRepository), which is a one-off point-in-time event.
 
     reconcile() is the whole point of this repository: called once per
-    (signal_type, market) per detection sweep with every candidate found
-    *this* sweep, it upserts each one (new -> insert ACTIVE; still-active
-    -> update last_seen_at/edge/details; previously-resolved ->
-    reactivate) and marks any ACTIVE signal of that exact (signal_type,
-    market) as RESOLVED *if and only if* its event_id is in
-    evaluated_event_ids and it wasn't seen this sweep. An empty candidate
-    list is not a no-op -- it correctly resolves everything evaluated and
-    absent, as long as evaluated_event_ids says those events were
-    actually checked.
+    signal_type per detection sweep with every candidate found *this*
+    sweep, it upserts each one (new -> insert ACTIVE; still-active ->
+    update last_seen_at/edge/details; previously-resolved -> reactivate)
+    and marks an ACTIVE signal as RESOLVED *if and only if* its own
+    (event, market, outcome) identity is in evaluated_keys and it wasn't
+    seen this sweep. An empty candidate list is not a no-op -- it
+    correctly resolves everything evaluated and absent, as long as
+    evaluated_keys says those identities were actually checked.
     """
 
     def __init__(self, connection: Connection) -> None:
@@ -106,23 +110,30 @@ class SignalRepository:
     def reconcile(
         self,
         signal_type: str,
-        market: MarketIdentity,
         candidates: list[SignalCandidate],
         *,
         observed_at: datetime,
-        evaluated_event_ids: Collection[str],
+        evaluated_keys: Collection[SignalIdentity],
     ) -> None:
-        """evaluated_event_ids scopes which ACTIVE signals are even
-        eligible to be resolved this sweep: an event whose data was
-        missing or failed freshness (see
-        analysis.opportunity_detection's *DetectionSweep return types)
-        must not have its signal silently resolved just because it
-        produced no candidate -- "couldn't tell" is not "confirmed gone".
-        market additionally scopes resolution to the exact market this
-        sweep actually analyzed, so reconciling e.g. THREE_WAY can never
-        resolve an unrelated TOTALS signal that this sweep never looked
-        at. Required, not defaulted, since silently resolving too much is
-        the failure mode this whole method exists to prevent.
+        """evaluated_keys scopes which ACTIVE signals are even eligible
+        to be resolved this sweep, at the same (event, market, outcome)
+        granularity a signal's own identity is keyed on (see
+        SignalIdentity) -- not just "this event", which would be too
+        coarse for VALUE_GAP (one outcome can lack enough bookmakers to
+        evaluate while a sibling outcome for the same event is fine), and
+        not just "this market" scoped globally, which would let
+        reconciling one market resolve an unrelated signal for a market
+        this sweep never analyzed. An identity missing from
+        evaluated_keys means "couldn't tell this sweep", which is not
+        the same claim as "confirmed gone" -- required, not defaulted,
+        since silently resolving too much is the failure mode this whole
+        method exists to prevent.
+
+        Every candidate's own identity must itself be a member of
+        evaluated_keys (raises ValueError otherwise) -- a stronger
+        version of the old "candidate belongs to the market this sweep
+        is about" check, since a real candidate can only exist for
+        something that was, by definition, evaluated.
 
         The whole reconcile is one transaction: either every candidate's
         upsert and the stale-resolution both land, or (on an unexpected
@@ -141,12 +152,11 @@ class SignalRepository:
                         f"reconcile() once per signal type with only that type's "
                         f"candidates."
                     )
-                if candidate.market != market:
+                if candidate.identity not in evaluated_keys:
                     raise ValueError(
-                        f"reconcile(..., market={market!r}, ...) received a "
-                        f"candidate for market {candidate.market!r} -- call "
-                        f"reconcile() once per market with only that market's "
-                        f"candidates."
+                        f"reconcile() received a candidate for {candidate.identity!r} "
+                        f"that is not in evaluated_keys -- every candidate must "
+                        f"correspond to something this sweep actually evaluated."
                     )
 
                 existing = self._find(candidate)
@@ -157,7 +167,7 @@ class SignalRepository:
                     self._touch(signal_id, candidate, observed_at)
                 seen_ids.add(signal_id)
 
-            self._resolve_stale(signal_type, market, evaluated_event_ids, seen_ids, observed_at)
+            self._resolve_stale(signal_type, evaluated_keys, seen_ids, observed_at)
 
     def find_active(self, signal_type: str | None = None) -> list[SignalRecord]:
         if signal_type is None:
@@ -235,32 +245,35 @@ class SignalRepository:
             SET status = ?, edge_percent = ?, details = ?, last_seen_at = ?, resolved_at = NULL
             WHERE id = ?
             """,
-            (ACTIVE, str(candidate.edge_percent), json.dumps(candidate.details), observed_at.isoformat(), signal_id),
+            (
+                ACTIVE,
+                str(candidate.edge_percent),
+                json.dumps(candidate.details),
+                observed_at.isoformat(),
+                signal_id,
+            ),
         )
 
     def _resolve_stale(
         self,
         signal_type: str,
-        market: MarketIdentity,
-        evaluated_event_ids: Collection[str],
+        evaluated_keys: Collection[SignalIdentity],
         seen_ids: set[str],
         observed_at: datetime,
     ) -> None:
-        if not evaluated_event_ids:
+        if not evaluated_keys:
             return
 
-        placeholders = ",".join("?" for _ in evaluated_event_ids)
         active_rows = self._connection.execute(
-            f"""
-            SELECT id FROM signals
-            WHERE signal_type = ? AND status = ?
-              AND {_market_where()}
-              AND event_id IN ({placeholders})
-            """,
-            (signal_type, ACTIVE, *_market_params(market), *evaluated_event_ids),
+            "SELECT * FROM signals WHERE signal_type = ? AND status = ?",
+            (signal_type, ACTIVE),
         ).fetchall()
 
-        stale_ids = [row["id"] for row in active_rows if row["id"] not in seen_ids]
+        stale_ids = [
+            row["id"]
+            for row in active_rows
+            if row["id"] not in seen_ids and _identity_from_row(row) in evaluated_keys
+        ]
         for stale_id in stale_ids:
             self._connection.execute(
                 "UPDATE signals SET status = ?, resolved_at = ? WHERE id = ?",
@@ -319,4 +332,18 @@ def _market_params(market: MarketIdentity) -> tuple:
         _line_str(market),
         market.rules,
         market.specifier,
+    )
+
+
+def _identity_from_row(row: Row) -> SignalIdentity:
+    return SignalIdentity(
+        event_id=row["event_id"],
+        market=MarketIdentity(
+            market_type=MarketType(row["market_type"]),
+            period=MarketPeriod(row["market_period"]),
+            line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
+            rules=row["market_rules"],
+            specifier=row["market_specifier"],
+        ),
+        outcome=row["outcome"],
     )

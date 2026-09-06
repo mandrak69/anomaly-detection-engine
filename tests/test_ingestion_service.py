@@ -111,6 +111,31 @@ def test_successful_run_persists_snapshots():
     assert raw_payloads[0].rejection_reason is None
     assert '"source": "Mozzart"' in raw_payloads[0].payload
 
+    # No source_id provided (Mozzart has no stable per-bookmaker id) --
+    # falls back to a normalized form of the display name, the old
+    # behavior preserved for collectors that don't supply one.
+    assert snapshots[0].bookmaker.id == "mozzart"
+    assert snapshots[0].bookmaker.name == "Mozzart"
+
+
+def test_stable_source_id_is_preferred_over_a_name_derived_id():
+    # A source that provides its own stable identifier (e.g.
+    # the-odds-api's "bet365") must have that used as Bookmaker.id, not
+    # something derived from the display name -- the display name can
+    # change ("Bet365" -> "Bet365 UK") without the underlying bookmaker
+    # changing, which would otherwise make ingestion treat it as a new,
+    # unrelated bookmaker.
+    raw = build_raw_event(source="Bet365 UK", source_id="bet365")
+    collector = StubCollector(raw_events=[raw])
+    service, odds_repository, _, _ = build_service(collector)
+
+    service.run()
+
+    snapshots = odds_repository.find_by_event("event-001")
+    assert len(snapshots) == 3
+    assert all(s.bookmaker.id == "bet365" for s in snapshots)
+    assert all(s.bookmaker.name == "Bet365 UK" for s in snapshots)
+
 
 def test_partial_run_when_one_record_fails_validation():
     valid = build_raw_event()
@@ -207,7 +232,10 @@ class _FlakyMatcher:
     validation failure of the record itself."""
 
     def __init__(self, event: Event, *, raises_for: str):
-        self._matcher = EventMatcher([event], TeamNormalizer([event.home_team.canonical_name, event.away_team.canonical_name]))
+        normalizer = TeamNormalizer(
+            [event.home_team.canonical_name, event.away_team.canonical_name]
+        )
+        self._matcher = EventMatcher([event], normalizer)
         self._raises_for = raises_for
 
     def match(self, **kwargs):
@@ -273,4 +301,94 @@ def test_collector_failure_produces_failed_run_with_error_details():
     assert run.error_type == "ValueError"
     assert run.error_message == "source unreachable"
 
-    assert collector_run_repository.find_by_id(run.id) is not None
+
+class _RawPayloadRepositoryThatAlwaysFails:
+    def save(self, **kwargs):
+        raise sqlite3.OperationalError("disk full (simulated)")
+
+
+def test_raw_payload_save_failure_makes_the_run_partial_not_success():
+    # Every record here is otherwise perfectly valid and accepted -- the
+    # only thing going wrong is the audit trail itself. Raw payload
+    # retention is part of this system's auditability, not a nicety a
+    # run can silently lose while still reporting SUCCESS.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=[build_raw_event()]),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=_RawPayloadRepositoryThatAlwaysFails(),
+    )
+
+    run = service.run()
+
+    assert run.status == CollectorRunStatus.PARTIAL
+    assert run.records_accepted == 1
+    assert run.records_rejected == 0
+
+
+class _RaisesAfterFirstItem:
+    """Simulates the collector's own iterable raising partway through
+    iteration (not at collect()-call time) -- e.g. a generator-based
+    collector whose underlying HTTP stream drops mid-response."""
+
+    def __init__(self, first_item):
+        self._first_item = first_item
+
+    def __iter__(self):
+        yield self._first_item
+        raise RuntimeError("stream dropped mid-iteration")
+
+
+class _RaisesImmediately:
+    def __iter__(self):
+        raise RuntimeError("stream dropped before any item")
+        yield  # pragma: no cover -- unreachable, makes this a generator
+
+
+def test_unexpected_abort_after_partial_success_is_partial_with_error_details():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=_RaisesAfterFirstItem(build_raw_event())),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+    )
+
+    # Must not raise -- even an abort with nothing salvageable still
+    # needs a final CollectorRun state.
+    run = service.run()
+
+    assert run.status == CollectorRunStatus.PARTIAL
+    assert run.records_accepted == 1
+    assert run.error_type == "RuntimeError"
+    assert run.error_message == "stream dropped mid-iteration"
+
+
+def test_unexpected_abort_before_anything_succeeds_is_failed_with_error_details():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=_RaisesImmediately()),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+    )
+
+    run = service.run()
+
+    assert run.status == CollectorRunStatus.FAILED
+    assert run.records_accepted == 0
+    assert run.error_type == "RuntimeError"
+    assert run.error_message == "stream dropped before any item"

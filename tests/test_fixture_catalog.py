@@ -205,6 +205,58 @@ def test_same_teams_different_league_are_different_events():
     assert league_result.event.home_team.id == cup_result.event.home_team.id
 
 
+def test_league_alias_merges_two_sources_spellings_into_one_canonical_event():
+    # The exact cross-source scenario this exists for: the-odds-api says
+    # "Premier League", another source says "England Premier League" --
+    # same real competition, same match, must resolve to one canonical
+    # event rather than two that never get compared against each other.
+    connection = make_connection()
+    the_odds_api = FixtureCatalog(connection, source="the-odds-api")
+    other_source = FixtureCatalog(
+        connection,
+        source="other-source",
+        league_aliases={"England Premier League": "Premier League"},
+    )
+
+    r1 = the_odds_api.match(
+        sport="football", league="Premier League", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+    r2 = other_source.match(
+        sport="football", league="England Premier League", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+
+    assert r1.event.id == r2.event.id
+    assert r1.event.league == "Premier League"
+    assert r2.event.league == "Premier League"
+
+    competitions = connection.execute(
+        "SELECT COUNT(*) AS n FROM competitions WHERE sport = 'football'"
+    ).fetchone()["n"]
+    assert competitions == 1
+
+
+def test_fuzzy_league_match_merges_a_similar_spelling():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, source="src-a", fuzzy_threshold=80.0)
+
+    catalog.match(
+        sport="football", league="Premier League", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+    result = catalog.match(
+        sport="football", league="Premier Leage", home_team_raw="C",
+        away_team_raw="D", start_time=T0,
+    )
+
+    assert result.event.league == "Premier League"
+    competitions = connection.execute(
+        "SELECT COUNT(*) AS n FROM competitions WHERE sport = 'football'"
+    ).fetchone()["n"]
+    assert competitions == 1
+
+
 def test_same_matchup_within_tolerance_reuses_the_event():
     connection = make_connection()
     catalog = FixtureCatalog(

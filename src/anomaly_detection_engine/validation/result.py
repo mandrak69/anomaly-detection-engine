@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class ValidationStage(str, Enum):
+class ValidationStage(StrEnum):
     STRUCTURAL = "structural"
     SEMANTIC = "semantic"
     IDENTITY = "identity"

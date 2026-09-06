@@ -1,15 +1,17 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 
 
-def build_run(status: CollectorRunStatus, received: int, accepted: int, rejected: int) -> CollectorRun:
+def build_run(
+    status: CollectorRunStatus, received: int, accepted: int, rejected: int
+) -> CollectorRun:
     return CollectorRun(
         id="run-001",
         source="stub",
-        started_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
-        finished_at=datetime(2026, 8, 27, 0, 0, 4, tzinfo=timezone.utc),
+        started_at=datetime(2026, 8, 27, tzinfo=UTC),
+        finished_at=datetime(2026, 8, 27, 0, 0, 4, tzinfo=UTC),
         status=status,
         records_received=received,
         records_accepted=accepted,
@@ -21,7 +23,9 @@ def test_accumulates_totals_across_multiple_runs():
     metrics = IngestionMetrics()
 
     metrics.record_run(build_run(CollectorRunStatus.SUCCESS, 3, 3, 0), [])
-    metrics.record_run(build_run(CollectorRunStatus.PARTIAL, 5, 4, 1), ["semantic: invalid-odds-value"])
+    metrics.record_run(
+        build_run(CollectorRunStatus.PARTIAL, 5, 4, 1), ["semantic: invalid-odds-value"]
+    )
 
     snapshot = metrics.snapshot()
 

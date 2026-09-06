@@ -1,6 +1,6 @@
 import dataclasses
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
@@ -186,14 +186,17 @@ def test_save_all_rolls_back_everything_if_one_snapshot_fails_partway_through():
 
     bookmaker = Bookmaker("mozzart", "Mozzart")
     observed_at = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
-    good = lambda outcome, odds: OddsSnapshot(
-        event_id="event-001",
-        bookmaker=bookmaker,
-        market=MARKET,
-        outcome=outcome,
-        odds=Decimal(odds),
-        observed_at=observed_at,
-    )
+
+    def good(outcome, odds):
+        return OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MARKET,
+            outcome=outcome,
+            odds=Decimal(odds),
+            observed_at=observed_at,
+        )
+
     poisoned = dataclasses.replace(good("2", "3.20"), market=None)
 
     try:
@@ -231,7 +234,7 @@ def test_observed_at_is_normalized_to_utc_regardless_of_source_offset():
     row = connection.execute("SELECT observed_at FROM odds_snapshots").fetchone()
     stored = datetime.fromisoformat(row["observed_at"])
 
-    assert stored == plus_two.astimezone(timezone.utc)
+    assert stored == plus_two.astimezone(UTC)
     assert stored.utcoffset().total_seconds() == 0
 
 

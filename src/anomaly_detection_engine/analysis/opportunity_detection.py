@@ -59,27 +59,50 @@ class ValueGapCandidate:
 
 
 @dataclass(frozen=True)
+class SignalIdentity:
+    """The same (event, market, outcome) identity a persisted signal is
+    keyed on (see storage.signal_repository.SignalCandidate) -- used here
+    to describe exactly what a detection sweep was actually able to
+    evaluate, at the same granularity signals themselves are resolved
+    at. outcome is None for SUREBET (its identity has no per-outcome
+    granularity: one arbitrage covers all three outcomes together).
+    """
+
+    event_id: str
+    market: MarketIdentity
+    outcome: str | None
+
+
+@dataclass(frozen=True)
 class SurebetDetectionSweep:
-    """candidates plus which events were actually evaluated this sweep --
-    distinguishing "evaluated, genuinely no surebet" from "not evaluated
-    at all" (missing/stale data) matters to a caller like
-    SignalRepository.reconcile(): resolving an ACTIVE signal is only
-    correct in the first case. An event skipped for missing snapshots or
-    failed freshness is absent from both candidates *and*
-    evaluated_event_ids, so it must not be resolved just because it
-    didn't produce a candidate this time.
+    """candidates plus which (event, market) combinations were actually
+    evaluated this sweep -- distinguishing "evaluated, genuinely no
+    surebet" from "not evaluated at all" (missing/stale data) matters to
+    a caller like SignalRepository.reconcile(): resolving an ACTIVE
+    signal is only correct in the first case. An event skipped for
+    missing snapshots or failed freshness is absent from both candidates
+    *and* evaluated_keys, so it must not be resolved just because it
+    didn't produce a candidate this time. outcome is always None here --
+    see SignalIdentity.
     """
 
     candidates: list[SurebetCandidate]
-    evaluated_event_ids: frozenset[str]
+    evaluated_keys: frozenset[SignalIdentity]
 
 
 @dataclass(frozen=True)
 class ValueGapDetectionSweep:
-    """See SurebetDetectionSweep -- same distinction, for value gaps."""
+    """See SurebetDetectionSweep for the general distinction. VALUE_GAP
+    additionally needs *per-outcome* evaluation granularity, not just
+    per-event: detect_outliers skips any outcome with fewer than
+    min_bookmakers snapshots, so one outcome for an event can be
+    genuinely evaluated while a sibling outcome (fewer bookmakers
+    quoting it, or just missing this sweep) was not -- evaluated_keys
+    reflects that per-outcome, not just per-event.
+    """
 
     candidates: list[ValueGapCandidate]
-    evaluated_event_ids: frozenset[str]
+    evaluated_keys: frozenset[SignalIdentity]
 
 
 def detect_surebet_candidates(
@@ -114,15 +137,15 @@ def detect_surebet_candidates(
     profit_percent so that decision can be revisited later without
     having thrown away the underlying data.
 
-    Returns both the candidates and which events were actually evaluated
-    (see SurebetDetectionSweep) -- an event with no snapshots yet, or
-    whose snapshots failed freshness, is evaluated_event_ids-absent, not
-    just candidate-absent, so a caller reconciling persisted signals can
-    tell "genuinely no surebet here" apart from "couldn't tell this
-    sweep".
+    Returns both the candidates and which (event, market) combinations
+    were actually evaluated (see SurebetDetectionSweep) -- an event with
+    no snapshots yet, or whose snapshots failed freshness, is absent from
+    evaluated_keys as well as candidates, so a caller reconciling
+    persisted signals can tell "genuinely no surebet here" apart from
+    "couldn't tell this sweep".
     """
     candidates: list[SurebetCandidate] = []
-    evaluated_event_ids: set[str] = set()
+    evaluated_keys: set[SignalIdentity] = set()
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
@@ -142,8 +165,9 @@ def detect_surebet_candidates(
 
         # From here on the event's data was good enough to draw a real
         # conclusion from -- "no candidate" past this point means "no
-        # surebet", not "couldn't tell".
-        evaluated_event_ids.add(event.id)
+        # surebet", not "couldn't tell". outcome=None: SUREBET has no
+        # per-outcome identity (see SignalIdentity).
+        evaluated_keys.add(SignalIdentity(event_id=event.id, market=market, outcome=None))
 
         best = find_best_odds(snapshots, event_id=event.id, market=market)
         if len(best) != 3:
@@ -166,9 +190,7 @@ def detect_surebet_candidates(
             )
         )
 
-    return SurebetDetectionSweep(
-        candidates=candidates, evaluated_event_ids=frozenset(evaluated_event_ids)
-    )
+    return SurebetDetectionSweep(candidates=candidates, evaluated_keys=frozenset(evaluated_keys))
 
 
 def detect_value_gap_candidates(
@@ -193,9 +215,18 @@ def detect_value_gap_candidates(
     of the outlier *detection* itself (what counts as an outlier at all),
     not an extra presentation-layer filter on top, so it stays here
     rather than being deferred to the report.
+
+    evaluated_keys is computed per-outcome, not just per-event: an event
+    passing freshness doesn't mean every one of its outcomes had enough
+    bookmakers to evaluate. detect_outliers itself skips any outcome
+    with fewer than min_bookmakers snapshots (comparing a price against
+    a "consensus" of one other price isn't meaningful) -- the count
+    here mirrors that same threshold so the two stay in lockstep by
+    construction, without detect_outliers needing to report anything
+    back itself.
     """
     candidates: list[ValueGapCandidate] = []
-    evaluated_event_ids: set[str] = set()
+    evaluated_keys: set[SignalIdentity] = set()
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
@@ -213,7 +244,14 @@ def detect_value_gap_candidates(
         if not freshness.valid:
             continue
 
-        evaluated_event_ids.add(event.id)
+        outcome_counts: dict[str, int] = {}
+        for snapshot in snapshots:
+            outcome_counts[snapshot.outcome] = outcome_counts.get(snapshot.outcome, 0) + 1
+        for outcome, count in outcome_counts.items():
+            if count >= min_bookmakers:
+                evaluated_keys.add(
+                    SignalIdentity(event_id=event.id, market=market, outcome=outcome)
+                )
 
         for outlier in detect_outliers(
             snapshots,
@@ -236,6 +274,4 @@ def detect_value_gap_candidates(
                 )
             )
 
-    return ValueGapDetectionSweep(
-        candidates=candidates, evaluated_event_ids=frozenset(evaluated_event_ids)
-    )
+    return ValueGapDetectionSweep(candidates=candidates, evaluated_keys=frozenset(evaluated_keys))

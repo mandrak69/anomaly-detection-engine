@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def to_utc_iso(value: datetime) -> str:
@@ -9,4 +9,4 @@ def to_utc_iso(value: datetime) -> str:
     every timestamp this project persists is normalized at the point it
     is written, regardless of what offset the original source reported.
     """
-    return value.astimezone(timezone.utc).isoformat()
+    return value.astimezone(UTC).isoformat()

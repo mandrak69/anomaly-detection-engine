@@ -1,6 +1,6 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable
 
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer

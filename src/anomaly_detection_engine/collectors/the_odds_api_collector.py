@@ -3,10 +3,10 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable
 
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
@@ -86,6 +86,10 @@ def parse_the_odds_api_response(
                     market=DEFAULT_MARKET,
                     odds=odds,
                     source_timestamp=source_timestamp,
+                    # the-odds-api's own stable per-bookmaker identifier
+                    # (e.g. "bet365") -- see RawEventOdds.source_id for
+                    # why this must not be derived from the display name.
+                    source_id=bookmaker.get("key"),
                 )
             )
 
@@ -180,7 +184,7 @@ class TheOddsApiCollector(OddsCollector):
         )
 
         raw = self._fetch(url)
-        observed_at = datetime.now(timezone.utc)
+        observed_at = datetime.now(UTC)
         result = parse_the_odds_api_response(
             raw, observed_at, league_fallback=self._sport_key
         )

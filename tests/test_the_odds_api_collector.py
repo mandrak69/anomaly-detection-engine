@@ -75,6 +75,7 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     raw = result[0]
 
     assert raw.source == "Bet365"
+    assert raw.source_id == "bet365"
     assert raw.sport == "football"
     assert raw.league == "EPL"
     assert raw.home_team == "Manchester United"

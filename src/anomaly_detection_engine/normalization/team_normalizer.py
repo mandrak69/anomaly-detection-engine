@@ -1,5 +1,5 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable
 
 from rapidfuzz import fuzz, process
 
@@ -16,7 +16,7 @@ class TeamNormalizer:
     def __init__(
         self,
         canonical_names: Iterable[str],
-        aliases: Dict[str, str] | None = None,
+        aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 80.0,
         ambiguity_margin: float = 5.0,
     ) -> None:

@@ -34,7 +34,10 @@ def test_foreign_key_violation_is_rejected():
             INSERT INTO events (id, sport, league, home_team_id, away_team_id, start_time)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            ("event-1", "football", "L", "no-such-team-1", "no-such-team-2", "2026-01-01T00:00:00+00:00"),
+            (
+                "event-1", "football", "L",
+                "no-such-team-1", "no-such-team-2", "2026-01-01T00:00:00+00:00",
+            ),
         )
 
 
@@ -51,7 +54,10 @@ def test_foreign_key_violation_is_rejected_without_foreign_keys_pragma():
         INSERT INTO events (id, sport, league, home_team_id, away_team_id, start_time)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        ("event-1", "football", "L", "no-such-team-1", "no-such-team-2", "2026-01-01T00:00:00+00:00"),
+        (
+            "event-1", "football", "L",
+            "no-such-team-1", "no-such-team-2", "2026-01-01T00:00:00+00:00",
+        ),
     )
     connection.commit()
 

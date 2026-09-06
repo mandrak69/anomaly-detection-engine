@@ -1,16 +1,16 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 
-class MarketType(str, Enum):
+class MarketType(StrEnum):
     MONEYLINE = "moneyline"
     THREE_WAY = "three_way"
     TOTALS = "totals"
     HANDICAP = "handicap"
 
 
-class MarketPeriod(str, Enum):
+class MarketPeriod(StrEnum):
     FULL_TIME = "full_time"
     FIRST_HALF = "first_half"
     SECOND_HALF = "second_half"

@@ -1,7 +1,11 @@
 import sqlite3
 
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
-from anomaly_detection_engine.storage.migrations import MIGRATIONS, _migration_1_initial_schema
+from anomaly_detection_engine.storage.migrations import (
+    MIGRATIONS,
+    _migration_1_initial_schema,
+    _migration_2_full_market_identity,
+)
 
 
 def make_connection() -> sqlite3.Connection:
@@ -87,3 +91,42 @@ def test_migrate_does_not_reapply_already_applied_migrations():
     assert connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
     columns = {row[1] for row in connection.execute("PRAGMA table_info(movements)")}
     assert "market_rules" in columns
+
+
+def test_migration_2_is_safe_to_re_run():
+    # Regression test for the crash-before-user_version-bump scenario:
+    # SQLite's DDL/PRAGMA statements are not rolled back by Python's
+    # sqlite3 module (verified directly, see migrate()'s docstring), so
+    # a process interrupted between a migration finishing and its
+    # PRAGMA user_version write landing would re-run that same migration
+    # on the next startup. A bare second `ALTER TABLE ... ADD COLUMN`
+    # would raise "duplicate column name" -- migration 2 must tolerate
+    # running twice.
+    connection = make_connection()
+    _migration_1_initial_schema(connection)
+
+    _migration_2_full_market_identity(connection)
+    _migration_2_full_market_identity(connection)  # must not raise
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
+    assert "market_rules" in columns
+    assert "market_specifier" in columns
+    index_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'uq_movements_transition'"
+    ).fetchone()[0]
+    assert "market_rules" in index_sql
+
+
+def test_migration_3_adds_the_competitions_registry():
+    connection = make_connection()
+
+    initialize_database(connection)
+
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert "competitions" in tables
+    assert "source_competition_mappings" in tables

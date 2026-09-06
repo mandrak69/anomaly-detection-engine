@@ -1,4 +1,3 @@
-from datetime import datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.models.market import MarketType
