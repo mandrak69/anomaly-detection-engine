@@ -1,7 +1,7 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 
 T0 = datetime.fromisoformat("2026-09-01T20:00:00+00:00")
@@ -9,7 +9,7 @@ T0 = datetime.fromisoformat("2026-09-01T20:00:00+00:00")
 
 def make_connection():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return connection
 
@@ -162,6 +162,30 @@ def test_ambiguous_fuzzy_match_creates_a_new_team_instead_of_guessing():
         "SELECT COUNT(*) AS n FROM teams WHERE canonical_name LIKE 'Man%United%'"
     ).fetchone()["n"]
     assert teams == 3
+
+
+def test_same_kickoff_reported_under_different_offsets_resolves_to_one_event():
+    # Two sources reporting the exact same real kickoff instant under
+    # different (equally valid) UTC offsets must still resolve to one
+    # canonical event -- start_time is normalized to UTC at storage the
+    # same way OddsSnapshot's timestamps are.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, source="src-a")
+
+    utc_time = T0  # 2026-09-01T20:00:00+00:00
+    plus_two = utc_time.astimezone(timezone(timedelta(hours=2)))
+    assert plus_two.isoformat() != utc_time.isoformat()  # sanity: different text
+
+    r1 = catalog.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=utc_time,
+    )
+    r2 = catalog.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=plus_two,
+    )
+
+    assert r1.event.id == r2.event.id
 
 
 def test_same_teams_different_league_are_different_events():

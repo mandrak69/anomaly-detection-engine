@@ -12,7 +12,7 @@ from anomaly_detection_engine.reporting.opportunity_report import (
     build_opportunity_report,
     render_opportunity_report,
 )
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
@@ -31,7 +31,7 @@ FRESH = FreshnessPolicy(
 
 def make_repository():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return OddsRepository(connection)
 

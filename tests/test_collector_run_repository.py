@@ -3,12 +3,12 @@ from datetime import datetime, timezone
 
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 
 
 def create_test_connection():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return connection
 

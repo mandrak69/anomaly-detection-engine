@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from sqlite3 import Connection, Row
 
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 _INSERT_SQL = """
     INSERT OR IGNORE INTO odds_snapshots (
@@ -24,15 +25,6 @@ _INSERT_SQL = """
 """
 
 
-def _to_utc_iso(value: datetime) -> str:
-    """Normalizes any timezone-aware datetime to UTC before storing it as
-    text. Without this, two snapshots saved with different but equally
-    valid offsets (+00:00 vs +02:00) sort incorrectly against each other
-    under plain lexicographic ORDER BY -- internal storage is always UTC,
-    regardless of what offset a given source reported in."""
-    return value.astimezone(timezone.utc).isoformat()
-
-
 def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
     return (
         snapshot.event_id,
@@ -45,8 +37,8 @@ def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
         snapshot.market.specifier,
         snapshot.outcome,
         str(snapshot.odds),
-        _to_utc_iso(snapshot.observed_at),
-        _to_utc_iso(snapshot.source_timestamp) if snapshot.source_timestamp else None,
+        to_utc_iso(snapshot.observed_at),
+        to_utc_iso(snapshot.source_timestamp) if snapshot.source_timestamp else None,
     )
 
 
@@ -82,20 +74,24 @@ class OddsRepository:
         self._connection = connection
 
     def save(self, snapshot: OddsSnapshot) -> None:
-        self._connection.execute(_INSERT_SQL, _snapshot_params(snapshot))
-        self._connection.commit()
+        with self._connection:
+            self._connection.execute(_INSERT_SQL, _snapshot_params(snapshot))
 
     def save_all(self, snapshots: list[OddsSnapshot]) -> None:
-        """Persists every snapshot in one transaction, committed once at
-        the end -- for the several outcomes of a single raw ingested
-        record (one market, multiple outcomes), so a failure partway
-        through never leaves that record's snapshot set half-written the
-        way calling save() once per outcome could (see
-        OddsIngestionService._ingest_one).
+        """Persists every snapshot in one transaction -- for the several
+        outcomes of a single raw ingested record (one market, multiple
+        outcomes), so a failure partway through never leaves that
+        record's snapshot set half-written the way calling save() once
+        per outcome could (see OddsIngestionService._ingest_one).
+
+        `with self._connection:` (not a manual commit()) is what makes
+        this atomic: it commits on success and rolls back everything
+        executed so far if any iteration raises, rather than committing
+        whatever happened to succeed before the failure.
         """
-        for snapshot in snapshots:
-            self._connection.execute(_INSERT_SQL, _snapshot_params(snapshot))
-        self._connection.commit()
+        with self._connection:
+            for snapshot in snapshots:
+                self._connection.execute(_INSERT_SQL, _snapshot_params(snapshot))
 
     def find_by_event(self, event_id: str) -> list[OddsSnapshot]:
         rows = self._connection.execute(

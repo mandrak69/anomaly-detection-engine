@@ -5,7 +5,7 @@ from decimal import Decimal
 from anomaly_detection_engine.analysis.movement_detection import MovementCandidate
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 
 MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
@@ -22,7 +22,7 @@ EVENT = Event(
 
 def make_repository() -> MovementRepository:
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return MovementRepository(connection)
 

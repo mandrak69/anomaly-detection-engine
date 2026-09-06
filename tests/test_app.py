@@ -12,7 +12,7 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsAp
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.signal_repository import SignalRepository
@@ -141,7 +141,7 @@ def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
 
 def _repositories():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return (
         OddsRepository(connection),

@@ -9,7 +9,7 @@ from anomaly_detection_engine.reporting.movement_report import (
     build_movement_report,
     render_movement_report,
 )
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
@@ -18,7 +18,7 @@ T0 = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 
 def make_repository():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return OddsRepository(connection)
 

@@ -11,7 +11,7 @@ from anomaly_detection_engine.normalization.team_normalizer import TeamNormalize
 import sqlite3
 
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
@@ -36,7 +36,7 @@ def build_matcher() -> EventMatcher:
 
 def test_ingestion_rejects_each_kind_of_dirty_record_but_keeps_the_valid_one():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
 
     odds_repository = OddsRepository(connection)

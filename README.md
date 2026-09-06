@@ -317,6 +317,17 @@ that is exactly the kind of misconfiguration that would go unnoticed
 once this runs unattended, the same reasoning `ODDS_API_MODE`/
 `MOZZART_MODE` below already followed.
 
+`AppConfig` (built by `load_config()`) is every environment-variable
+decision this app makes, resolved exactly once at startup -- including
+`ODDS_API_MODE`/`ODDS_API_CAPTURE_DIR`/`MOZZART_CAPTURE_DIR`/
+`MOZZART_MODE`, not just `ODDS_SOURCE`/`DB_PATH`/the threshold env vars.
+`_the_odds_api_collector()`/`_mozzart_collector()` read these off the
+`AppConfig` they're passed rather than calling `os.environ.get(...)`
+themselves, so nothing downstream of `load_config()` reads `os.environ`
+directly -- one place to look for what an env var actually resolves to,
+and one place a future config source (a file, a secrets manager) would
+need to change.
+
 ### Manual capture: mode is an explicit flag, not an inferred default
 
 `ManualCaptureCollector` is the shared mechanism behind every
@@ -551,6 +562,11 @@ tolerance window is reused; otherwise a new canonical event is created.
 League is part of an event's identity, not just descriptive metadata --
 the same two teams can play each other in more than one competition
 (league + cup, or two age groups) within the tolerance window.
+`start_time` is normalized to UTC (`storage.time_utils.to_utc_iso`, the
+same helper `OddsRepository` uses) before being stored or compared, so
+two sources reporting the same real kickoff under different but equally
+valid offsets (`+00:00` vs `+02:00`) still resolve to the same canonical
+event instead of being compared as differently-offset text.
 
 `EventMatcher` still exists and is still tested -- it is the right tool
 when you genuinely want a fixed, non-growing candidate list (e.g. a
@@ -580,13 +596,15 @@ source_timestamp
 
 `source_timestamp` is optional metadata supplied by the source.
 
-UTC normalization is enforced at one boundary: `OddsRepository.save()`/
-`save_all()` convert `observed_at`/`source_timestamp` to UTC
-(`.astimezone(timezone.utc)`) before storing them as text. Without this,
-two equally-valid but differently-offset timestamps (`+00:00` vs
-`+02:00` for the same instant) would sort incorrectly against each other
-under plain lexicographic `ORDER BY` -- a source is free to report
-whatever offset it wants; storage always normalizes it.
+UTC normalization goes through one shared helper,
+`storage.time_utils.to_utc_iso()` (`.astimezone(timezone.utc).isoformat()`),
+called at every point a timestamp is written to text: `OddsRepository.
+save()`/`save_all()` for `observed_at`/`source_timestamp`, and
+`FixtureCatalog` for `Event.start_time`. Without this, two equally-valid
+but differently-offset timestamps (`+00:00` vs `+02:00` for the same
+instant) would sort/compare incorrectly against each other as plain
+text -- a source is free to report whatever offset it wants; storage
+always normalizes it.
 
 ---
 
@@ -787,6 +805,45 @@ spawn `app.py` at close to the same moment, and SQLite allows only one
 writer at a time -- the timeout makes the second one wait instead of
 immediately failing with "database is locked".
 
+`storage.database.configure_connection()` applies every per-connection
+setting a connection needs, called by every code path that opens one
+(`create_connection()`, and every test helper): row access by column
+name, and `PRAGMA foreign_keys = ON`. SQLite does not enable foreign-key
+enforcement by default on a new connection even though the schema
+declares `REFERENCES` -- without this, an orphaned `events` row
+(pointing at a deleted/nonexistent team) could be inserted silently.
+
+### Schema migrations
+
+`data/anomaly_detection.db` is a real persistent file, so
+`initialize_database()` can no longer just be a big `CREATE TABLE IF NOT
+EXISTS` script and call it done -- that only ever adds new tables/indexes
+under new names, it does not change an *existing* table that already has
+the old shape. `storage.migrations` tracks schema version via `PRAGMA
+user_version` (built into every SQLite file for exactly this) and a
+`MIGRATIONS` list of functions, each one applied at most once per
+database:
+
+```text
+migrate(connection):
+    current = PRAGMA user_version
+    for version, migration in enumerate(MIGRATIONS, start=1):
+        if version <= current: continue
+        migration(connection)
+        PRAGMA user_version = version
+```
+
+`initialize_database()` calls `migrate()` unconditionally on every
+startup -- a brand-new database runs every migration; an already
+up-to-date one runs none; an older persistent file left over from a
+previous version of this schema (e.g. `signals`/`movements` from before
+they had `market_rules`/`market_specifier` columns) is upgraded in place,
+preserving whatever it already had. Once a migration has shipped, its SQL
+must never be edited -- a database that already recorded it as applied
+will never run it again, so a later fix has to be its own new migration.
+"Just delete the file" remains fine for a scratch/test database, but is
+no longer the architectural answer to a schema change.
+
 `OddsRepository` supports operations such as:
 
 ```text
@@ -799,10 +856,14 @@ find_latest_for_market
 ```
 
 `save_all` persists every outcome of a single raw ingested record (a
-market's several outcomes) in one transaction/commit, so a failure
-partway through never leaves a half-written market snapshot the way
-calling `save()` once per outcome could -- `OddsIngestionService` uses it
-for exactly this reason.
+market's several outcomes) in one transaction, so a failure partway
+through never leaves a half-written market snapshot the way calling
+`save()` once per outcome could -- `OddsIngestionService` uses it for
+exactly this reason. Both `save`/`save_all` use `with self._connection:`
+(not a manual `commit()`), which is what makes this a real guarantee:
+Python's sqlite3 module commits on success and rolls back everything
+executed so far if any iteration raises, rather than committing whatever
+happened to succeed before the failure.
 
 `find_latest_for_market` selects the single latest snapshot per
 (bookmaker, outcome) using a `ROW_NUMBER() OVER (PARTITION BY ...  ORDER
@@ -839,19 +900,20 @@ table:
 ```text
 signals table      status ACTIVE/RESOLVED, first_seen_at, last_seen_at,
                     resolved_at. SignalRepository.reconcile(signal_type,
-                    candidates, observed_at=...) upserts every currently-
-                    detected candidate of that type (new -> insert
-                    ACTIVE; still there -> update last_seen_at/edge/
-                    details; previously RESOLVED -> reactivate, keeping
-                    the original first_seen_at) and marks anything of
-                    that type that *was* ACTIVE but isn't in `candidates`
-                    as RESOLVED. Identity excludes which bookmaker/odds
-                    are currently involved -- those are updated in
-                    place, not part of what makes two detections "the
-                    same" opportunity. Call reconcile() once per signal
-                    type per sweep, even with an empty candidate list --
-                    that's not a no-op, it's what correctly resolves
-                    everything of that type.
+                    market, candidates, observed_at=..., evaluated_
+                    event_ids=...) upserts every currently-detected
+                    candidate of that type (new -> insert ACTIVE; still
+                    there -> update last_seen_at/edge/details;
+                    previously RESOLVED -> reactivate, keeping the
+                    original first_seen_at) and marks an ACTIVE signal of
+                    that exact (signal_type, market) as RESOLVED *only
+                    if* its event_id is in evaluated_event_ids and it
+                    wasn't seen this sweep. Identity excludes which
+                    bookmaker/odds are currently involved -- those are
+                    updated in place, not part of what makes two
+                    detections "the same" opportunity. The whole
+                    reconcile() call is one transaction (rolls back
+                    entirely if anything in it raises).
 
 movements table     append-only, no status. MovementRepository.save()
                     per detected transition, deduped on the full
@@ -860,13 +922,37 @@ movements table     append-only, no status. MovementRepository.save()
                     same idempotency approach OddsRepository.save uses.
 ```
 
+`market` and `evaluated_event_ids` are both required, not defaulted,
+because getting either wrong means resolving something that shouldn't
+be:
+
+- **market** scopes resolution to the exact market this sweep actually
+  analyzed. Without it, reconciling THREE_WAY could resolve an unrelated
+  ACTIVE TOTALS signal that this sweep never looked at, purely because
+  both happen to match on `(signal_type, event_id)`.
+- **evaluated_event_ids** is which events this sweep's detection
+  functions actually got usable data for -- an event with no snapshots
+  yet, or whose snapshots failed freshness, is absent from both
+  `candidates` *and* `evaluated_event_ids`
+  (`analysis.opportunity_detection`'s `SurebetDetectionSweep`/
+  `ValueGapDetectionSweep` return both). Without this distinction, a
+  signal for an event whose bookmaker feed is simply lagging would get
+  silently resolved -- "couldn't tell this sweep" is not the same claim
+  as "confirmed gone", and conflating them would be actively dangerous
+  ahead of any real alerting on top of this table.
+
 Detection itself lives in `analysis.opportunity_detection`
 (`detect_surebet_candidates`, `detect_value_gap_candidates`) and
 `analysis.movement_detection` (`detect_movements`) -- the same functions
 `opportunity_report`/`movement_report` call to build their display rows,
 now shared with `app.py`'s persistence sweep
 (`persist_detected_signals`) so detection logic exists in exactly one
-place regardless of what eventually consumes the result. Persisted
+place regardless of what eventually consumes the result.
+`detect_surebet_candidates`/`detect_value_gap_candidates` return a
+`SurebetDetectionSweep`/`ValueGapDetectionSweep` (`.candidates` plus
+`.evaluated_event_ids`, see above); `opportunity_report` only needs
+`.candidates` (it recomputes fresh every call, so there's nothing to
+reconcile), while `persist_detected_signals` needs both. Persisted
 SUREBET candidates carry no minimum-profit threshold (that's a
 reporting-only "worth telling a human" decision,
 `min_surebet_profit_percent`); VALUE_GAP persists at the same threshold
@@ -1017,6 +1103,12 @@ rate limiting
 [x] FixtureCatalog hardening: fuzzy-match ambiguity margin, league as part of event identity
 [x] app.py split into AppConfig / build_runtime / run_ingestion / run_analysis
 [x] ODDS_SOURCE fail-fast (explicit "demo"/"the-odds-api", no silent fallback on a typo)
+[x] Schema migrations (storage.migrations, PRAGMA user_version) -- a persistent DB no longer needs "delete the file" to pick up a schema change
+[x] save/save_all and SignalRepository.reconcile() are real transactions (with self._connection:, roll back entirely on failure, not just a commit() at the end)
+[x] Signal resolution scoped to (signal_type, market, evaluated_event_ids) -- stale/missing data can no longer cause a false RESOLVED
+[x] PRAGMA foreign_keys = ON on every connection (storage.database.configure_connection)
+[x] FixtureCatalog.start_time normalized to UTC, same as OddsSnapshot's timestamps
+[x] AppConfig covers every env var the app reads (ODDS_API_MODE, capture dirs, MOZZART_MODE included) -- nothing downstream reads os.environ directly
 ```
 
 ---
@@ -1058,6 +1150,13 @@ Everything above is done. Genuinely open next:
     (now doubly relevant: odds_snapshots, signals, and movements can
     all grow indefinitely)
 [ ] Market lifecycle states (OPEN/SUSPENDED/CLOSED)
+[ ] Decouple analysis from OddsRepository (an OddsReader Protocol, or
+    orchestration reads snapshots and hands pure data to the detectors)
+    -- worth doing before this becomes a generic (non-sports-odds)
+    anomaly engine, not before
+[ ] CI: add ruff check (and maybe Pyright) alongside the existing
+    import + pytest pipeline -- cheap given how consistently this
+    codebase already uses type hints
 ```
 
 ---
@@ -1121,6 +1220,38 @@ of an event's identity rather than only team pair + kickoff time.
 `run_analysis` (still no framework/DI container), and `ODDS_SOURCE` now
 fails fast on an unrecognized value instead of silently falling back to
 demo data.
+
+**Done:** a second round of correctness fixes, focused on the persistent
+database itself rather than the analysis it stores. `data/*.db` is a
+real file now, so `initialize_database()` needed a real migration path
+(`storage.migrations`, `PRAGMA user_version`) instead of `CREATE TABLE IF
+NOT EXISTS` alone -- that only helps a brand-new database; an existing
+one with the old `signals`/`movements` shape (from before they had
+`market_rules`/`market_specifier`) would otherwise stay on the old shape
+forever, or hit `no such column` once code assumed the new one.
+`OddsRepository.save`/`save_all` and `SignalRepository.reconcile()` now
+use `with self._connection:` instead of a trailing `commit()`, making
+them real transactions: an exception partway through rolls back
+everything already executed, rather than leaving whatever had already
+run committed. `reconcile()` also gained two required parameters,
+`market` and `evaluated_event_ids` -- without them, a sweep that simply
+couldn't evaluate an event (stale/missing data) would resolve its
+signal exactly the same way a sweep that genuinely found nothing would,
+which is a real difference ahead of any alerting built on this table;
+and a sweep over one market could resolve an ACTIVE signal for a
+completely different market it never analyzed. `configure_connection()`
+now turns `PRAGMA foreign_keys = ON` on every connection (off by default
+in SQLite even though the schema declares `REFERENCES`), and
+`FixtureCatalog.start_time` is normalized to UTC the same way
+`OddsSnapshot` timestamps are. `AppConfig` was extended to cover
+`ODDS_API_MODE`/capture dirs/`MOZZART_MODE`, so `_the_odds_api_collector`/
+`_mozzart_collector` no longer read `os.environ` directly, matching what
+`AppConfig`'s own docstring already claimed.
+
+Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
+Protocol, or orchestration handing detectors plain data) remains
+deliberately deferred -- worth doing before this becomes a generic,
+non-sports-odds anomaly engine, not before.
 
 ---
 

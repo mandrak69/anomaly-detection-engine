@@ -87,13 +87,14 @@ def build_opportunity_report(
     """
     rows: list[OpportunityRow] = []
 
-    for surebet in detect_surebet_candidates(
+    surebet_sweep = detect_surebet_candidates(
         events,
         odds_repository,
         market,
         freshness_policy=freshness_policy,
         analysis_time=analysis_time,
-    ):
+    )
+    for surebet in surebet_sweep.candidates:
         if surebet.profit_percent < min_surebet_profit_percent:
             continue
 
@@ -109,7 +110,7 @@ def build_opportunity_report(
                 )
             )
 
-    for gap in detect_value_gap_candidates(
+    value_gap_sweep = detect_value_gap_candidates(
         events,
         odds_repository,
         market,
@@ -117,7 +118,8 @@ def build_opportunity_report(
         analysis_time=analysis_time,
         threshold_percent=min_value_gap_percent,
         min_bookmakers=min_value_gap_bookmakers,
-    ):
+    )
+    for gap in value_gap_sweep.candidates:
         rows.append(
             OpportunityRow(
                 signal=VALUE_GAP,

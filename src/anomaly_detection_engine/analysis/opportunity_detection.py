@@ -58,6 +58,30 @@ class ValueGapCandidate:
     deviation_percent: Decimal
 
 
+@dataclass(frozen=True)
+class SurebetDetectionSweep:
+    """candidates plus which events were actually evaluated this sweep --
+    distinguishing "evaluated, genuinely no surebet" from "not evaluated
+    at all" (missing/stale data) matters to a caller like
+    SignalRepository.reconcile(): resolving an ACTIVE signal is only
+    correct in the first case. An event skipped for missing snapshots or
+    failed freshness is absent from both candidates *and*
+    evaluated_event_ids, so it must not be resolved just because it
+    didn't produce a candidate this time.
+    """
+
+    candidates: list[SurebetCandidate]
+    evaluated_event_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ValueGapDetectionSweep:
+    """See SurebetDetectionSweep -- same distinction, for value gaps."""
+
+    candidates: list[ValueGapCandidate]
+    evaluated_event_ids: frozenset[str]
+
+
 def detect_surebet_candidates(
     events: list[Event],
     odds_repository: OddsRepository,
@@ -65,7 +89,7 @@ def detect_surebet_candidates(
     *,
     freshness_policy: FreshnessPolicy,
     analysis_time: datetime,
-) -> list[SurebetCandidate]:
+) -> SurebetDetectionSweep:
     """Finds every real arbitrage (calculate_arbitrage.is_surebet) across
     the given events, gated by freshness the same way opportunity_report
     is (see that module for why: comparing odds across bookmakers only
@@ -89,8 +113,16 @@ def detect_surebet_candidates(
     arbitrage exists. Anything persisted from this should keep the raw
     profit_percent so that decision can be revisited later without
     having thrown away the underlying data.
+
+    Returns both the candidates and which events were actually evaluated
+    (see SurebetDetectionSweep) -- an event with no snapshots yet, or
+    whose snapshots failed freshness, is evaluated_event_ids-absent, not
+    just candidate-absent, so a caller reconciling persisted signals can
+    tell "genuinely no surebet here" apart from "couldn't tell this
+    sweep".
     """
     candidates: list[SurebetCandidate] = []
+    evaluated_event_ids: set[str] = set()
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
@@ -107,6 +139,11 @@ def detect_surebet_candidates(
         )
         if not freshness.valid:
             continue
+
+        # From here on the event's data was good enough to draw a real
+        # conclusion from -- "no candidate" past this point means "no
+        # surebet", not "couldn't tell".
+        evaluated_event_ids.add(event.id)
 
         best = find_best_odds(snapshots, event_id=event.id, market=market)
         if len(best) != 3:
@@ -129,7 +166,9 @@ def detect_surebet_candidates(
             )
         )
 
-    return candidates
+    return SurebetDetectionSweep(
+        candidates=candidates, evaluated_event_ids=frozenset(evaluated_event_ids)
+    )
 
 
 def detect_value_gap_candidates(
@@ -141,12 +180,13 @@ def detect_value_gap_candidates(
     analysis_time: datetime,
     threshold_percent: Decimal = Decimal("15.0"),
     min_bookmakers: int = 3,
-) -> list[ValueGapCandidate]:
+) -> ValueGapDetectionSweep:
     """Finds every outcome priced well above its peers' consensus
     (detect_outliers, favorable direction only), gated by freshness.
 
     See detect_surebet_candidates for why analysis_time is required
-    rather than derived from the snapshots themselves.
+    rather than derived from the snapshots themselves, and for why the
+    return value also reports which events were actually evaluated.
 
     threshold_percent/min_bookmakers are passed straight through to
     detect_outliers -- unlike SUREBET's profit threshold, this is part
@@ -155,6 +195,7 @@ def detect_value_gap_candidates(
     rather than being deferred to the report.
     """
     candidates: list[ValueGapCandidate] = []
+    evaluated_event_ids: set[str] = set()
 
     for event in events:
         snapshots = odds_repository.find_latest_for_market(
@@ -171,6 +212,8 @@ def detect_value_gap_candidates(
         )
         if not freshness.valid:
             continue
+
+        evaluated_event_ids.add(event.id)
 
         for outlier in detect_outliers(
             snapshots,
@@ -193,4 +236,6 @@ def detect_value_gap_candidates(
                 )
             )
 
-    return candidates
+    return ValueGapDetectionSweep(
+        candidates=candidates, evaluated_event_ids=frozenset(evaluated_event_ids)
+    )

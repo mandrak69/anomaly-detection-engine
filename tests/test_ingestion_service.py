@@ -11,7 +11,7 @@ from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod,
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
@@ -68,7 +68,7 @@ def build_matcher() -> EventMatcher:
 
 def build_service(collector):
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
 
     odds_repository = OddsRepository(connection)
@@ -176,7 +176,7 @@ def test_metrics_are_updated_when_provided():
     from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
 
     valid = build_raw_event()
@@ -230,7 +230,7 @@ def test_a_record_that_raises_during_matching_is_rejected_without_aborting_the_r
     )
 
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
 
     odds_repository = OddsRepository(connection)

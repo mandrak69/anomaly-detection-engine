@@ -1,10 +1,11 @@
+import dataclasses
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 MARKET = MarketIdentity(
@@ -15,7 +16,7 @@ MARKET = MarketIdentity(
 
 def create_test_connection():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return connection
 
@@ -168,6 +169,42 @@ def test_save_all_persists_every_snapshot_in_one_call():
 
     rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
     assert len(rows) == 3
+
+
+def test_save_all_rolls_back_everything_if_one_snapshot_fails_partway_through():
+    # Regression test for save_all's atomicity: previously each execute()
+    # ran outside any explicit transaction wrapper and only committed
+    # once at the end with a plain commit() -- if something raised
+    # partway through, whatever had already executed stayed pending
+    # forever (or got swept into some *later*, unrelated commit() on the
+    # same connection), rather than being rolled back. `with
+    # self._connection:` (see OddsRepository.save_all) must roll back the
+    # first two inserts below when the third snapshot's malformed market
+    # blows up while building its params.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+    observed_at = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
+    good = lambda outcome, odds: OddsSnapshot(
+        event_id="event-001",
+        bookmaker=bookmaker,
+        market=MARKET,
+        outcome=outcome,
+        odds=Decimal(odds),
+        observed_at=observed_at,
+    )
+    poisoned = dataclasses.replace(good("2", "3.20"), market=None)
+
+    try:
+        repository.save_all([good("1", "2.15"), good("X", "3.45"), poisoned])
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("expected the malformed snapshot to raise")
+
+    rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
+    assert rows == []
 
 
 def test_observed_at_is_normalized_to_utc_regardless_of_source_offset():

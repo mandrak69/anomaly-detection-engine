@@ -10,7 +10,7 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
@@ -22,7 +22,7 @@ FRESH = FreshnessPolicy(
 
 def make_repository():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
     return OddsRepository(connection)
 
@@ -59,16 +59,17 @@ def test_detect_surebet_candidates_groups_all_three_legs_into_one_candidate():
     save(repository, "e1", "Bet1", "X", "4.00")
     save(repository, "e1", "Bet1", "2", "4.00")
 
-    candidates = detect_surebet_candidates(
+    sweep = detect_surebet_candidates(
         [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
     )
 
-    assert len(candidates) == 1
-    candidate = candidates[0]
+    assert len(sweep.candidates) == 1
+    candidate = sweep.candidates[0]
     assert candidate.event.id == "e1"
     assert candidate.profit_percent == Decimal("10")
     assert len(candidate.legs) == 3
     assert {leg.outcome for leg in candidate.legs} == {"1", "X", "2"}
+    assert sweep.evaluated_event_ids == frozenset({"e1"})
 
 
 def test_detect_surebet_candidates_has_no_minimum_profit_threshold():
@@ -82,13 +83,13 @@ def test_detect_surebet_candidates_has_no_minimum_profit_threshold():
     save(repository, "e1", "Bet1", "X", "3.001")
     save(repository, "e1", "Bet1", "2", "3.001")
 
-    candidates = detect_surebet_candidates(
+    sweep = detect_surebet_candidates(
         [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
     )
 
-    assert len(candidates) == 1
-    assert candidates[0].profit_percent > Decimal("0")
-    assert candidates[0].profit_percent < Decimal("1")
+    assert len(sweep.candidates) == 1
+    assert sweep.candidates[0].profit_percent > Decimal("0")
+    assert sweep.candidates[0].profit_percent < Decimal("1")
 
 
 def test_detect_surebet_candidates_respects_freshness():
@@ -103,11 +104,15 @@ def test_detect_surebet_candidates_respects_freshness():
     strict_policy = FreshnessPolicy(
         max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
     )
-    candidates = detect_surebet_candidates(
+    sweep = detect_surebet_candidates(
         [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
     )
 
-    assert candidates == []
+    assert sweep.candidates == []
+    # Failed freshness means this event was *not* evaluated this sweep --
+    # a caller reconciling persisted signals must not treat this the same
+    # as "evaluated, genuinely no surebet".
+    assert sweep.evaluated_event_ids == frozenset()
 
 
 def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():
@@ -130,11 +135,44 @@ def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():
         max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
     )
 
-    candidates = detect_surebet_candidates(
+    sweep = detect_surebet_candidates(
         [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
     )
 
-    assert candidates == []
+    assert sweep.candidates == []
+    assert sweep.evaluated_event_ids == frozenset()
+
+
+def test_evaluated_event_ids_excludes_events_with_no_snapshots_yet():
+    # A brand-new event with no odds saved for this market at all -- not
+    # even attempted, so it must not count as "evaluated" either.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    sweep = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert sweep.candidates == []
+    assert sweep.evaluated_event_ids == frozenset()
+
+
+def test_evaluated_event_ids_includes_a_fresh_event_with_no_surebet():
+    # Good, fresh data that simply doesn't contain an arbitrage -- this
+    # *is* a genuine "evaluated, absent" case, unlike the two tests above.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "1", "1.50")
+    save(repository, "e1", "Bet1", "X", "3.50")
+    save(repository, "e1", "Bet1", "2", "5.00")
+
+    sweep = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert sweep.candidates == []
+    assert sweep.evaluated_event_ids == frozenset({"e1"})
 
 
 def test_detect_value_gap_candidates_finds_favorable_outliers_only():
@@ -150,7 +188,7 @@ def test_detect_value_gap_candidates_finds_favorable_outliers_only():
     for bookmaker, odds in [("Bet1", "2.65"), ("Bet2", "2.68"), ("Bet3", "2.70")]:
         save(repository, "e2", bookmaker, "2", odds)
 
-    candidates = detect_value_gap_candidates(
+    sweep = detect_value_gap_candidates(
         [event],
         repository,
         MARKET,
@@ -159,10 +197,11 @@ def test_detect_value_gap_candidates_finds_favorable_outliers_only():
         threshold_percent=Decimal("3.0"),
     )
 
-    assert len(candidates) == 1
-    assert candidates[0].bookmaker == "BigPrice"
-    assert candidates[0].outcome == "1"
-    assert candidates[0].deviation_percent > Decimal("0")
+    assert len(sweep.candidates) == 1
+    assert sweep.candidates[0].bookmaker == "BigPrice"
+    assert sweep.candidates[0].outcome == "1"
+    assert sweep.candidates[0].deviation_percent > Decimal("0")
+    assert sweep.evaluated_event_ids == frozenset({"e2"})
 
 
 def test_detect_value_gap_candidates_respects_freshness():
@@ -182,7 +221,7 @@ def test_detect_value_gap_candidates_respects_freshness():
     strict_policy = FreshnessPolicy(
         max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
     )
-    candidates = detect_value_gap_candidates(
+    sweep = detect_value_gap_candidates(
         [event],
         repository,
         MARKET,
@@ -191,4 +230,5 @@ def test_detect_value_gap_candidates_respects_freshness():
         threshold_percent=Decimal("3.0"),
     )
 
-    assert candidates == []
+    assert sweep.candidates == []
+    assert sweep.evaluated_event_ids == frozenset()

@@ -6,6 +6,7 @@ from uuid import uuid4
 from anomaly_detection_engine.matching.event_matcher import EventMatchResult
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ class FixtureCatalog:
                 event.league,
                 home.id,
                 away.id,
-                event.start_time.isoformat(),
+                to_utc_iso(event.start_time),
             ),
         )
         self._connection.commit()
@@ -232,8 +233,15 @@ class FixtureCatalog:
         # start_time tolerance window, and those must not be merged into
         # one canonical event just because the team IDs and kickoff time
         # happen to line up.
-        lower = (start_time - self._start_time_tolerance).isoformat()
-        upper = (start_time + self._start_time_tolerance).isoformat()
+        # start_time is normalized to UTC the same way OddsSnapshot's
+        # timestamps are (see storage.time_utils.to_utc_iso) -- without
+        # this, two sources reporting the same real kickoff under
+        # different but equally valid offsets (+00:00 vs +02:00) could
+        # fail to resolve to the same canonical event, since events.
+        # start_time and the BETWEEN bounds below would be compared as
+        # plain, differently-offset text.
+        lower = to_utc_iso(start_time - self._start_time_tolerance)
+        upper = to_utc_iso(start_time + self._start_time_tolerance)
         row = self._connection.execute(
             """
             SELECT * FROM events
@@ -242,7 +250,7 @@ class FixtureCatalog:
             ORDER BY ABS(julianday(start_time) - julianday(?))
             LIMIT 1
             """,
-            (league, home_team_id, away_team_id, lower, upper, start_time.isoformat()),
+            (league, home_team_id, away_team_id, lower, upper, to_utc_iso(start_time)),
         ).fetchone()
         return self._map_event_row(row) if row else None
 

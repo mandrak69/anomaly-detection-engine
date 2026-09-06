@@ -36,7 +36,7 @@ from anomaly_detection_engine.reporting.opportunity_report import (
     render_opportunity_report,
 )
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import create_connection, initialize_database
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -98,6 +98,10 @@ class AppConfig:
     db_path: str
     odds_source: str
     sport_key: str
+    odds_api_mode: str
+    odds_api_capture_dir: str | None
+    mozzart_capture_dir: str | None
+    mozzart_mode: str
     min_surebet_profit_percent: Decimal
     min_value_gap_percent: Decimal
 
@@ -116,6 +120,10 @@ def load_config() -> AppConfig:
         db_path=os.environ.get("DB_PATH", str(DEFAULT_DB_PATH)),
         odds_source=odds_source,
         sport_key=os.environ.get("ODDS_SPORT_KEY", "soccer_epl"),
+        odds_api_mode=os.environ.get("ODDS_API_MODE", "auto"),
+        odds_api_capture_dir=os.environ.get("ODDS_API_CAPTURE_DIR"),
+        mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
+        mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
     )
@@ -138,8 +146,7 @@ class Runtime:
 def build_runtime(config: AppConfig) -> Runtime:
     if config.db_path != ":memory:":
         Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(config.db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
-    connection.row_factory = sqlite3.Row
+    connection = create_connection(config.db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
     initialize_database(connection)
 
     return Runtime(
@@ -164,23 +171,24 @@ def _the_odds_api_collector(config: AppConfig) -> OddsCollector:
     env vars happen to be set, so a misconfigured mode fails loudly here
     rather than silently doing the wrong thing.
     """
-    mode = os.environ.get("ODDS_API_MODE", "auto")
+    mode = config.odds_api_mode
 
     if mode == "auto":
         return TheOddsApiCollector(config.sport_key)
 
     if mode == "manual":
-        capture_dir = os.environ.get("ODDS_API_CAPTURE_DIR")
-        if not capture_dir:
+        if not config.odds_api_capture_dir:
             raise ValueError(
                 "ODDS_API_MODE=manual requires ODDS_API_CAPTURE_DIR to be set."
             )
-        return TheOddsApiManualCollector(Path(capture_dir), sport_key=config.sport_key)
+        return TheOddsApiManualCollector(
+            Path(config.odds_api_capture_dir), sport_key=config.sport_key
+        )
 
     raise ValueError(f"ODDS_API_MODE={mode!r} must be 'auto' or 'manual'.")
 
 
-def _mozzart_collector() -> OddsCollector | None:
+def _mozzart_collector(config: AppConfig) -> OddsCollector | None:
     """Builds the Mozzart supplemental collector, if MOZZART_CAPTURE_DIR is set.
 
     MOZZART_MODE exists (default and currently only valid value:
@@ -190,21 +198,19 @@ def _mozzart_collector() -> OddsCollector | None:
     Mozzart has no working automatic mode yet (mozzartbet.com's
     Cloudflare bot-management, see MozzartFileCollector).
     """
-    capture_dir = os.environ.get("MOZZART_CAPTURE_DIR")
-    if not capture_dir:
+    if not config.mozzart_capture_dir:
         return None
 
-    mode = os.environ.get("MOZZART_MODE", "manual")
-    if mode != "manual":
+    if config.mozzart_mode != "manual":
         raise ValueError(
-            f"MOZZART_MODE={mode!r} is not supported -- Mozzart has no "
-            "automatic mode yet (see README.md's Data Collection section)."
+            f"MOZZART_MODE={config.mozzart_mode!r} is not supported -- Mozzart has "
+            "no automatic mode yet (see README.md's Data Collection section)."
         )
 
-    return MozzartFileCollector(Path(capture_dir))
+    return MozzartFileCollector(Path(config.mozzart_capture_dir))
 
 
-def _supplemental_collectors() -> list[OddsCollector]:
+def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
     """Manual-capture collectors layered on top of whichever primary
     source is active in build_collectors(), so they land in the same
     ingestion cycle and get matched against the same FixtureCatalog as
@@ -213,12 +219,12 @@ def _supplemental_collectors() -> list[OddsCollector]:
     exactly as before.
 
     Adding another manual-capture source (MaxBet, Soccer, ...) later is
-    the same shape: its own _xxx_collector() helper reading its own env
-    vars, appended here -- no other wiring changes needed.
+    the same shape: its own _xxx_collector() helper reading its own
+    AppConfig fields, appended here -- no other wiring changes needed.
     """
     collectors: list[OddsCollector] = []
 
-    mozzart = _mozzart_collector()
+    mozzart = _mozzart_collector(config)
     if mozzart is not None:
         collectors.append(mozzart)
 
@@ -250,7 +256,7 @@ def build_collectors(config: AppConfig) -> list[OddsCollector]:
             JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
         ]
 
-    return [*primary_collectors, *_supplemental_collectors()]
+    return [*primary_collectors, *_supplemental_collectors(config)]
 
 
 def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
@@ -347,15 +353,19 @@ def persist_detected_signals(
     """
     observed_at = datetime.now(timezone.utc)
 
-    surebets = detect_surebet_candidates(
+    surebet_sweep = detect_surebet_candidates(
         events, odds_repository, market, freshness_policy=freshness_policy,
         analysis_time=analysis_time,
     )
     signal_repository.reconcile(
-        SUREBET, [from_surebet(candidate) for candidate in surebets], observed_at=observed_at
+        SUREBET,
+        market,
+        [from_surebet(candidate) for candidate in surebet_sweep.candidates],
+        observed_at=observed_at,
+        evaluated_event_ids=surebet_sweep.evaluated_event_ids,
     )
 
-    value_gaps = detect_value_gap_candidates(
+    value_gap_sweep = detect_value_gap_candidates(
         events,
         odds_repository,
         market,
@@ -365,8 +375,10 @@ def persist_detected_signals(
     )
     signal_repository.reconcile(
         VALUE_GAP,
-        [from_value_gap(candidate) for candidate in value_gaps],
+        market,
+        [from_value_gap(candidate) for candidate in value_gap_sweep.candidates],
         observed_at=observed_at,
+        evaluated_event_ids=value_gap_sweep.evaluated_event_ids,
     )
 
     movements = detect_movements(events, odds_repository, market)

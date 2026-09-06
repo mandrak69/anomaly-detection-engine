@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
-from anomaly_detection_engine.storage.database import initialize_database
+from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.raw_payload_repository import (
     RawPayloadRepository,
     serialize_raw_event_odds,
@@ -40,7 +40,7 @@ def test_serialize_raw_event_odds_round_trips_through_json():
 
 def test_saves_and_finds_raw_payloads_for_a_run():
     connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
+    configure_connection(connection)
     initialize_database(connection)
 
     repository = RawPayloadRepository(connection)
