@@ -137,6 +137,7 @@ anomaly-detection-engine/
 │       │   ├── logging_config.py
 │       │   └── metrics.py
 │       ├── reporting/
+│       │   ├── console.py
 │       │   ├── movement_report.py
 │       │   └── opportunity_report.py
 │       ├── storage/
@@ -174,7 +175,7 @@ Canonical sports event identified using domain information such as:
 
 ```text
 sport
-competition
+competition (league: display string, competition_id: stable FK)
 home team
 away team
 start time
@@ -182,15 +183,24 @@ start time
 
 External event IDs are source-specific and must not be treated as global IDs.
 
+`Event.competition_id` is a required field pointing at the canonical
+`competitions` row `FixtureCatalog` already resolves `league` against
+(see Matching below) -- an event's identity is keyed on this stable id,
+not on `league`'s display string, so that renaming a canonical
+competition later (not currently exposed as a feature, but the id
+already supports it) can't silently detach existing events from future
+matches under the new name.
+
 ### MarketIdentity
 
 `MarketIdentity` defines exactly what market is being compared.
 
-Potential fields include:
+Fields:
 
 ```text
 market_type
 period
+phase       (MarketPhase: PRE_MATCH or LIVE -- required, no default)
 line
 rules
 specifier
@@ -199,9 +209,10 @@ specifier
 Examples:
 
 ```text
-THREE_WAY + FULL_TIME
-TOTALS + FULL_TIME + 2.5
-HANDICAP + FULL_TIME + -1.5
+THREE_WAY + FULL_TIME + PRE_MATCH
+THREE_WAY + FULL_TIME + LIVE
+TOTALS + FULL_TIME + PRE_MATCH + 2.5
+HANDICAP + FULL_TIME + PRE_MATCH + -1.5
 ```
 
 Only semantically equivalent markets may be compared -- enforced end to
@@ -211,7 +222,15 @@ end: every repository query that groups or deduplicates odds (the
 identity used by `SignalRepository`/`MovementRepository`) filters/keys on
 the full `MarketIdentity` tuple, not just `market_type`/`period`/`line`.
 Two snapshots that only differ in `rules`/`specifier` are a different
-market and must never be merged together.
+market and must never be merged together -- and neither are two that
+only differ in `phase`: a pre-match price and a live, in-play price for
+the same event/market/outcome were never simultaneously valid, so
+comparing them would compare prices from two different moments in the
+match, not a genuine cross-bookmaker discrepancy. `phase` has no default
+value -- every collector must explicitly say which phase it produces
+(the JSON demo and `TheOddsApiCollector` use `DEFAULT_MARKET`, i.e.
+`PRE_MATCH`; `MozzartFileCollector` reads mozzartbet.com's `/live/matches`
+endpoint, genuinely live data, and uses `LIVE_MARKET` instead).
 
 ### RawEventOdds
 
@@ -239,7 +258,13 @@ Snapshots are stored historically so the engine can analyze changes through time
 
 `quote_time` (a property, not a stored column) is `source_timestamp` if
 the source provided one, otherwise `observed_at` -- see Freshness below
-for why this distinction matters and where it's actually used.
+for why this distinction matters. Freshness isn't the only consumer:
+`detect_bookmaker_lag` and `detect_rapid_movement` both compare across
+snapshots and both use `quote_time`, not `observed_at`, for the same
+reason -- a single poll gives every bookmaker in that response the same
+`observed_at` (when *we* polled), which hides genuine staleness/movement
+differences that only show up in each bookmaker's own `source_timestamp`
+(when *its* price was actually last updated).
 
 ### CollectorRun
 
@@ -578,12 +603,28 @@ FixtureCatalog     persistent, auto-growing -- resolves a never-seen
 `TeamNormalizer` internally (same exact/alias/fuzzy resolution as
 `EventMatcher`), but runs it against the *durable* `teams` table instead
 of a list passed in for one run, and persists every resolution in
-`source_team_mappings` (keyed by `(source, sport, raw_name)`) so it's
-never re-solved later -- that cache is what lets two different sources
-reporting the same real match under different team-name spellings end up
-sharing one canonical event, once that particular spelling has been
-resolved once, whether just now (exact/alias/fuzzy match against the
-existing catalog) or replayed from a previous run's mapping.
+`source_team_mappings` (keyed by `(provider_id, sport, raw_name)`) so
+it's never re-solved later -- that cache is what lets two different
+sources reporting the same real match under different team-name
+spellings end up sharing one canonical event, once that particular
+spelling has been resolved once, whether just now (exact/alias/fuzzy
+match against the existing catalog) or replayed from a previous run's
+mapping.
+
+Each `FixtureCatalog` is constructed with a `provider_id`, not the
+collector's own `OddsCollector.source` -- `source` identifies one
+*collector instance* for `CollectorRun`/logging (e.g.
+`"the-odds-api-manual:soccer_epl"`, which encodes the acquisition
+method and sport key), while `provider_id` identifies the real-world
+data *provider* underneath it (e.g. `"the-odds-api"`). The distinction
+matters because `TheOddsApiCollector` (auto) and `TheOddsApiManualCollector`
+(a manual fallback for when the API is temporarily unreachable) have
+different `source` values but must share one team/competition mapping
+cache -- keying that cache on `source` instead would make switching
+between auto and manual silently rebuild the cache from scratch. Every
+collector exposes both properties; `run_ingestion` passes
+`provider_id=collector.provider_id` when constructing each poll's
+`FixtureCatalog`.
 
 Team resolution, per raw name:
 
@@ -622,23 +663,40 @@ the same exact/alias/fuzzy pattern as team names: `FixtureCatalog`
 resolves a raw league/competition string (the-odds-api's `"Premier
 League"`, another source's `"England Premier League"`, Mozzart's
 `"Engleska Premier Liga"`) against a `competitions` table, caching every
-`(source, sport, raw league name)` resolution in
+`(provider_id, sport, raw league name)` resolution in
 `source_competition_mappings` -- without this, the same real match
 reported under different league spellings by different sources would
 resolve to two different canonical events that never get compared
 against each other, defeating the entire cross-source point of league
 being part of an event's identity in the first place. `Event.league`
-stays a plain string (the canonical name), not a separate object --
-`competitions`/`source_competition_mappings` exist purely as this
-resolution's persistent memory, the same role `teams`/
-`source_team_mappings` play for team names. A second, independent
-`league_aliases` constructor param (distinct from `aliases`, which is
-team-name-only) lets a caller seed known league-name variants.
+stays a plain string (the canonical display name), but event *identity*
+is keyed on `Event.competition_id` (a stable FK into `competitions`),
+not on this string -- so a future rename of a canonical competition's
+name can't silently detach existing events from later matches under the
+new spelling. `competitions`/`source_competition_mappings` otherwise
+exist purely as this resolution's persistent memory, the same role
+`teams`/`source_team_mappings` play for team names. A second,
+independent `league_aliases` constructor param (distinct from `aliases`,
+which is team-name-only) lets a caller seed known league-name variants.
 
 `EventMatcher` still exists and is still tested -- it is the right tool
 when you genuinely want a fixed, non-growing candidate list (e.g. a
 controlled test), not a mistake left behind by the switch to
 `FixtureCatalog`.
+
+### Concurrency
+
+This project explicitly supports multiple concurrent
+`scripts/watch_capture.py`-spawned processes sharing one database file
+(one per manual-capture source). `FixtureCatalog.match()` wraps its
+whole read-then-maybe-create resolution (team, competition, event) in a
+single `BEGIN IMMEDIATE` transaction, acquiring SQLite's writer lock
+*before* any of the "does this already exist" reads -- without it, two
+processes could both read "not found yet" for the same raw name and
+both try to create it, racing on the same unique constraint (or worse,
+silently creating two rows that should have been one). A second
+connection attempting the same resolution blocks (up to its own
+`busy_timeout`) instead of racing it.
 
 ---
 
@@ -699,9 +757,12 @@ relative to itself no matter how much real time has actually passed.
 `pipeline.py`'s demo path is the one legitimate exception -- its fixed
 calendar timestamps would otherwise always register as ancient, so it
 explicitly passes the newest observation across everything ingested that
-run as its stand-in "now" (`_demo_analysis_time`), kept local to that
-demo-only code path rather than being a default inside the detection
-functions themselves.
+run as its stand-in "now" (`demo_analysis_time`), rather than this being
+a default inside the detection functions themselves. `demo_analysis_time`
+is public (not demo-only-pipeline-private) because both
+`pipeline.run_detection` and `reporting.console.print_reports` need the
+exact same "now" -- otherwise the report could evaluate freshness
+against a different instant than what was actually detected/persisted.
 
 Age and spread are measured against each snapshot's `quote_time`
 (`source_timestamp` if the source provided one, else `observed_at`), not
@@ -769,7 +830,48 @@ Example:
 10:04 odds = 1.90
 ```
 
-The detector evaluates percentage change and elapsed time.
+The detector evaluates percentage change and elapsed time against each
+snapshot's `quote_time`, not `observed_at`, for the same reason
+Freshness does (above). `detect_rapid_movement` also distinguishes two
+different failure modes that share the same symptom (a negative time
+delta): `current.observed_at < previous.observed_at` is a genuine
+caller-contract violation and still raises `ValueError`, but
+`current.quote_time < previous.quote_time` despite correctly-ordered
+`observed_at` values -- a source's own clock running backward -- is a
+data anomaly, not a movement, and returns
+`MovementResult(detected=False, clock_regression=True, ...)` instead of
+raising. Letting that raise would crash the whole detection sweep over
+one bad reading from one bookmaker.
+
+---
+
+## Core Pipeline vs. Reporting
+
+`pipeline.py`'s core is deliberately narrow: collect -> validate ->
+normalize/match -> persist observations -> detect anomalies -> persist
+signals, and nothing past that. `run_detection(runtime, events, config)`
+is the last step -- it calls `persist_detected_signals` and prints a
+terse one-line summary, and imports nothing from `reporting.*`.
+`app.py`'s `main()` is exactly two lines:
+
+```python
+events = run_ingestion(runtime, config)
+run_detection(runtime, events, config)
+```
+
+Every human-facing report (the per-event best-odds/arbitrage breakdown,
+`opportunity_report`, `movement_report`) lives in
+`reporting.console.print_reports(runtime, events, config)` instead --
+presentation built *on top of* what the core already persisted, not
+called by `main()` by default. Call it explicitly (a script, a REPL, a
+future CLI flag) when you actually want to see it; the core pipeline
+runs, detects, and persists signals without it. The reasoning: a
+"worth telling a human" threshold (`MIN_SUREBET_PROFIT_PERCENT`) and any
+rendering of a report are presentation decisions, not detection facts,
+and the core should stay usable (and testable) by anything that only
+wants detection -- a future dashboard, a notification layer, a
+different report -- without pulling in this project's own console
+rendering as a side effect.
 
 ---
 
@@ -807,12 +909,28 @@ VALUE_GAP   one bookmaker pricing an outcome well above the consensus of
             lower bar just flags routine price shopping.
 ```
 
-Both thresholds are overridable per call, and `app.py`'s demo reads them
-from `MIN_SUREBET_PROFIT_PERCENT` / `MIN_VALUE_GAP_PERCENT` environment
-variables so they can be tuned without editing code:
+Both thresholds are overridable per call. `MIN_VALUE_GAP_PERCENT` is read
+into `AppConfig.min_value_gap_percent` (a genuine detection threshold --
+VALUE_GAP's threshold is part of the outlier detection itself, so
+`pipeline.run_detection` needs it too, not just the report).
+`MIN_SUREBET_PROFIT_PERCENT` is *not* on `AppConfig`: SUREBET candidates
+are persisted unconditionally regardless of profit size (see Core
+Pipeline vs. Reporting above), so that threshold only ever affects
+whether a report prints a row -- `reporting.console.print_reports` reads
+it directly from the environment, tunable the same way:
 
 ```bash
-MIN_SUREBET_PROFIT_PERCENT=0.1 python -m anomaly_detection_engine.app
+MIN_SUREBET_PROFIT_PERCENT=0.1 python -c "
+from anomaly_detection_engine.config import load_config
+from anomaly_detection_engine.pipeline import run_ingestion
+from anomaly_detection_engine.reporting.console import print_reports
+from anomaly_detection_engine.runtime import build_runtime
+
+config = load_config()
+runtime = build_runtime(config)
+events = run_ingestion(runtime, config)
+print_reports(runtime, events, config)
+"
 ```
 
 Example output (default thresholds -- the sample dataset's ~0.12% margin
@@ -1224,6 +1342,12 @@ rate limiting
 [x] Ingestion failure taxonomy: audit_failures (raw-payload write failures) and an aborted-run's own status/error_type/error_message are now reflected in CollectorRun, not just per-record rejection counts
 [x] app.py split into config.py (AppConfig/load_config) / runtime.py (Runtime/build_runtime) / pipeline.py (build_collectors/run_ingestion/run_analysis/persist_detected_signals) / app.py (main() only)
 [x] ruff added to the dev/CI pipeline; .idea/ untracked (was committed despite being commented out in .gitignore)
+[x] MarketPhase (PRE_MATCH/LIVE) added as a required field on MarketIdentity, propagated through every dedupe/lookup/identity SQL key -- Mozzart's live-only data is no longer indistinguishable from pre-match data
+[x] bookmaker_lag and rapid-movement detection measured against quote_time instead of observed_at, closing the same poll-vs-source-timestamp gap Freshness was already fixed for; source clock regression is now a flagged data anomaly, not a crash
+[x] Core pipeline (collect -> validate -> match -> persist -> detect -> persist signals) no longer imports reporting.* -- run_analysis replaced by run_detection, human-facing reports moved to reporting.console.print_reports (not called by app.py by default), and min_surebet_profit_percent removed from AppConfig (report-only, not a detection threshold)
+[x] provider_id (the real-world data provider) separated from OddsCollector.source/collector_id (one collector instance's label) -- FixtureCatalog now caches team/competition mappings per provider_id, so an auto and a manual collector for the same provider share one cache
+[x] FixtureCatalog concurrency safety: match()'s whole resolve-or-create cycle runs inside one BEGIN IMMEDIATE transaction, so concurrent watch_capture.py processes serialize on SQLite's writer lock instead of racing the same "does this exist yet" check
+[x] Event.competition_id (stable FK into competitions) added -- event identity is now keyed on this id instead of the league display string, so a future competition rename can't silently detach existing events from later matches
 ```
 
 ---
@@ -1270,6 +1394,21 @@ Everything above is done. Genuinely open next:
     -- worth doing before this becomes a generic (non-sports-odds)
     anomaly engine, not before
 [ ] Pyright (or mypy) in CI alongside ruff, now that both are wired in
+[ ] Event lifecycle (completed/expired) -- run_ingestion's
+    list_events() returns every event ever seen, so a long-finished
+    match's ACTIVE signal is never confirmed RESOLVED, just never
+    re-evaluated
+[ ] Canonicalize Decimal line representation (e.g. Decimal("2.5") vs a
+    "2.50"-shaped value) and normalize rules=""/specifier="" to None
+    consistently, before adding TOTALS/HANDICAP
+[ ] Extract SignalType/SignalIdentity into models/signal.py (closes
+    storage.signal_repository's current inverted dependency on
+    analysis.opportunity_detection) + an EventResolver Protocol
+    (OddsIngestionService type-hints matcher: EventMatcher but is
+    actually passed a FixtureCatalog)
+[ ] Preserve the original source payload (bytes/JSON), not just the
+    parsed RawEventOdds, for live sources -- manual captures already
+    keep a history/ folder; the-odds-api's live responses don't
 ```
 
 ---
@@ -1392,6 +1531,65 @@ raw-payload audit failures and the run's own possible mid-loop abort, not
 just per-record accept/reject counts. Finally, `app.py` (working out to
 446 lines) was split into `config.py`/`runtime.py`/`pipeline.py`, leaving
 `app.py` as just `main()`.
+
+**Done:** a fourth round, split between two real correctness bugs and a
+scope-tightening pass ahead of adding more market types/sources. Mozzart's
+`/live/matches` data was being tagged with the same `DEFAULT_MARKET` as
+every pre-match source, even though live and pre-match prices for the
+same event/market/outcome were never simultaneously valid -- `MarketPhase`
+(`PRE_MATCH`/`LIVE`) is now a required field (no default) on
+`MarketIdentity`, propagated through every dedupe/lookup/identity key
+(migration 4). The same "one poll, one `observed_at`, but each bookmaker
+has its own `source_timestamp`" gap that Freshness was already fixed for
+in round 3 turned out to still be open in `detect_bookmaker_lag` (lag was
+computed against `observed_at`, hiding real staleness) and
+`detect_rapid_movement` (same issue, plus a source's clock running
+backward needed its own handling: a `quote_time` regression despite
+correctly-ordered `observed_at` is now a flagged `clock_regression`
+result, not something that raises and crashes the whole sweep). Both now
+compare `quote_time`. The core pipeline was split from reporting:
+`run_analysis` (which mixed persistence with printing per-event
+arbitrage breakdowns and rendering both reports) is gone, replaced by
+`run_detection` (persist only, terse summary) and
+`reporting.console.print_reports` (every human-facing report, not
+imported by the core, not called by `app.py` by default) -- see Core
+Pipeline vs. Reporting above. `min_surebet_profit_percent` came out of
+`AppConfig` accordingly, since it was never a detection threshold, only
+ever a "worth printing" one. `FixtureCatalog`'s constructor parameter was
+renamed from `source` to `provider_id`, decoupling the real data
+provider (used as the team/competition mapping cache key) from
+`OddsCollector.source` (a per-collector-instance label that differs
+between an auto and a manual collector for the very same provider, which
+previously meant they silently built two separate mapping caches for
+what should have been one). `FixtureCatalog.match()` now wraps its whole
+resolve-or-create cycle in one `BEGIN IMMEDIATE` transaction -- this
+project explicitly supports multiple concurrent `watch_capture.py`
+processes sharing one database file, and the previous SELECT-then-
+INSERT pattern had a real race window between them. Finally,
+`Event.competition_id` (a stable FK into `competitions`) was added, and
+event identity is now keyed on it instead of `league`'s display string,
+closing the gap where a future competition rename could have silently
+detached existing events from later matches.
+
+Deliberately deferred out of this round (real future-growth prep, not
+correctness bugs, and not worth the churn until there are 2-3 real
+market types and 3-4 real sources to actually generalize against):
+canonicalizing `Decimal` line representation for TOTALS/HANDICAP
+comparisons, an explicit event lifecycle (completed/expired) so
+`run_ingestion`'s full-history `list_events()` doesn't re-evaluate
+long-finished matches forever, extracting `SignalType`/`SignalIdentity`
+into their own `models/signal.py` (closing `storage.signal_repository`'s
+current inverted dependency on `analysis.opportunity_detection`) plus an
+`EventResolver` Protocol (`OddsIngestionService` currently type-hints
+`matcher: EventMatcher` but is actually passed a `FixtureCatalog`, which
+only duck-types the same shape), and preserving the original source
+payload bytes alongside the parsed `RawEventOdds` so a parser bug could
+be fixed and historical data reprocessed. None of ML, Kafka, Redis,
+Postgres, an async framework, microservices, or a "generic anomaly
+framework" are planned before then either -- the current problem is far
+more valuably solved through an accurate domain model and reliable
+ingestion/matching than through infrastructure this project doesn't yet
+have the real multi-market, multi-source pressure to actually need.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

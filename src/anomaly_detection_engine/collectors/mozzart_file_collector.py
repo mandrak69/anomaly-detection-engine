@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
-from anomaly_detection_engine.models.market import DEFAULT_MARKET
+from anomaly_detection_engine.models.market import LIVE_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 FINAL_RESULT_GROUP_NAME = "Konačan ishod"
@@ -89,7 +89,12 @@ def _map_match(match: dict, observed_at: datetime, source_name: str) -> RawEvent
             away_team=match["visitor"]["name"],
             start_time=datetime.fromtimestamp(match["startTime"] / 1000, tz=UTC),
             observed_at=observed_at,
-            market=DEFAULT_MARKET,
+            # mozzartbet.com's /live/matches endpoint is exactly that --
+            # live, in-play odds -- never DEFAULT_MARKET's pre-match
+            # phase. Comparing a live 1X2 price against a pre-match one
+            # for the same event would be comparing prices that were
+            # never simultaneously valid (see models.market.MarketPhase).
+            market=LIVE_MARKET,
             odds=odds,
         )
     except (KeyError, TypeError):
@@ -127,6 +132,7 @@ class MozzartFileCollector(ManualCaptureCollector):
                 raw_text, observed_at, source_name=source_name
             ),
             source_label=f"mozzart-file:{capture_dir.name}",
+            provider_id="mozzart",
             filename=filename,
             history_dirname=history_dirname,
         )

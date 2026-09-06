@@ -2,9 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from anomaly_detection_engine.analysis.arbitrage import calculate_arbitrage
-from anomaly_detection_engine.analysis.best_odds import find_best_odds
-from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
+from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.movement_detection import detect_movements
 from anomaly_detection_engine.analysis.opportunity_detection import (
     SUREBET,
@@ -23,14 +21,6 @@ from anomaly_detection_engine.config import AppConfig
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import DEFAULT_MARKET, MarketIdentity
-from anomaly_detection_engine.reporting.movement_report import (
-    build_movement_report,
-    render_movement_report,
-)
-from anomaly_detection_engine.reporting.opportunity_report import (
-    build_opportunity_report,
-    render_opportunity_report,
-)
 from anomaly_detection_engine.runtime import Runtime
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
@@ -177,11 +167,15 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
     catalog: FixtureCatalog | None = None
 
     for poll_number, collector in enumerate(collectors, start=1):
-        # One FixtureCatalog per collector, scoped to that collector's own
-        # source label (its team-name mapping cache is per-source), but
-        # all sharing the same connection/tables -- so a team or event
-        # resolved by one collector is immediately visible to the next.
-        catalog = FixtureCatalog(runtime.connection, source=collector.source, aliases=ALIASES)
+        # One FixtureCatalog per collector, scoped to that collector's
+        # provider_id (its team-name mapping cache is per-provider, so
+        # auto/manual collectors for the same real provider share one
+        # cache -- see FixtureCatalog's docstring), but all sharing the
+        # same connection/tables -- so a team or event resolved by one
+        # collector is immediately visible to the next.
+        catalog = FixtureCatalog(
+            runtime.connection, provider_id=collector.provider_id, aliases=ALIASES
+        )
 
         service = OddsIngestionService(
             collector=collector,
@@ -201,19 +195,22 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
     return catalog.list_events() if catalog is not None else []
 
 
-def _demo_analysis_time(events: list[Event], odds_repository: OddsRepository) -> datetime:
+def demo_analysis_time(events: list[Event], odds_repository: OddsRepository) -> datetime:
     """The demo dataset uses fixed calendar timestamps rather than live
     polling, so "now" for freshness purposes is the newest observation
     across everything ingested this run -- not wall-clock time, which
     would make demo data look permanently stale.
 
-    Deliberately kept local to this demo-only code path rather than being
-    the default inside detect_surebet_candidates/detect_value_gap_candidates
-    themselves: those must always receive an explicit analysis_time from
-    their caller (real wall-clock time in any live deployment), never
-    silently fall back to "newest observation in the batch" -- that would
-    hide genuinely stale data behind snapshots that are merely close to
-    each other in time (see analysis.opportunity_detection).
+    Not the default inside detect_surebet_candidates/
+    detect_value_gap_candidates themselves: those must always receive an
+    explicit analysis_time from their caller (real wall-clock time in any
+    live deployment), never silently fall back to "newest observation in
+    the batch" -- that would hide genuinely stale data behind snapshots
+    that are merely close to each other in time (see
+    analysis.opportunity_detection). Public (not demo-only-pipeline-
+    private) because reporting.console needs the exact same "now" this
+    module's own run_detection uses, to gate on the same freshness
+    reporting displays as what was actually detected/persisted.
     """
     all_quote_times = [
         snapshot.quote_time
@@ -295,72 +292,25 @@ def persist_detected_signals(
     }
 
 
-def run_analysis(runtime: Runtime, events: list[Event], config: AppConfig) -> None:
-    """Prints the per-event breakdown and the opportunity/movement
-    reports, then persists the same detection sweep -- everything
-    downstream of ingestion.
+def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict:
+    """Detects and persists signals/movements for every ingested event --
+    the last step of the *core* pipeline: collect -> validate -> match ->
+    persist observations -> detect anomalies -> persist signals.
+
+    Deliberately imports nothing from reporting.* and prints nothing
+    beyond a terse summary of what it did: a "worth telling a human"
+    threshold, and any rendering of a human-facing report, is a
+    presentation decision, not a detection fact -- see
+    reporting.console.print_reports for that, kept out of the core
+    pipeline on purpose so the core never depends on it.
     """
     analysis_time = (
         datetime.now(UTC)
         if config.odds_source == "the-odds-api"
-        else _demo_analysis_time(events, runtime.odds_repository)
+        else demo_analysis_time(events, runtime.odds_repository)
     )
 
-    for event in events:
-        snapshots = runtime.odds_repository.find_latest_for_market(
-            event_id=event.id,
-            market=DEFAULT_MARKET,
-        )
-        if not snapshots:
-            continue
-
-        freshness = validate_freshness(
-            snapshots,
-            analysis_time=analysis_time,
-            policy=DEMO_FRESHNESS_POLICY,
-        )
-        if not freshness.valid:
-            print(f"\nSKIP {event.display_name}: not fresh ({freshness.reason})")
-            continue
-
-        best = find_best_odds(snapshots, event_id=event.id, market=DEFAULT_MARKET)
-        if not best:
-            continue
-
-        result = calculate_arbitrage(best)
-
-        print("\n" + "=" * 72)
-        print(event.display_name)
-        print("=" * 72)
-        for outcome in ("1", "X", "2"):
-            item = best[outcome]
-            print(f"{outcome:>2}: {item.odds:.2f} @ {item.bookmaker_name}")
-
-        print(f"Arbitrage margin: {result.margin:.4f}")
-        print(f"Surebet: {'YES' if result.is_surebet else 'NO'}")
-        print(f"Theoretical profit: {result.theoretical_profit_percent:.2f}%")
-
-    print("\n" + "=" * 72)
-    print("OPPORTUNITIES (surebets and notable best-odds gaps only)")
-    print("=" * 72)
-    opportunity_rows = build_opportunity_report(
-        events,
-        runtime.odds_repository,
-        DEFAULT_MARKET,
-        freshness_policy=DEMO_FRESHNESS_POLICY,
-        analysis_time=analysis_time,
-        min_surebet_profit_percent=config.min_surebet_profit_percent,
-        min_value_gap_percent=config.min_value_gap_percent,
-    )
-    print(render_opportunity_report(opportunity_rows))
-
-    print("\n" + "=" * 72)
-    print("ODDS MOVEMENT (significant change between the last two readings)")
-    print("=" * 72)
-    movement_rows = build_movement_report(events, runtime.odds_repository, DEFAULT_MARKET)
-    print(render_movement_report(movement_rows))
-
-    sweep_summary = persist_detected_signals(
+    summary = persist_detected_signals(
         events,
         runtime.odds_repository,
         runtime.signal_repository,
@@ -370,8 +320,7 @@ def run_analysis(runtime: Runtime, events: list[Event], config: AppConfig) -> No
         analysis_time=analysis_time,
         min_value_gap_percent=config.min_value_gap_percent,
     )
-    print("\n" + "-" * 72)
-    print(f"Signals: {sweep_summary}")
-
-    print("\n" + "-" * 72)
+    print(f"Detection: {summary}")
     print(f"Metrics: {runtime.metrics.snapshot()}")
+
+    return summary

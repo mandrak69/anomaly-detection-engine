@@ -158,6 +158,7 @@ def test_persist_detected_signals_creates_then_resolves_a_surebet():
         id="e1",
         sport="football",
         league="L",
+        competition_id="competition-1",
         home_team=Team("h", "A"),
         away_team=Team("a", "B"),
         start_time=now,

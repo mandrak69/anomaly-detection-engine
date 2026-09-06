@@ -2,10 +2,17 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 NOW = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 POLICY = FreshnessPolicy(
     max_snapshot_age=timedelta(minutes=5),

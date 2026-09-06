@@ -4,6 +4,7 @@ from decimal import Decimal
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
     MarketPeriod,
+    MarketPhase,
     MarketType,
 )
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
@@ -28,6 +29,7 @@ def build_valid_raw_event_odds() -> RawEventOdds:
         market=MarketIdentity(
             market_type=MarketType.THREE_WAY,
             period=MarketPeriod.FULL_TIME,
+            phase=MarketPhase.PRE_MATCH,
         ),
         odds={
             "1": Decimal("2.15"),

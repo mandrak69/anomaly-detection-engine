@@ -4,12 +4,19 @@ from decimal import Decimal
 
 from anomaly_detection_engine.analysis.movement_detection import detect_movements
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 T0 = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 
 
@@ -38,6 +45,7 @@ def make_event(event_id: str, home: str, away: str) -> Event:
         id=event_id,
         sport="football",
         league="demo-league",
+        competition_id="competition-1",
         home_team=Team(f"{event_id}-home", home),
         away_team=Team(f"{event_id}-away", away),
         start_time=T0,

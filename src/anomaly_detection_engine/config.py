@@ -22,11 +22,21 @@ _VALID_ODDS_SOURCES = ("demo", "the-odds-api")
 
 @dataclass(frozen=True)
 class AppConfig:
-    """Every environment-variable-driven decision, resolved exactly once
-    at startup -- so nothing downstream (pipeline.run_ingestion,
-    pipeline.run_analysis, pipeline.persist_detected_signals) reads
-    os.environ directly, and every choice fails loudly here rather than
-    silently deep inside a poll cycle.
+    """Every environment-variable-driven decision the *core* pipeline
+    needs, resolved exactly once at startup -- so nothing downstream
+    (pipeline.run_ingestion, pipeline.run_detection,
+    pipeline.persist_detected_signals) reads os.environ directly, and
+    every choice fails loudly here rather than silently deep inside a
+    poll cycle.
+
+    Deliberately does not include MIN_SUREBET_PROFIT_PERCENT: that
+    threshold only ever controls whether a row is worth a line in
+    reporting.opportunity_report's output (SUREBET candidates are
+    persisted unconditionally -- see persist_detected_signals), a
+    presentation decision belonging to reporting.console, not the core
+    config every pipeline stage shares. min_value_gap_percent stays here
+    because it *is* a detection-level threshold (part of what counts as
+    an outlier, not a display filter on top).
     """
 
     db_path: str
@@ -36,7 +46,6 @@ class AppConfig:
     odds_api_capture_dir: str | None
     mozzart_capture_dir: str | None
     mozzart_mode: str
-    min_surebet_profit_percent: Decimal
     min_value_gap_percent: Decimal
 
 
@@ -58,6 +67,5 @@ def load_config() -> AppConfig:
         odds_api_capture_dir=os.environ.get("ODDS_API_CAPTURE_DIR"),
         mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
-        min_surebet_profit_percent=Decimal(os.environ.get("MIN_SUREBET_PROFIT_PERCENT", "1.0")),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
     )

@@ -10,7 +10,7 @@ from anomaly_detection_engine.models.odds import OddsSnapshot
 class BookmakerLagResult:
     outcome: str
     bookmaker_name: str
-    observed_at: datetime
+    quote_time: datetime
     lag: timedelta
 
 
@@ -28,6 +28,15 @@ def detect_bookmaker_lag(
     analysis.freshness for that) -- it answers "who hasn't reacted yet
     while everyone else has", which is what MARKET_ANOMALY-style
     bookmaker-lag signals are about.
+
+    Compares quote_time (source_timestamp if the source provided one,
+    else observed_at -- see OddsSnapshot.quote_time), not observed_at
+    directly: a single poll can retrieve several bookmakers' prices at
+    once (one observed_at for the whole batch) while each bookmaker's
+    own last_update differs -- comparing observed_at there would make
+    every bookmaker in the same poll look equally fresh regardless of
+    how stale their actual quote was, exactly the lag this function
+    exists to catch.
     """
     by_outcome: dict[str, list[OddsSnapshot]] = {}
     for snapshot in snapshots:
@@ -41,16 +50,16 @@ def detect_bookmaker_lag(
         if len(outcome_snapshots) < 2:
             continue
 
-        newest_observed_at = max(s.observed_at for s in outcome_snapshots)
+        newest_quote_time = max(s.quote_time for s in outcome_snapshots)
 
         for snapshot in outcome_snapshots:
-            lag = newest_observed_at - snapshot.observed_at
+            lag = newest_quote_time - snapshot.quote_time
             if lag >= staleness_threshold:
                 results.append(
                     BookmakerLagResult(
                         outcome=outcome,
                         bookmaker_name=snapshot.bookmaker.name,
-                        observed_at=snapshot.observed_at,
+                        quote_time=snapshot.quote_time,
                         lag=lag,
                     )
                 )

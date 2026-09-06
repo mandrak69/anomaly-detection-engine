@@ -27,7 +27,9 @@ def dummy_parse(raw_text: str, observed_at: datetime) -> list[RawEventOdds]:
 
 
 def test_returns_empty_when_no_capture_is_waiting(tmp_path):
-    collector = ManualCaptureCollector(tmp_path, parse=dummy_parse, source_label="dummy:test")
+    collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
     assert collector.collect() == []
 
 
@@ -35,7 +37,9 @@ def test_reads_and_archives_a_capture(tmp_path):
     drop_path = tmp_path / "capture.json"
     drop_path.write_text("Partizan,Crvena Zvezda,2.10,3.40,3.20", encoding="utf-8")
 
-    collector = ManualCaptureCollector(tmp_path, parse=dummy_parse, source_label="dummy:test")
+    collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
     result = collector.collect()
 
     assert len(result) == 1
@@ -45,7 +49,9 @@ def test_reads_and_archives_a_capture(tmp_path):
 
 
 def test_second_capture_is_archived_separately_from_the_first(tmp_path):
-    collector = ManualCaptureCollector(tmp_path, parse=dummy_parse, source_label="dummy:test")
+    collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
 
     (tmp_path / "capture.json").write_text("A,B,2.00,3.00,4.00", encoding="utf-8")
     collector.collect()
@@ -60,7 +66,9 @@ def test_parse_failure_leaves_the_file_in_place(tmp_path):
     drop_path = tmp_path / "capture.json"
     drop_path.write_text("not,enough,fields", encoding="utf-8")
 
-    collector = ManualCaptureCollector(tmp_path, parse=dummy_parse, source_label="dummy:test")
+    collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
 
     with pytest.raises(ValueError):
         collector.collect()
@@ -77,6 +85,7 @@ def test_custom_filename_and_source_label(tmp_path):
         tmp_path,
         parse=dummy_parse,
         source_label="dummy:custom",
+        provider_id="dummy",
         filename="snapshot.txt",
     )
 
@@ -95,7 +104,9 @@ def test_observed_at_reflects_the_file_modification_time(tmp_path):
     fixed_mtime = datetime.fromisoformat("2026-08-27T10:00:00+00:00").timestamp()
     os.utime(drop_path, (fixed_mtime, fixed_mtime))
 
-    collector = ManualCaptureCollector(tmp_path, parse=dummy_parse, source_label="dummy:test")
+    collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
     result = collector.collect()
 
     assert result[0].observed_at == datetime.fromisoformat("2026-08-27T10:00:00+00:00")

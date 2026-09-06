@@ -11,6 +11,7 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiError,
     TheOddsApiManualCollector,
 )
+from anomaly_detection_engine.models.market import MarketPhase
 
 SAMPLE_RESPONSE = [
     {
@@ -87,6 +88,7 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     }
     assert raw.start_time.tzinfo is not None
     assert raw.observed_at.tzinfo is not None
+    assert raw.market.phase == MarketPhase.PRE_MATCH
     assert raw.source_timestamp.tzinfo is not None
 
 
@@ -197,6 +199,20 @@ def test_manual_collector_parses_the_same_response_shape_as_the_auto_one(tmp_pat
 def test_manual_collector_source_label_includes_sport_key(tmp_path):
     collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
     assert collector.source == "the-odds-api-manual:soccer_epl"
+
+
+def test_auto_and_manual_collectors_share_one_provider_id(tmp_path):
+    # source differs by acquisition method/sport key ("the-odds-api:..."
+    # vs "the-odds-api-manual:..."), but both are the same real provider
+    # -- FixtureCatalog keys its team/competition mapping cache on
+    # provider_id specifically so switching between auto and manual (a
+    # rate limit, an outage) doesn't rebuild that cache from scratch.
+    auto = TheOddsApiCollector(sport_key="soccer_epl", api_key="test-key", fetch=fetch_stub([]))
+    manual = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+
+    assert auto.provider_id == "the-odds-api"
+    assert manual.provider_id == "the-odds-api"
+    assert auto.source != manual.source
 
 
 def test_manual_collector_returns_empty_when_no_capture_waiting(tmp_path):

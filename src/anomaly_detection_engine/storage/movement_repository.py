@@ -4,7 +4,12 @@ from decimal import Decimal
 from sqlite3 import Connection, Row
 
 from anomaly_detection_engine.analysis.movement_detection import MovementCandidate
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 
 
 @dataclass(frozen=True)
@@ -43,17 +48,18 @@ class MovementRepository:
         self._connection.execute(
             """
             INSERT OR IGNORE INTO movements (
-                event_id, market_type, market_period, market_line,
-                market_rules, market_specifier, outcome,
+                event_id, market_type, market_period, market_phase,
+                market_line, market_rules, market_specifier, outcome,
                 bookmaker_id, bookmaker_name, previous_odds, current_odds,
                 change_percent, previous_observed_at, current_observed_at, detected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.event.id,
                 candidate.market.market_type.value,
                 candidate.market.period.value,
+                candidate.market.phase.value,
                 str(candidate.market.line) if candidate.market.line is not None else None,
                 candidate.market.rules,
                 candidate.market.specifier,
@@ -84,6 +90,7 @@ class MovementRepository:
             market=MarketIdentity(
                 market_type=MarketType(row["market_type"]),
                 period=MarketPeriod(row["market_period"]),
+                phase=MarketPhase(row["market_phase"]),
                 line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
                 rules=row["market_rules"],
                 specifier=row["market_specifier"],

@@ -2,10 +2,17 @@ from datetime import datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.analysis.outlier_detector import detect_outliers
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 NOW = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
 
 
@@ -75,7 +82,9 @@ def test_skips_outcomes_with_too_few_bookmakers():
 
 
 def test_ignores_snapshots_for_other_events_and_markets():
-    other_market = MarketIdentity(market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME)
+    other_market = MarketIdentity(
+    market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 
     snapshots = [
         snapshot("A", "1", "2.00"),

@@ -172,6 +172,10 @@ class TheOddsApiCollector(OddsCollector):
     def source(self) -> str:
         return f"the-odds-api:{self._sport_key}"
 
+    @property
+    def provider_id(self) -> str:
+        return "the-odds-api"
+
     def collect(self) -> list[RawEventOdds]:
         url = (
             f"{self._base_url}/sports/{self._sport_key}/odds/"
@@ -238,6 +242,7 @@ class TheOddsApiManualCollector(ManualCaptureCollector):
                 raw_text, observed_at, league_fallback=sport_key
             ),
             source_label=f"the-odds-api-manual:{sport_key}",
+            provider_id="the-odds-api",
             filename=filename,
             history_dirname=history_dirname,
         )

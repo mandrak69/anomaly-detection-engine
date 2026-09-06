@@ -283,16 +283,27 @@ def _migration_2_full_market_identity(connection: sqlite3.Connection) -> None:
 
 
 def _add_column_if_missing(
-    connection: sqlite3.Connection, table: str, column: str, column_type: str
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    column_type: str,
+    *,
+    default_sql: str | None = None,
 ) -> None:
     """ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite, and running
     it twice raises "duplicate column name" -- this makes it safe to
     re-run, which migrations need to be (see
-    _migration_2_full_market_identity's docstring for why).
+    _migration_2_full_market_identity's docstring for why). default_sql,
+    when given, becomes a `DEFAULT <default_sql>` clause -- required to
+    add a NOT NULL column to a table that already has rows (SQLite
+    allows this only when a non-NULL default is supplied).
     """
     existing_columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in existing_columns:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        default_clause = f" DEFAULT {default_sql}" if default_sql else ""
+        connection.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {column_type}{default_clause}"
+        )
 
 
 def _migration_3_competitions(connection: sqlite3.Connection) -> None:
@@ -324,10 +335,160 @@ def _migration_3_competitions(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_4_market_phase(connection: sqlite3.Connection) -> None:
+    """Adds market_phase (PRE_MATCH vs LIVE, see models.market.MarketPhase)
+    to odds_snapshots/signals/movements and rebuilds every identity/
+    dedupe index to include it -- a pre-match price and a live price for
+    the same event/market/outcome are not the same market and must never
+    be compared or deduped together.
+
+    Existing rows are backfilled as 'pre_match': every source this
+    project ingested before this migration (the JSON demo, the-odds-api)
+    was genuinely pre-match, and Mozzart's live captures were -- this is
+    exactly the bug this migration fixes going forward -- already being
+    treated as indistinguishable from pre-match data, so backfilling them
+    as 'pre_match' preserves how they compared before rather than
+    fabricating a phase this migration cannot actually recover from the
+    data as stored.
+    """
+    _add_column_if_missing(
+        connection, "odds_snapshots", "market_phase", "TEXT NOT NULL", default_sql="'pre_match'"
+    )
+    _add_column_if_missing(
+        connection, "signals", "market_phase", "TEXT NOT NULL", default_sql="'pre_match'"
+    )
+    _add_column_if_missing(
+        connection, "movements", "market_phase", "TEXT NOT NULL", default_sql="'pre_match'"
+    )
+
+    connection.execute("DROP INDEX IF EXISTS idx_odds_event_market")
+    connection.execute(
+        """
+        CREATE INDEX idx_odds_event_market
+            ON odds_snapshots(
+                event_id, market_type, market_period, market_phase,
+                market_line, market_rules, market_specifier
+            )
+        """
+    )
+
+    connection.execute("DROP INDEX IF EXISTS uq_odds_snapshot_dedupe")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX uq_odds_snapshot_dedupe
+            ON odds_snapshots(
+                event_id,
+                bookmaker_id,
+                market_type,
+                market_period,
+                market_phase,
+                COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
+                outcome,
+                observed_at
+            )
+        """
+    )
+
+    connection.execute("DROP INDEX IF EXISTS uq_signals_identity")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX uq_signals_identity
+            ON signals(
+                signal_type,
+                event_id,
+                market_type,
+                market_period,
+                market_phase,
+                COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
+                COALESCE(outcome, '')
+            )
+        """
+    )
+
+    connection.execute("DROP INDEX IF EXISTS uq_movements_transition")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX uq_movements_transition
+            ON movements(
+                event_id,
+                bookmaker_id,
+                market_type,
+                market_period,
+                market_phase,
+                COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
+                outcome,
+                previous_observed_at,
+                current_observed_at
+            )
+        """
+    )
+
+
+def _migration_5_event_competition_id(connection: sqlite3.Connection) -> None:
+    """Adds events.competition_id (FK to competitions) and backfills it,
+    so FixtureCatalog can key an event's identity on the competition's
+    stable id instead of its display string (events.league) -- renaming
+    a canonical competition's name later would otherwise silently break
+    matching for every event still keyed on the old league text.
+
+    A database that only ever ran migration 3 (which created the
+    competitions table but never backfilled it from pre-existing events)
+    can have events whose league was never registered as a competitions
+    row -- the first statement here fills that gap by inserting one
+    competitions row per distinct (sport, league) still missing one.
+    Every Event.league value already *is* a canonical name (see
+    FixtureCatalog._resolve_competition), so this is an exact join, not
+    a guess, the same reasoning migration 4's backfill relies on.
+
+    competition_id is left nullable at the SQL level rather than
+    NOT NULL -- the same trade-off already made for market_line/
+    market_rules/market_specifier: every row this migration touches gets
+    backfilled, and FixtureCatalog always sets it for every row it
+    creates from now on, but a NOT NULL constraint here would need a
+    single literal DEFAULT, which can't express "look up the right id
+    per row".
+    """
+    _add_column_if_missing(
+        connection, "events", "competition_id", "TEXT REFERENCES competitions(id)"
+    )
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO competitions (id, canonical_name, sport)
+        SELECT 'competition-' || lower(hex(randomblob(5))), e.league, e.sport
+        FROM events e
+        WHERE NOT EXISTS (
+            SELECT 1 FROM competitions c
+            WHERE c.canonical_name = e.league AND c.sport = e.sport
+        )
+        GROUP BY e.sport, e.league
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE events
+        SET competition_id = (
+            SELECT c.id FROM competitions c
+            WHERE c.canonical_name = events.league AND c.sport = events.sport
+        )
+        WHERE competition_id IS NULL
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
     _migration_3_competitions,
+    _migration_4_market_phase,
+    _migration_5_event_competition_id,
 ]
 
 

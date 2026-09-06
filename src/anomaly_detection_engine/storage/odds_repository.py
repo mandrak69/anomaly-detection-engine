@@ -2,7 +2,12 @@ from datetime import datetime
 from decimal import Decimal
 from sqlite3 import Connection, Row
 
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
@@ -13,6 +18,7 @@ _INSERT_SQL = """
         bookmaker_name,
         market_type,
         market_period,
+        market_phase,
         market_line,
         market_rules,
         market_specifier,
@@ -21,7 +27,7 @@ _INSERT_SQL = """
         observed_at,
         source_timestamp
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -32,6 +38,7 @@ def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
         snapshot.bookmaker.name,
         snapshot.market.market_type.value,
         snapshot.market.period.value,
+        snapshot.market.phase.value,
         str(snapshot.market.line) if snapshot.market.line is not None else None,
         snapshot.market.rules,
         snapshot.market.specifier,
@@ -44,15 +51,18 @@ def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
 
 def _market_identity_where(alias: str | None = None) -> str:
     """Builds a WHERE fragment matching every part of MarketIdentity --
-    type, period, line, rules, specifier. Two markets that only differ in
-    rules/specifier are not the same market (see models.market), so
-    filtering on type/period/line alone (the old behavior) could silently
-    mix snapshots from different markets together.
+    type, period, phase, line, rules, specifier. Two markets that only
+    differ in phase (a pre-match price vs. a live price for the same
+    event) or rules/specifier are not the same market (see
+    models.market), so filtering on type/period/line alone (the old
+    behavior) could silently mix snapshots from different markets
+    together.
     """
     prefix = f"{alias}." if alias else ""
     return (
         f"{prefix}market_type = ? "
         f"AND {prefix}market_period = ? "
+        f"AND {prefix}market_phase = ? "
         f"AND COALESCE({prefix}market_line, '') = COALESCE(?, '') "
         f"AND COALESCE({prefix}market_rules, '') = COALESCE(?, '') "
         f"AND COALESCE({prefix}market_specifier, '') = COALESCE(?, '')"
@@ -63,6 +73,7 @@ def _market_identity_params(market: MarketIdentity) -> tuple:
     return (
         market.market_type.value,
         market.period.value,
+        market.phase.value,
         str(market.line) if market.line is not None else None,
         market.rules,
         market.specifier,
@@ -219,6 +230,7 @@ class OddsRepository:
             market=MarketIdentity(
                 market_type=MarketType(row["market_type"]),
                 period=MarketPeriod(row["market_period"]),
+                phase=MarketPhase(row["market_phase"]),
                 line=(
                     Decimal(row["market_line"])
                     if row["market_line"] is not None

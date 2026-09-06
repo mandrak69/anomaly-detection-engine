@@ -14,7 +14,12 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
     SurebetCandidate,
     ValueGapCandidate,
 )
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,11 +209,11 @@ class SignalRepository:
             """
             INSERT INTO signals (
                 id, signal_type, event_id, market_type, market_period,
-                market_line, market_rules, market_specifier, outcome,
-                status, edge_percent, details,
+                market_phase, market_line, market_rules, market_specifier,
+                outcome, status, edge_percent, details,
                 first_seen_at, last_seen_at, resolved_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 signal_id,
@@ -216,6 +221,7 @@ class SignalRepository:
                 candidate.event_id,
                 candidate.market.market_type.value,
                 candidate.market.period.value,
+                candidate.market.phase.value,
                 _line_str(candidate.market),
                 candidate.market.rules,
                 candidate.market.specifier,
@@ -294,6 +300,7 @@ class SignalRepository:
             market=MarketIdentity(
                 market_type=MarketType(row["market_type"]),
                 period=MarketPeriod(row["market_period"]),
+                phase=MarketPhase(row["market_phase"]),
                 line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
                 rules=row["market_rules"],
                 specifier=row["market_specifier"],
@@ -319,6 +326,7 @@ def _market_where(alias: str | None = None) -> str:
     return (
         f"{prefix}market_type = ? "
         f"AND {prefix}market_period = ? "
+        f"AND {prefix}market_phase = ? "
         f"AND COALESCE({prefix}market_line, '') = COALESCE(?, '') "
         f"AND COALESCE({prefix}market_rules, '') = COALESCE(?, '') "
         f"AND COALESCE({prefix}market_specifier, '') = COALESCE(?, '')"
@@ -329,6 +337,7 @@ def _market_params(market: MarketIdentity) -> tuple:
     return (
         market.market_type.value,
         market.period.value,
+        market.phase.value,
         _line_str(market),
         market.rules,
         market.specifier,
@@ -341,6 +350,7 @@ def _identity_from_row(row: Row) -> SignalIdentity:
         market=MarketIdentity(
             market_type=MarketType(row["market_type"]),
             period=MarketPeriod(row["market_period"]),
+            phase=MarketPhase(row["market_phase"]),
             line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
             rules=row["market_rules"],
             specifier=row["market_specifier"],

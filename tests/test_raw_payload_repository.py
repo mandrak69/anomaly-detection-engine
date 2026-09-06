@@ -3,7 +3,12 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal
 
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.raw_payload_repository import (
@@ -11,7 +16,9 @@ from anomaly_detection_engine.storage.raw_payload_repository import (
     serialize_raw_event_odds,
 )
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 
 
 def build_raw_event() -> RawEventOdds:

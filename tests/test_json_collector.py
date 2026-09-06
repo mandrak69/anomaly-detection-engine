@@ -33,3 +33,17 @@ def test_json_collector_reads_sample_data():
     assert isinstance(first.observed_at, datetime)
     assert first.start_time.tzinfo is not None
     assert first.observed_at.tzinfo is not None
+
+
+def test_two_demo_polls_share_one_provider_id():
+    # The two sample-data polls each get a distinct source (the filename
+    # differs), but both are the same "json-demo" provider -- so
+    # FixtureCatalog resolves the second poll's team/competition names
+    # against the mapping cache the first poll already built, instead of
+    # each poll re-resolving from scratch.
+    first_poll = JsonOddsCollector(Path("data/samples/odds_sample.json"))
+    second_poll = JsonOddsCollector(Path("data/samples/odds_sample_poll2.json"))
+
+    assert first_poll.provider_id == "json-demo"
+    assert second_poll.provider_id == "json-demo"
+    assert first_poll.source != second_poll.source

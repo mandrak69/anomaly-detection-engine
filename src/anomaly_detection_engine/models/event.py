@@ -13,6 +13,7 @@ class Event:
     id: str
     sport: str
     league: str
+    competition_id: str
     home_team: Team
     away_team: Team
     start_time: datetime

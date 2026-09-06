@@ -2,12 +2,18 @@ from datetime import datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.analysis.best_odds import find_best_odds
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY,
     period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
 )
 
 

@@ -13,7 +13,12 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
     ValueGapCandidate,
 )
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.signal_repository import (
     ACTIVE,
@@ -23,13 +28,18 @@ from anomaly_detection_engine.storage.signal_repository import (
     from_value_gap,
 )
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
-OTHER_MARKET = MarketIdentity(market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
+OTHER_MARKET = MarketIdentity(
+    market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 T0 = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 EVENT = Event(
     id="e1",
     sport="football",
     league="L",
+    competition_id="competition-1",
     home_team=Team("h", "A"),
     away_team=Team("a", "B"),
     start_time=T0,

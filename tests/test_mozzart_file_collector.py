@@ -7,6 +7,7 @@ from anomaly_detection_engine.collectors.mozzart_file_collector import (
     MozzartFileCollector,
     MozzartResponseError,
 )
+from anomaly_detection_engine.models.market import MarketPhase
 
 
 def odds_group(name: str, outcomes: dict[str, tuple[str, str, str]]) -> dict:
@@ -78,6 +79,9 @@ def test_maps_a_clean_match_into_raw_event_odds(tmp_path):
     assert raw.odds == {"1": Decimal("2.10"), "X": Decimal("3.40"), "2": Decimal("3.20")}
     assert raw.start_time.tzinfo is not None
     assert raw.observed_at.tzinfo is not None
+    # mozzartbet.com's /live/matches is exactly that -- live, in-play
+    # odds -- never the pre-match phase (see models.market.MarketPhase).
+    assert raw.market.phase == MarketPhase.LIVE
 
 
 def test_returns_empty_when_no_capture_is_waiting(tmp_path):
@@ -203,3 +207,15 @@ def test_custom_filename(tmp_path):
 def test_source_identifies_the_capture_directory(tmp_path):
     collector = MozzartFileCollector(tmp_path)
     assert collector.source == f"mozzart-file:{tmp_path.name}"
+
+
+def test_provider_id_is_stable_across_capture_directories(tmp_path):
+    # Unlike source (which encodes the capture directory name), two
+    # MozzartFileCollector instances pointed at different directories
+    # are still the same real provider -- provider_id must not vary
+    # with tmp_path.
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+
+    assert MozzartFileCollector(tmp_path).provider_id == "mozzart"
+    assert MozzartFileCollector(other_dir).provider_id == "mozzart"

@@ -21,6 +21,7 @@ def build_matcher() -> EventMatcher:
         id="event-001",
         sport="football",
         league="demo-league",
+        competition_id="competition-1",
         home_team=Team("team-001", "Manchester United"),
         away_team=Team("team-002", "Liverpool"),
         start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),

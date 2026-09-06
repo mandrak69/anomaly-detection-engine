@@ -7,7 +7,12 @@ from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.collector_run import CollectorRunStatus
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
@@ -15,7 +20,9 @@ from anomaly_detection_engine.storage.database import configure_connection, init
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
-MARKET = MarketIdentity(market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME)
+MARKET = MarketIdentity(
+    market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
+)
 
 
 class StubCollector(OddsCollector):
@@ -25,6 +32,10 @@ class StubCollector(OddsCollector):
 
     @property
     def source(self) -> str:
+        return "stub"
+
+    @property
+    def provider_id(self) -> str:
         return "stub"
 
     def collect(self):
@@ -58,6 +69,7 @@ def build_matcher() -> EventMatcher:
         id="event-001",
         sport="football",
         league="demo-league",
+        competition_id="competition-1",
         home_team=Team("team-001", "Manchester United"),
         away_team=Team("team-002", "Liverpool"),
         start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),
@@ -252,6 +264,7 @@ def test_a_record_that_raises_during_matching_is_rejected_without_aborting_the_r
         id="event-001",
         sport="football",
         league="demo-league",
+        competition_id="competition-1",
         home_team=Team("team-001", "Manchester United"),
         away_team=Team("team-002", "Liverpool"),
         start_time=datetime.fromisoformat("2026-09-01T20:00:00+00:00"),

@@ -52,18 +52,24 @@ class ManualCaptureCollector(OddsCollector):
         *,
         parse: ParseFn,
         source_label: str,
+        provider_id: str,
         filename: str = "capture.json",
         history_dirname: str = "history",
     ) -> None:
         self.capture_dir = capture_dir
         self._parse = parse
         self._source_label = source_label
+        self._provider_id = provider_id
         self._filename = filename
         self._history_dir = capture_dir / history_dirname
 
     @property
     def source(self) -> str:
         return self._source_label
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider_id
 
     def collect(self) -> list[RawEventOdds]:
         drop_path = self.capture_dir / self._filename

@@ -3,7 +3,12 @@ import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from anomaly_detection_engine.models.market import MarketIdentity, MarketPeriod, MarketType
+from anomaly_detection_engine.models.market import (
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -11,6 +16,7 @@ from anomaly_detection_engine.storage.odds_repository import OddsRepository
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY,
     period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
 )
 
 
@@ -120,6 +126,7 @@ def test_snapshots_differing_only_in_market_specifier_are_not_deduped_together()
             market=MarketIdentity(
                 market_type=MarketType.HANDICAP,
                 period=MarketPeriod.FULL_TIME,
+                phase=MarketPhase.PRE_MATCH,
                 specifier="home",
             ),
             outcome="1",
@@ -134,10 +141,55 @@ def test_snapshots_differing_only_in_market_specifier_are_not_deduped_together()
             market=MarketIdentity(
                 market_type=MarketType.HANDICAP,
                 period=MarketPeriod.FULL_TIME,
+                phase=MarketPhase.PRE_MATCH,
                 specifier="away",
             ),
             outcome="1",
             odds=Decimal("1.80"),
+            observed_at=observed_at,
+        )
+    )
+
+    rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
+    assert len(rows) == 2
+
+
+def test_snapshots_differing_only_in_market_phase_are_not_deduped_together():
+    # A pre-match price and a live price for the same event/market/
+    # outcome were never simultaneously valid -- see
+    # models.market.MarketPhase -- so they must not collapse into one row
+    # just because type/period/line/rules/specifier all match.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+
+    observed_at = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MarketIdentity(
+                market_type=MarketType.THREE_WAY,
+                period=MarketPeriod.FULL_TIME,
+                phase=MarketPhase.PRE_MATCH,
+            ),
+            outcome="1",
+            odds=Decimal("2.15"),
+            observed_at=observed_at,
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MarketIdentity(
+                market_type=MarketType.THREE_WAY,
+                period=MarketPeriod.FULL_TIME,
+                phase=MarketPhase.LIVE,
+            ),
+            outcome="1",
+            odds=Decimal("1.90"),
             observed_at=observed_at,
         )
     )
@@ -481,3 +533,49 @@ def test_finds_latest_for_market_when_an_older_snapshot_is_inserted_after_a_newe
 
     assert len(result) == 1
     assert result[0].odds == Decimal("2.20")
+
+
+def test_find_latest_for_market_does_not_mix_pre_match_and_live_snapshots():
+    # A pre-match price and a live price for the same event/bookmaker/
+    # outcome were never simultaneously valid -- querying for one phase
+    # must never return a snapshot from the other.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+    pre_match_market = MARKET
+    live_market = MarketIdentity(
+        market_type=MarketType.THREE_WAY,
+        period=MarketPeriod.FULL_TIME,
+        phase=MarketPhase.LIVE,
+    )
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=pre_match_market,
+            outcome="1",
+            odds=Decimal("2.20"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=live_market,
+            outcome="1",
+            odds=Decimal("1.50"),
+            observed_at=datetime.fromisoformat("2026-08-27T09:00:00+00:00"),
+        )
+    )
+
+    pre_match_result = repository.find_latest_for_market(
+        event_id="event-001", market=pre_match_market
+    )
+    live_result = repository.find_latest_for_market(event_id="event-001", market=live_market)
+
+    assert len(pre_match_result) == 1
+    assert pre_match_result[0].odds == Decimal("2.20")
+    assert len(live_result) == 1
+    assert live_result[0].odds == Decimal("1.50")

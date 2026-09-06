@@ -31,9 +31,28 @@ class FixtureCatalog:
 
     Implements the same match(...) -> EventMatchResult shape as
     EventMatcher, so OddsIngestionService can use either interchangeably
-    -- construct one FixtureCatalog per collector/source (the `source`
-    label is fixed at construction, matching how OddsIngestionService is
-    already constructed once per collector).
+    -- construct one FixtureCatalog per collector, but keyed by
+    provider_id (the underlying data *provider*, e.g. "the-odds-api"),
+    not the collector's own OddsCollector.source (e.g.
+    "the-odds-api-manual:soccer_epl", which encodes the *acquisition
+    method*/sport key too). Two collectors for the same real provider --
+    auto vs. manual capture, or two demo JSON polls -- must share one
+    provider_id so team/competition mappings resolved by one are
+    immediately reused by the other, instead of each acquisition method
+    silently building its own separate, redundant mapping cache for the
+    same underlying data source.
+
+    (The `source_team_mappings`/`source_competition_mappings` columns
+    are still named `source` at the SQL level -- an internal storage
+    detail kept as-is to avoid a schema migration for a rename with no
+    external consumer; every Python-facing name here is provider_id.)
+
+    Safe for multiple concurrent watch_capture.py-spawned processes to
+    share one database file: match() wraps its whole read-then-maybe-
+    create resolution (team, competition, event) in a single BEGIN
+    IMMEDIATE transaction, so a second process attempting the same
+    resolution blocks on SQLite's writer lock instead of racing through
+    the same "does this already exist" check and creating a duplicate.
 
     Trade-off: a raw name that fuzzy-matches below fuzzy_threshold, or
     whose top two candidates score within fuzzy_ambiguity_margin of each
@@ -48,7 +67,7 @@ class FixtureCatalog:
         self,
         connection: Connection,
         *,
-        source: str,
+        provider_id: str,
         aliases: dict[str, str] | None = None,
         league_aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 85.0,
@@ -56,7 +75,7 @@ class FixtureCatalog:
         start_time_tolerance: timedelta = timedelta(minutes=30),
     ) -> None:
         self._connection = connection
-        self._source = source
+        self._provider_id = provider_id
         self._aliases = aliases or {}
         self._league_aliases = league_aliases or {}
         self._fuzzy_threshold = fuzzy_threshold
@@ -80,17 +99,40 @@ class FixtureCatalog:
         if home_raw == away_raw:
             return EventMatchResult(None, 0.0, "home-equals-away")
 
-        home, home_confidence = self._resolve_team(raw_name=home_raw, sport=sport)
-        away, away_confidence = self._resolve_team(raw_name=away_raw, sport=sport)
-        canonical_league = self._resolve_competition(raw_league=league.strip(), sport=sport)
+        # BEGIN IMMEDIATE acquires SQLite's single writer lock up front,
+        # before any of the read-then-maybe-create resolution below --
+        # this project explicitly supports multiple concurrent
+        # watch_capture.py-spawned processes sharing one database file,
+        # and without this, two of them could both read "this team/
+        # competition/event doesn't exist yet" for the same raw name and
+        # both try to create it, racing on the same unique constraint
+        # (or, worse, silently creating two rows that should have been
+        # one). A second connection attempting the same thing blocks
+        # (up to its own busy_timeout) instead of racing; Python's
+        # sqlite3 module tracks the real autocommit state under the
+        # hood, so once this BEGIN has run it won't also try to open its
+        # own implicit transaction for the writes below.
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            home, home_confidence = self._resolve_team(raw_name=home_raw, sport=sport)
+            away, away_confidence = self._resolve_team(raw_name=away_raw, sport=sport)
+            canonical_league, competition_id = self._resolve_competition(
+                raw_league=league.strip(), sport=sport
+            )
 
-        event = self._resolve_event(
-            sport=sport,
-            league=canonical_league,
-            home=home,
-            away=away,
-            start_time=start_time,
-        )
+            event = self._resolve_event(
+                sport=sport,
+                league=canonical_league,
+                competition_id=competition_id,
+                home=home,
+                away=away,
+                start_time=start_time,
+            )
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
 
         return EventMatchResult(event, min(home_confidence, away_confidence), "resolved")
 
@@ -156,7 +198,7 @@ class FixtureCatalog:
             JOIN teams t ON t.id = m.team_id
             WHERE m.source = ? AND m.sport = ? AND m.source_team_name = ?
             """,
-            (self._source, sport, raw_name),
+            (self._provider_id, sport, raw_name),
         ).fetchone()
         return self._map_team_row(row) if row else None
 
@@ -167,9 +209,8 @@ class FixtureCatalog:
                 (source, sport, source_team_name, team_id)
             VALUES (?, ?, ?, ?)
             """,
-            (self._source, sport, raw_name, team_id),
+            (self._provider_id, sport, raw_name, team_id),
         )
-        self._connection.commit()
 
     def _teams_for_sport(self, sport: str) -> dict[str, Team]:
         rows = self._connection.execute(
@@ -183,7 +224,6 @@ class FixtureCatalog:
             "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
             (team.id, team.canonical_name, sport),
         )
-        self._connection.commit()
         logger.info(
             "fixture_catalog.team.created",
             extra={"team_id": team.id, "canonical_name": team.canonical_name, "sport": sport},
@@ -192,23 +232,22 @@ class FixtureCatalog:
 
     # -- competition resolution --------------------------------------------
 
-    def _resolve_competition(self, *, raw_league: str, sport: str) -> str:
+    def _resolve_competition(self, *, raw_league: str, sport: str) -> tuple[str, str]:
         """Resolves a raw league/competition string to its canonical
-        name, the same exact/alias/fuzzy pattern _resolve_team uses for
-        team names. Without this, "Premier League" (the-odds-api),
-        "England Premier League" (a different source), and "Engleska
-        Premier Liga" (Mozzart, in Serbian) would each resolve to their
-        own separate canonical event even for the exact same real match
-        -- league was made part of an event's identity specifically to
-        stop *different* competitions from being merged together, which
-        only works if same-competition spelling variants first collapse
-        to one canonical name.
+        name and stable id, the same exact/alias/fuzzy pattern
+        _resolve_team uses for team names. Without this, "Premier
+        League" (the-odds-api), "England Premier League" (a different
+        source), and "Engleska Premier Liga" (Mozzart, in Serbian) would
+        each resolve to their own separate canonical event even for the
+        exact same real match -- league was made part of an event's
+        identity specifically to stop *different* competitions from
+        being merged together, which only works if same-competition
+        spelling variants first collapse to one canonical name.
 
-        Returns the canonical name (a string), not a Competition
-        object -- Event.league stays a plain string, matching every
-        existing caller/test; the competitions/source_competition_mappings
-        tables exist purely as this resolution's persistent memory,
-        the same role source_team_mappings plays for teams.
+        Returns (canonical_name, competition_id). Event.league stays the
+        canonical display string, but _resolve_event keys an event's
+        identity on competition_id, not this string -- see that
+        method's docstring for why.
         """
         mapped = self._find_competition_mapping(raw_league, sport)
         if mapped is not None:
@@ -240,18 +279,18 @@ class FixtureCatalog:
             competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
 
         self._save_competition_mapping(raw_league, sport, competition_id)
-        return canonical_name
+        return canonical_name, competition_id
 
-    def _find_competition_mapping(self, raw_league: str, sport: str) -> str | None:
+    def _find_competition_mapping(self, raw_league: str, sport: str) -> tuple[str, str] | None:
         row = self._connection.execute(
             """
-            SELECT c.canonical_name FROM source_competition_mappings m
+            SELECT c.canonical_name, c.id FROM source_competition_mappings m
             JOIN competitions c ON c.id = m.competition_id
             WHERE m.source = ? AND m.sport = ? AND m.source_competition_name = ?
             """,
-            (self._source, sport, raw_league),
+            (self._provider_id, sport, raw_league),
         ).fetchone()
-        return row["canonical_name"] if row else None
+        return (row["canonical_name"], row["id"]) if row else None
 
     def _save_competition_mapping(self, raw_league: str, sport: str, competition_id: str) -> None:
         self._connection.execute(
@@ -260,9 +299,8 @@ class FixtureCatalog:
                 (source, sport, source_competition_name, competition_id)
             VALUES (?, ?, ?, ?)
             """,
-            (self._source, sport, raw_league, competition_id),
+            (self._provider_id, sport, raw_league, competition_id),
         )
-        self._connection.commit()
 
     def _competitions_for_sport(self, sport: str) -> dict[str, str]:
         rows = self._connection.execute(
@@ -276,7 +314,6 @@ class FixtureCatalog:
             "INSERT INTO competitions (id, canonical_name, sport) VALUES (?, ?, ?)",
             (competition_id, canonical_name, sport),
         )
-        self._connection.commit()
         logger.info(
             "fixture_catalog.competition.created",
             extra={
@@ -290,10 +327,20 @@ class FixtureCatalog:
     # -- event resolution --------------------------------------------------
 
     def _resolve_event(
-        self, *, sport: str, league: str, home: Team, away: Team, start_time: datetime
+        self,
+        *,
+        sport: str,
+        league: str,
+        competition_id: str,
+        home: Team,
+        away: Team,
+        start_time: datetime,
     ) -> Event:
         existing = self._find_event(
-            league=league, home_team_id=home.id, away_team_id=away.id, start_time=start_time
+            competition_id=competition_id,
+            home_team_id=home.id,
+            away_team_id=away.id,
+            start_time=start_time,
         )
         if existing is not None:
             return existing
@@ -302,25 +349,27 @@ class FixtureCatalog:
             id=f"event-{uuid4().hex[:10]}",
             sport=sport,
             league=league,
+            competition_id=competition_id,
             home_team=home,
             away_team=away,
             start_time=start_time,
         )
         self._connection.execute(
             """
-            INSERT INTO events (id, sport, league, home_team_id, away_team_id, start_time)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO events
+                (id, sport, league, competition_id, home_team_id, away_team_id, start_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.id,
                 event.sport,
                 event.league,
+                event.competition_id,
                 home.id,
                 away.id,
                 to_utc_iso(event.start_time),
             ),
         )
-        self._connection.commit()
         logger.info(
             "fixture_catalog.event.created",
             extra={"event_id": event.id, "display_name": event.display_name},
@@ -328,14 +377,18 @@ class FixtureCatalog:
         return event
 
     def _find_event(
-        self, *, league: str, home_team_id: str, away_team_id: str, start_time: datetime
+        self, *, competition_id: str, home_team_id: str, away_team_id: str, start_time: datetime
     ) -> Event | None:
-        # league is part of an event's identity, not just descriptive
-        # metadata: the same two teams can play each other in more than
-        # one competition (league + cup, or two age groups) within the
-        # start_time tolerance window, and those must not be merged into
-        # one canonical event just because the team IDs and kickoff time
-        # happen to line up.
+        # competition_id is part of an event's identity, not just
+        # descriptive metadata: the same two teams can play each other
+        # in more than one competition (league + cup, or two age groups)
+        # within the start_time tolerance window, and those must not be
+        # merged into one canonical event just because the team IDs and
+        # kickoff time happen to line up. Keyed on the competition's
+        # stable id rather than its canonical_name display string so
+        # that renaming a competition later (not currently exposed, but
+        # the id already supports it) can't silently detach existing
+        # events from future matches under the new name.
         # start_time is normalized to UTC the same way OddsSnapshot's
         # timestamps are (see storage.time_utils.to_utc_iso) -- without
         # this, two sources reporting the same real kickoff under
@@ -348,12 +401,12 @@ class FixtureCatalog:
         row = self._connection.execute(
             """
             SELECT * FROM events
-            WHERE league = ? AND home_team_id = ? AND away_team_id = ?
+            WHERE competition_id = ? AND home_team_id = ? AND away_team_id = ?
               AND start_time BETWEEN ? AND ?
             ORDER BY ABS(julianday(start_time) - julianday(?))
             LIMIT 1
             """,
-            (league, home_team_id, away_team_id, lower, upper, to_utc_iso(start_time)),
+            (competition_id, home_team_id, away_team_id, lower, upper, to_utc_iso(start_time)),
         ).fetchone()
         return self._map_event_row(row) if row else None
 
@@ -365,6 +418,7 @@ class FixtureCatalog:
             id=row["id"],
             sport=row["sport"],
             league=row["league"],
+            competition_id=row["competition_id"],
             home_team=self._get_team_by_id(row["home_team_id"]),
             away_team=self._get_team_by_id(row["away_team_id"]),
             start_time=datetime.fromisoformat(row["start_time"]),

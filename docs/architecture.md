@@ -127,8 +127,8 @@ FixtureCatalog     persistent (teams/events/competitions/
                    source_team_mappings/source_competition_mappings
                    tables) -- resolves a never-seen team, competition,
                    or event by creating a canonical row instead of
-                   rejecting it, and remembers every (source, sport,
-                   raw name) resolution permanently
+                   rejecting it, and remembers every (provider_id,
+                   sport, raw name) resolution permanently
 ```
 
 `FixtureCatalog` reuses `TeamNormalizer` (the same exact/alias/fuzzy
@@ -143,17 +143,37 @@ needs to be re-solved. `pipeline.py` uses `FixtureCatalog` for every
 source; `EventMatcher` remains available (and tested) for callers that
 genuinely want a fixed, non-growing candidate list.
 
+`FixtureCatalog` is constructed with a `provider_id` (the real-world
+data provider, e.g. `"the-odds-api"`), not the collector's own
+`OddsCollector.source` (a per-collector-instance label that also
+encodes acquisition method/sport key, e.g.
+`"the-odds-api-manual:soccer_epl"`) -- an auto and a manual collector
+for the same provider must share one mapping cache, which keying on
+`source` would silently defeat.
+
 Competition resolution (`_resolve_competition`) mirrors team resolution
 exactly, one level up: without it, league being part of an event's
 identity (below) would work against cross-source matching instead of
 for it -- the same real match reported under different league spellings
 by different sources would resolve to two canonical events that could
 never be compared, silently defeating the entire point of tracking
-league at all. `Event.league` stays a plain string (the canonical name),
-not a separate object -- `competitions`/`source_competition_mappings`
-exist purely as this resolution's persistent memory. A separate
-`league_aliases` constructor param (distinct from `aliases`, team-name
-only) seeds known league-name variants.
+league at all. `Event.league` stays a plain string (the canonical
+display name), but event *identity* is keyed on `Event.competition_id`
+(a stable FK into `competitions`), not on this string -- a future rename
+of a canonical competition can't silently detach existing events from
+later matches under the new spelling. `competitions`/
+`source_competition_mappings` otherwise exist purely as this
+resolution's persistent memory. A separate `league_aliases` constructor
+param (distinct from `aliases`, team-name only) seeds known league-name
+variants.
+
+`FixtureCatalog.match()` wraps its whole read-then-maybe-create
+resolution (team, competition, event) in one `BEGIN IMMEDIATE`
+transaction -- this project explicitly supports multiple concurrent
+`watch_capture.py`-spawned processes sharing one database file, and the
+straightforward SELECT-then-INSERT pattern has a real race window
+between them without it. A second connection attempting the same
+resolution blocks on SQLite's writer lock instead of racing it.
 
 `TeamNormalizer` also guards against a false-confidence fuzzy match: if
 the top two candidates score within `ambiguity_margin` (default 5
@@ -424,11 +444,12 @@ individual record's own outcome.
 
 Market comparison is based on semantic equivalence, not display names.
 
-Potential identity:
+Identity:
 
 ```text
 market_type
 period
+phase       (MarketPhase: PRE_MATCH or LIVE -- required, no default)
 line
 rules
 specifier
@@ -437,9 +458,10 @@ specifier
 Examples:
 
 ```text
-THREE_WAY + FULL_TIME
-TOTALS + FULL_TIME + 2.5
-HANDICAP + FULL_TIME + -1.5
+THREE_WAY + FULL_TIME + PRE_MATCH
+THREE_WAY + FULL_TIME + LIVE
+TOTALS + FULL_TIME + PRE_MATCH + 2.5
+HANDICAP + FULL_TIME + PRE_MATCH + -1.5
 ```
 
 Observations with different identities must not be compared -- enforced
@@ -447,7 +469,14 @@ end to end: `odds_snapshots`' dedupe index, `OddsRepository.find_latest`/
 `find_last_two`/`find_latest_for_market`, and the `signals`/`movements`
 identity keys all filter/group on the full tuple above, not just
 `market_type`/`period`/`line`. Two snapshots differing only in
-`rules`/`specifier` are a different market.
+`rules`/`specifier` are a different market -- and so are two differing
+only in `phase`: a pre-match price and a live, in-play price for the
+same event/market/outcome were never simultaneously valid, so comparing
+them is comparing two different moments in the match, not a genuine
+cross-bookmaker discrepancy. `phase` has no default -- every collector
+declares which phase it produces explicitly (`DEFAULT_MARKET` for
+pre-match sources; `MozzartFileCollector`'s `/live/matches` data uses
+`LIVE_MARKET` instead).
 
 ---
 
@@ -508,6 +537,18 @@ age-relevant a poll timestamp alone can't capture. A source with no such
 timestamp (the JSON demo, Mozzart) falls back to `observed_at`, the same
 behavior as before `quote_time` existed.
 
+`quote_time` is not only a Freshness concern: `detect_bookmaker_lag` and
+`detect_rapid_movement` also compare across snapshots, and both use
+`quote_time` for the same reason -- one poll gives every bookmaker in
+that response the same `observed_at`, hiding real per-bookmaker
+staleness/movement that only shows up in each one's own
+`source_timestamp`. `detect_rapid_movement` additionally treats a
+`quote_time` regression (a source's own clock running backward, despite
+correctly-ordered `observed_at` values) as a flagged data anomaly
+(`MovementResult(detected=False, clock_regression=True, ...)`), not
+something that raises -- a genuine `observed_at` ordering violation
+(the caller's own contract) still raises `ValueError`.
+
 `analysis_time` is created once per analysis execution and passed
 through as an explicit, required parameter
 (`detect_surebet_candidates`, `detect_value_gap_candidates`,
@@ -565,10 +606,11 @@ migrate(connection):
 database runs every migration, an up-to-date one runs none, and an older
 persistent file (e.g. `signals`/`movements` from before they had
 `market_rules`/`market_specifier`, or before `competitions`/
-`source_competition_mappings` existed) is upgraded in place without
-losing what it already had. Once shipped, a migration's SQL is
-immutable -- a database that recorded it as applied never runs it again,
-so a correction is a new migration, not an edit to an old one.
+`source_competition_mappings`/`market_phase`/`events.competition_id`
+existed) is upgraded in place without losing what it already had. Once
+shipped, a migration's SQL is immutable -- a database that recorded it
+as applied never runs it again, so a correction is a new migration, not
+an edit to an old one.
 
 This is not wrapped in a transaction with its `PRAGMA user_version`
 write, and deliberately so: verified directly that Python's sqlite3
@@ -589,9 +631,9 @@ Current tables:
 
 ```text
 odds_snapshots           unique-indexed on (event, bookmaker, full
-                          MarketIdentity, outcome, observed_at);
-                          re-saving an identical snapshot is a no-op
-                          rather than a duplicate row
+                          MarketIdentity including market_phase,
+                          outcome, observed_at); re-saving an identical
+                          snapshot is a no-op rather than a duplicate row
 collector_runs
 raw_payloads              every ingested RawEventOdds, accepted or
                           rejected, with its rejection reason, linked to
@@ -599,35 +641,44 @@ raw_payloads              every ingested RawEventOdds, accepted or
 teams                     canonical team registry, unique per
                           (canonical_name, sport)
 events                    canonical event registry: sport, league,
-                          home_team_id, away_team_id, start_time
-source_team_mappings      (source, sport, raw team name) -> team_id,
-                          the permanent memory behind FixtureCatalog's
-                          cross-source team matching
+                          competition_id, home_team_id, away_team_id,
+                          start_time. competition_id (FK into
+                          competitions) is an event's real identity key
+                          for competition -- league is kept as the
+                          canonical display string, but matching no
+                          longer depends on that string staying the
+                          same
+source_team_mappings      (provider_id, sport, raw team name) ->
+                          team_id, the permanent memory behind
+                          FixtureCatalog's cross-source team matching
+                          (column is still named `source` at the SQL
+                          level; see Matching Layer above for
+                          provider_id vs OddsCollector.source)
 competitions              canonical competition/league registry, unique
                           per (canonical_name, sport) -- same shape as
                           teams, one level up
-source_competition_mappings  (source, sport, raw league name) ->
+source_competition_mappings  (provider_id, sport, raw league name) ->
                           competition_id, the permanent memory behind
-                          FixtureCatalog's cross-source league matching;
-                          events.league stores the resolved canonical
-                          name (a plain string), not a foreign key
+                          FixtureCatalog's cross-source league matching
+                          (column also still named `source`)
 signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
                           RESOLVED, first_seen_at/last_seen_at/
                           resolved_at, unique-indexed on
-                          (signal_type, event, full MarketIdentity,
-                          outcome) so a detection is upserted
-                          (reconciled) rather than duplicated across
-                          poll cycles. reconcile() only resolves a
-                          signal whose own (event, market, outcome)
-                          identity is in evaluated_keys -- something
-                          this sweep couldn't evaluate (stale/missing
-                          data, or too few bookmakers for that specific
-                          outcome) must not be silently resolved just
-                          because it produced no candidate
+                          (signal_type, event, full MarketIdentity
+                          including market_phase, outcome) so a
+                          detection is upserted (reconciled) rather than
+                          duplicated across poll cycles. reconcile()
+                          only resolves a signal whose own (event,
+                          market, outcome) identity is in evaluated_keys
+                          -- something this sweep couldn't evaluate
+                          (stale/missing data, or too few bookmakers for
+                          that specific outcome) must not be silently
+                          resolved just because it produced no candidate
 movements                 append-only point-in-time transitions,
                           unique-indexed on the full transition
-                          (including full MarketIdentity) so a re-run
-                          detection sweep can't duplicate one
+                          (including full MarketIdentity with
+                          market_phase) so a re-run detection sweep
+                          can't duplicate one
 ```
 
 `OddsRepository.save_all()` persists every outcome of one raw ingested
@@ -650,13 +701,13 @@ and then resolving stale ones either lands entirely or not at all; there
 is no state where some signals reflect this sweep and others still
 reflect the previous one.
 
-Competitions/leagues and bookmakers are still plain strings (`league` on
-`events`, `bookmaker_name` on `odds_snapshots`) rather than their own
-normalized tables -- a smaller, separate step from the event/team catalog
-above. Future tables may include:
+Competitions/leagues now have their own canonical registry
+(`competitions`/`source_competition_mappings`, see Storage Strategy
+above) the same way teams do. Bookmakers are still a plain string
+(`bookmaker_name` on `odds_snapshots`), not a normalized table -- a
+future table may include:
 
 ```text
-competitions
 bookmakers
 ```
 
@@ -845,6 +896,43 @@ split into `config.py` (`AppConfig`/`load_config`), `runtime.py`
 (`Runtime`/`build_runtime`), and `pipeline.py` (collector construction,
 `run_ingestion`/`run_analysis`/`persist_detected_signals`), leaving
 `app.py` as just `main()`.
+
+**Resolved:** a fourth round, split between real correctness bugs and a
+scope-tightening pass ahead of adding more market types/sources.
+`MarketPhase` (PRE_MATCH/LIVE) is now a required field on
+`MarketIdentity` (migration 4) -- Mozzart's `/live/matches` data was
+being tagged with the same market identity as every pre-match source,
+even though the two were never simultaneously valid, see MarketIdentity
+above. The same poll-vs-source-timestamp gap Freshness was already fixed
+for in the third round turned out to still be open in
+`detect_bookmaker_lag` and `detect_rapid_movement`; both now compare
+`quote_time`, and a source clock regression is a flagged
+`clock_regression` result rather than a raised exception that would
+crash the whole sweep -- see Time Model above. The core pipeline was
+split from reporting: `run_analysis` (which mixed persistence with
+printing) is gone, replaced by `run_detection` (persist only) and
+`reporting.console.print_reports` (every human-facing report, not
+imported by the core pipeline, not called by `app.py` by default) --
+`min_surebet_profit_percent` came out of `AppConfig` accordingly, since
+it was never a detection threshold. `FixtureCatalog`'s `provider_id` was
+separated from `OddsCollector.source`, and `match()` now wraps its whole
+resolve-or-create cycle in one `BEGIN IMMEDIATE` transaction -- see
+Matching Layer above for both. `Event.competition_id` (a stable FK into
+`competitions`) was added, and event identity is now keyed on it instead
+of `league`'s display string, closing the gap where a future competition
+rename could have silently detached existing events from later matches
+-- see Matching Layer and Storage Strategy above.
+
+Deliberately deferred out of this round: canonicalizing `Decimal` line
+representation ahead of TOTALS/HANDICAP, an explicit event lifecycle
+(completed/expired, so `list_events()` doesn't re-evaluate long-finished
+matches forever), extracting `SignalType`/`SignalIdentity` into their
+own module (closing `storage.signal_repository`'s current inverted
+dependency on `analysis.opportunity_detection`) plus an `EventResolver`
+Protocol, and preserving the original source payload for live sources
+alongside the parsed `RawEventOdds`. None of these are correctness bugs;
+they are future-growth prep, deliberately left until there are enough
+real market types and sources to know what actually needs generalizing.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
