@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -37,6 +38,13 @@ class AppConfig:
     config every pipeline stage shares. min_value_gap_percent stays here
     because it *is* a detection-level threshold (part of what counts as
     an outlier, not a display filter on top).
+
+    signal_ttl is the lifecycle policy for SignalRepository.
+    expire_active_signals -- deliberately just a plain timedelta here,
+    not a sport/phase-specific table: the repository itself only ever
+    takes an already-computed cutoff datetime (see run_detection), so a
+    future per-sport or per-MarketPhase policy can replace how this one
+    field is computed without changing the repository's API at all.
     """
 
     db_path: str
@@ -47,6 +55,7 @@ class AppConfig:
     mozzart_capture_dir: str | None
     mozzart_mode: str
     min_value_gap_percent: Decimal
+    signal_ttl: timedelta
 
 
 def load_config() -> AppConfig:
@@ -68,4 +77,5 @@ def load_config() -> AppConfig:
         mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
+        signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
     )

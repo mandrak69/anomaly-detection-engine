@@ -247,3 +247,80 @@ def test_persist_detected_signals_creates_then_resolves_a_surebet():
     assert second_sweep["active_surebets"] == 0
     assert second_sweep["movements_recorded"] == 1
     assert signal_repository.find_active("SUREBET") == []
+
+
+def _save_surebet_snapshots(odds_repository, event_id, observed_at):
+    for outcome, odds in [("1", "2.50"), ("X", "4.00"), ("2", "4.00")]:
+        odds_repository.save(
+            OddsSnapshot(
+                event_id=event_id,
+                bookmaker=Bookmaker("bet1", "Bet1"),
+                market=DEFAULT_MARKET,
+                outcome=outcome,
+                odds=Decimal(odds),
+                observed_at=observed_at,
+            )
+        )
+
+
+def test_run_detection_expires_a_signal_once_its_event_stops_being_touched(monkeypatch):
+    # A signal for an event that fell out of touched_events (see
+    # run_ingestion) can never be resolved by reconcile() -- it's simply
+    # never evaluated again. run_detection's separate expire_active_signals
+    # step is what eventually clears it once the event's own lifecycle
+    # (start_time + signal_ttl) has run out.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    ancient_start = datetime.fromisoformat("2000-01-01T00:00:00+00:00")
+    match = FixtureCatalog(runtime.connection, provider_id="test").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=ancient_start,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=ancient_start)
+
+    # First cycle: the event is touched and the surebet is genuinely
+    # detected -- must not be expired in this same call (it was just
+    # reconfirmed ACTIVE), even though its start_time is long past.
+    first = pipeline.run_detection(runtime, [event], cfg)
+    assert first["active_surebets"] == 1
+    assert first["signals_expired"] == 0
+    assert len(runtime.signal_repository.find_active("SUREBET")) == 1
+
+    # Second cycle: nothing reports on this event anymore (empty events,
+    # simulating run_ingestion's touched_events no longer including it).
+    # reconcile() can't resolve it (never evaluated), but enough real
+    # time has passed since the first call's last_seen_at that expiry now
+    # applies.
+    second = pipeline.run_detection(runtime, [], cfg)
+    assert second["signals_expired"] == 1
+    assert runtime.signal_repository.find_active("SUREBET") == []
+
+
+def test_run_detection_does_not_expire_a_signal_still_being_touched(monkeypatch):
+    # Same ancient start_time as above, but the event keeps being
+    # reported every cycle -- it must stay ACTIVE indefinitely, since a
+    # provider can legitimately keep quoting an event long after its
+    # nominal start_time (delayed kickoff, postponed match, bad
+    # scheduling data, ...).
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    ancient_start = datetime.fromisoformat("2000-01-01T00:00:00+00:00")
+    match = FixtureCatalog(runtime.connection, provider_id="test").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=ancient_start,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=ancient_start)
+
+    pipeline.run_detection(runtime, [event], cfg)
+    second = pipeline.run_detection(runtime, [event], cfg)
+
+    assert second["signals_expired"] == 0
+    assert len(runtime.signal_repository.find_active("SUREBET")) == 1

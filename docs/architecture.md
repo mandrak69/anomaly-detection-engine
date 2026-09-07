@@ -702,7 +702,7 @@ source_competition_mappings  (provider_id, sport, raw league name) ->
                           FixtureCatalog's cross-source league matching
                           (column also still named `source`)
 signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
-                          RESOLVED, first_seen_at/last_seen_at/
+                          RESOLVED/EXPIRED, first_seen_at/last_seen_at/
                           resolved_at, unique-indexed on
                           (signal_type, event, full MarketIdentity
                           including market_phase, outcome) so a
@@ -713,7 +713,13 @@ signals                   stateful (SUREBET/VALUE_GAP): status ACTIVE/
                           -- something this sweep couldn't evaluate
                           (stale/missing data, or too few bookmakers for
                           that specific outcome) must not be silently
-                          resolved just because it produced no candidate
+                          resolved just because it produced no candidate.
+                          EXPIRED is a separate lifecycle state
+                          (SignalRepository.expire_active_signals, see
+                          Next Architectural Step below) for a signal
+                          whose event fell out of touched_events scope
+                          entirely -- reconcile() can never resolve
+                          that, since it is simply never evaluated again
 movements                 append-only point-in-time transitions,
                           unique-indexed on the full transition
                           (including full MarketIdentity with
@@ -1004,6 +1010,32 @@ exact response a run's records were parsed from survives once per run,
 alongside the already-persisted per-record `RawEventOdds` in
 `raw_payloads` -- a parser bug can now be fixed and the original
 historical response reprocessed.
+
+**Resolved:** a sixth round, an external review of round five's own
+work turning up one real correctness bug and one real gap it opened.
+`detect_surebet_candidates` added an event to `evaluated_keys` *before*
+checking whether all three outcomes were actually priced this sweep --
+the same "couldn't tell this sweep" vs "confirmed gone" distinction
+`evaluated_keys` exists to protect (see Storage Strategy above), except
+this time SUREBET's own missing-outcome case was the gap, not
+missing/stale data. Fixed by moving `evaluated_keys.add(...)` after the
+`len(best) != 3` check, mirroring the ordering VALUE_GAP's per-outcome
+scoping already had. Separately, round five's `touched_events` scoping
+fixed "re-evaluated and permanently stale forever" but opened a
+narrower gap: an event that stops being touched can never be resolved
+by `reconcile()` either, since it is simply never evaluated again, so
+its ACTIVE signal would stay ACTIVE forever with no mechanism to say
+otherwise -- "not evaluated" was never the same claim as "confirmed
+gone." `SignalRepository.expire_active_signals`, a new `EXPIRED` status
+distinct from `RESOLVED` (see Storage Strategy above), and
+`AppConfig.signal_ttl` close that gap: a separate lifecycle step, not
+folded into `reconcile()`, keyed on `event.start_time` (not the last
+quote time -- that would make the same event's effective lifecycle
+depend on how long a particular provider happened to keep reporting it,
+rather than a stable domain fact) plus the configured TTL, and guarded
+against expiring a signal reconfirmed the very same detection cycle it
+runs in (`last_seen_at < expired_at`, with both calls in
+`run_detection` sharing one `now`).
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)

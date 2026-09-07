@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from anomaly_detection_engine.config import AppConfig
@@ -44,6 +44,7 @@ def build_config() -> AppConfig:
         mozzart_capture_dir=None,
         mozzart_mode="manual",
         min_value_gap_percent=Decimal("15.0"),
+        signal_ttl=timedelta(hours=3),
     )
 
 

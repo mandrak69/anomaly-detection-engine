@@ -1131,16 +1131,16 @@ with separate repository shapes rather than one generic "detections"
 table:
 
 ```text
-signals table      status ACTIVE/RESOLVED, first_seen_at, last_seen_at,
-                    resolved_at. SignalRepository.reconcile(signal_type,
-                    candidates, observed_at=..., evaluated_keys=...)
-                    upserts every currently-detected candidate of that
-                    type (new -> insert ACTIVE; still there -> update
-                    last_seen_at/edge/details; previously RESOLVED ->
-                    reactivate, keeping the original first_seen_at) and
-                    marks an ACTIVE signal as RESOLVED *only if* its own
-                    (event, market, outcome) identity is in
-                    evaluated_keys and it wasn't seen this sweep.
+signals table      status ACTIVE/RESOLVED/EXPIRED, first_seen_at,
+                    last_seen_at, resolved_at. SignalRepository.
+                    reconcile(signal_type, candidates, observed_at=...,
+                    evaluated_keys=...) upserts every currently-detected
+                    candidate of that type (new -> insert ACTIVE; still
+                    there -> update last_seen_at/edge/details; previously
+                    RESOLVED -> reactivate, keeping the original
+                    first_seen_at) and marks an ACTIVE signal as RESOLVED
+                    *only if* its own (event, market, outcome) identity
+                    is in evaluated_keys and it wasn't seen this sweep.
                     Identity excludes which bookmaker/odds are currently
                     involved -- those are updated in place, not part of
                     what makes two detections "the same" opportunity.
@@ -1178,10 +1178,54 @@ distinct problems this closes:
   stays untouched. Getting this wrong (resolving at event granularity)
   would have silently resolved `"X"`'s signal just because the *event*
   looked fine, even though `"X"` itself was never actually checked.
+- **Missing-outcome granularity for SUREBET.** `detect_surebet_candidates`
+  used to add an event to `evaluated_keys` before checking whether all
+  three outcomes were actually priced this sweep -- so an event genuinely
+  missing one leg (no bookmaker currently quoting `"X"`, say) still
+  counted as "evaluated", and a previously-ACTIVE surebet missing that
+  leg would be incorrectly resolved even though nothing confirmed the
+  arbitrage was actually gone. `evaluated_keys.add(...)` now runs *after*
+  the `len(best) != 3` check, the same ordering VALUE_GAP's per-outcome
+  scoping above already got right.
 
 Either way, "couldn't tell this sweep" is not the same claim as
 "confirmed gone", and conflating them would be actively dangerous ahead
 of any real alerting on top of this table.
+
+A third, distinct case reconcile() cannot handle at all: an event that
+simply stops being touched by any collector (see `run_ingestion`'s
+`touched_events` scoping above) never reaches `detect_surebet_candidates`/
+`detect_value_gap_candidates` in the first place, so it can never appear
+in `evaluated_keys` -- an ACTIVE signal for it would stay ACTIVE forever,
+neither resolved (nothing evaluated it) nor expired. `SignalRepository.
+expire_active_signals(event_start_cutoff=..., expired_at=...)` is the
+separate, explicit lifecycle step for exactly this: it marks EXPIRED
+every ACTIVE signal whose event started before `event_start_cutoff`
+*and* was not reconfirmed ACTIVE this same cycle (`last_seen_at <
+expired_at` -- see below). `EXPIRED` is deliberately a different status
+from `RESOLVED`: RESOLVED means a sweep positively evaluated this signal
+and found the condition gone; EXPIRED means detection simply stopped
+being able to evaluate it and its lifecycle ran out, a weaker and more
+honest claim.
+
+`run_detection` (see Core Pipeline vs. Reporting above) calls
+`expire_active_signals` as a separate step right after
+`persist_detected_signals`, computing one `now` and threading it through
+both: `persist_detected_signals(..., observed_at=now)` and
+`expire_active_signals(event_start_cutoff=now - config.signal_ttl,
+expired_at=now)`. Sharing the exact same `now` matters -- a signal
+`reconcile()` just reconfirmed ACTIVE this cycle has `last_seen_at ==
+now`, which fails `expire_active_signals`'s own `last_seen_at <
+expired_at` check and protects it from being immediately re-expired by
+the very next call in the same run. Without that guard, a genuinely
+still-quoted event whose nominal `start_time` happens to be older than
+`signal_ttl` (a delayed kickoff, a postponed match, bad scheduling data)
+would be expired and reconfirmed back and forth every cycle.
+`SIGNAL_TTL_HOURS` (default `3`) sets `AppConfig.signal_ttl` -- a plain
+`timedelta`, not a sport/phase-specific table, deliberately: the
+repository itself only ever takes an already-computed cutoff datetime,
+so a future per-sport or per-`MarketPhase` policy can replace how this
+one value is computed without changing `SignalRepository`'s API.
 
 Detection itself lives in `analysis.opportunity_detection`
 (`detect_surebet_candidates`, `detect_value_gap_candidates`) and
@@ -1369,6 +1413,8 @@ rate limiting
 [x] run_ingestion() scoped to events actually touched this cycle (OddsIngestionService.touched_events) instead of FixtureCatalog.list_events() (every event ever created) -- a long-finished match stops being evaluated once nothing reports on it anymore, instead of being permanently re-checked and permanently "stale"
 [x] SignalType/SignalIdentity extracted into models/signal.py, closing storage.signal_repository's inverted dependency on analysis.opportunity_detection; EventResolver Protocol added (matching/event_matcher.py) so OddsIngestionService type-hints what it actually needs instead of a concrete EventMatcher it is normally not given
 [x] Collectors now return CollectionResult (source_payload plus the parsed records, not just the records) -- the exact source response is persisted once per CollectorRun (provider_id/parser_version/source_payload columns) alongside the already-persisted per-record RawEventOdds, so a parser bug can be fixed and historical data reprocessed
+[x] Fixed detect_surebet_candidates adding an event to evaluated_keys before checking all three outcomes were priced -- a surebet missing one leg this sweep could previously be incorrectly resolved instead of correctly staying "couldn't tell"
+[x] SignalRepository.expire_active_signals + EXPIRED status: an event that stops being touched (see touched_events) can never be resolved by reconcile() since it's never evaluated again -- this separate lifecycle step marks its ACTIVE signals EXPIRED once event.start_time + AppConfig.signal_ttl has passed, guarded so a signal reconfirmed this same cycle is never immediately re-expired
 ```
 
 ---
@@ -1635,6 +1681,29 @@ already-persisted per-record `RawEventOdds` in `raw_payloads` -- a parser
 bug can now be fixed and the original historical response reprocessed,
 where before only what the buggy parser produced at the time would have
 survived.
+
+**Done:** a sixth round, an external review of round five's own work
+turning up one real correctness bug and one real gap it opened.
+`detect_surebet_candidates` added an event to `evaluated_keys` *before*
+checking whether all three outcomes were actually priced this sweep --
+so an event genuinely missing one leg still counted as "evaluated", and
+a previously-ACTIVE surebet missing that leg could be incorrectly
+resolved even though nothing confirmed the arbitrage was gone.
+`evaluated_keys.add(...)` now runs after the `len(best) != 3` check, the
+same ordering VALUE_GAP's own per-outcome scoping already had right (see
+Storage Strategy above). Separately, round five's `touched_events`
+scoping closed the "re-evaluated and permanently stale forever" problem
+but opened a narrower one: an event that stops being touched can never
+be resolved by `reconcile()` either, since it is never evaluated again,
+so its ACTIVE signal would stay ACTIVE forever with no mechanism to say
+otherwise. `SignalRepository.expire_active_signals` plus a new `EXPIRED`
+status (deliberately distinct from `RESOLVED` -- see Storage Strategy
+above) is the fix: a separate lifecycle step, not folded into
+`reconcile()`, keyed on `event.start_time` (not the last quote time,
+which would make the same event's effective lifecycle depend on how
+long a particular provider happened to keep reporting it) plus
+`AppConfig.signal_ttl`, guarded against expiring a signal reconfirmed
+the very same cycle it runs in.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

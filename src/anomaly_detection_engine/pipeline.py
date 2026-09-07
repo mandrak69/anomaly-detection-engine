@@ -242,6 +242,7 @@ def persist_detected_signals(
     freshness_policy: FreshnessPolicy,
     analysis_time: datetime,
     min_value_gap_percent: Decimal = Decimal("15.0"),
+    observed_at: datetime | None = None,
 ) -> dict:
     """Runs one detection sweep and persists the result -- the "where and
     how to keep derived information" half of the pipeline, deliberately
@@ -264,8 +265,14 @@ def persist_detected_signals(
     new/still-active/resolved). Movements go through
     MovementRepository.save() (point-in-time, append-only) -- see those
     modules for why the two need different lifecycle handling.
+
+    observed_at defaults to real wall-clock time, but run_detection
+    passes its own explicitly -- it needs the exact same instant it later
+    passes to SignalRepository.expire_active_signals's expired_at, so a
+    signal reconciled ACTIVE this call has last_seen_at == expired_at and
+    is not immediately re-expired by that follow-up call.
     """
-    observed_at = datetime.now(UTC)
+    observed_at = observed_at if observed_at is not None else datetime.now(UTC)
 
     surebet_sweep = detect_surebet_candidates(
         events, odds_repository, market, freshness_policy=freshness_policy,
@@ -305,9 +312,11 @@ def persist_detected_signals(
 
 
 def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict:
-    """Detects and persists signals/movements for every ingested event --
+    """Detects and persists signals/movements for every ingested event,
+    then expires ACTIVE signals whose event's lifecycle has run out --
     the last step of the *core* pipeline: collect -> validate -> match ->
-    persist observations -> detect anomalies -> persist signals.
+    persist observations -> detect anomalies -> persist signals ->
+    expire stale signals.
 
     Deliberately imports nothing from reporting.* and prints nothing
     beyond a terse summary of what it did: a "worth telling a human"
@@ -315,12 +324,29 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     presentation decision, not a detection fact -- see
     reporting.console.print_reports for that, kept out of the core
     pipeline on purpose so the core never depends on it.
+
+    Expiry is a separate step from detection, not folded into the same
+    sweep: run_ingestion() already scopes `events` to what was actually
+    touched this cycle (see OddsIngestionService.touched_events), so a
+    long-finished match that nothing reports on anymore never reaches
+    persist_detected_signals at all, and its ACTIVE signals would
+    otherwise stay ACTIVE forever -- "not evaluated" is not the same
+    claim as "confirmed gone" (see SignalRepository.reconcile()), so
+    reconcile() alone can never resolve them. expire_active_signals is
+    the explicit, separate acknowledgment that a signal's event has
+    simply run out of runway, regardless of whether this cycle evaluated
+    it. now is computed once and threaded through both calls: a signal
+    reconcile() just reconfirmed ACTIVE has last_seen_at == now, which
+    excludes it from expire_active_signals's own cutoff check -- without
+    sharing the same instant, a signal genuinely re-confirmed this exact
+    cycle could be immediately re-expired by the very next line.
     """
     analysis_time = (
         datetime.now(UTC)
         if config.odds_source == "the-odds-api"
         else demo_analysis_time(events, runtime.odds_repository)
     )
+    now = datetime.now(UTC)
 
     summary = persist_detected_signals(
         events,
@@ -331,7 +357,15 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
         freshness_policy=DEMO_FRESHNESS_POLICY,
         analysis_time=analysis_time,
         min_value_gap_percent=config.min_value_gap_percent,
+        observed_at=now,
     )
+
+    expired_ids = runtime.signal_repository.expire_active_signals(
+        event_start_cutoff=now - config.signal_ttl,
+        expired_at=now,
+    )
+    summary["signals_expired"] = len(expired_ids)
+
     print(f"Detection: {summary}")
     print(f"Metrics: {runtime.metrics.snapshot()}")
 

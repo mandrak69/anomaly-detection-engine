@@ -20,11 +20,13 @@ from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIde
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.signal_repository import (
     ACTIVE,
+    EXPIRED,
     RESOLVED,
     SignalRepository,
     from_surebet,
     from_value_gap,
 )
+from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
@@ -345,3 +347,117 @@ def test_from_value_gap_maps_fields_into_a_signal_candidate():
     assert candidate.outcome == "2"
     assert candidate.edge_percent == Decimal("33.3")
     assert candidate.details == {"bookmaker": "BigPrice", "odds": "3.00"}
+
+
+def insert_event_row(connection, event_id: str, start_time: datetime) -> None:
+    # expire_active_signals() joins signals to events on event_id --
+    # unlike reconcile(), which never touches the events table (signals
+    # has no FK to it), so this helper is only needed for these tests.
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        (f"{event_id}-home", "A", "football"),
+    )
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        (f"{event_id}-away", "B", "football"),
+    )
+    connection.execute(
+        "INSERT INTO competitions (id, canonical_name, sport) VALUES (?, ?, ?)",
+        (f"{event_id}-comp", "L", "football"),
+    )
+    connection.execute(
+        """
+        INSERT INTO events
+            (id, sport, league, competition_id, home_team_id, away_team_id, start_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id, "football", "L", f"{event_id}-comp",
+            f"{event_id}-home", f"{event_id}-away", to_utc_iso(start_time),
+        ),
+    )
+    connection.commit()
+
+
+def test_expire_active_signals_expires_a_stale_signal_past_its_events_lifecycle():
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    later = T0 + timedelta(hours=4)
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=later,
+    )
+
+    assert len(expired_ids) == 1
+    assert repo.find_active(SUREBET) == []
+    row = repo._connection.execute("SELECT * FROM signals").fetchone()
+    assert row["status"] == EXPIRED
+    assert row["resolved_at"] == later.isoformat()
+
+
+def test_expire_active_signals_leaves_a_not_yet_started_event_untouched():
+    repo = make_repository()
+    # start_time is in the future relative to the cutoff below.
+    insert_event_row(repo._connection, "e1", start_time=T0 + timedelta(days=1))
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=T0 + timedelta(hours=4),
+    )
+
+    assert expired_ids == []
+    assert len(repo.find_active(SUREBET)) == 1
+
+
+def test_expire_active_signals_protects_a_signal_reconfirmed_this_same_cycle():
+    # The exact race this method's last_seen_at guard exists for: the
+    # event's lifecycle has long since passed (start_time well before
+    # the cutoff), but persist_detected_signals just reconciled this
+    # signal ACTIVE in the very same run_detection() call -- it must not
+    # be immediately re-expired by the follow-up call in that same run.
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0)
+    now = T0 + timedelta(days=2)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=now, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=now - timedelta(hours=3), expired_at=now,
+    )
+
+    assert expired_ids == []
+    assert len(repo.find_active(SUREBET)) == 1
+
+
+def test_expire_active_signals_does_not_touch_an_already_resolved_signal():
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0)
+    t1 = T0 + timedelta(minutes=5)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(SUREBET, [], observed_at=t1, evaluated_keys=SUREBET_EVALUATED)
+    assert repo._connection.execute(
+        "SELECT status FROM signals"
+    ).fetchone()["status"] == RESOLVED
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=T0 + timedelta(hours=4),
+    )
+
+    assert expired_ids == []
+    row = repo._connection.execute("SELECT * FROM signals").fetchone()
+    assert row["status"] == RESOLVED
+    assert row["resolved_at"] == t1.isoformat()

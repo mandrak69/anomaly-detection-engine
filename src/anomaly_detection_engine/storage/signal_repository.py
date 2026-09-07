@@ -18,11 +18,13 @@ from anomaly_detection_engine.models.market import (
     MarketType,
 )
 from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
+from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
 ACTIVE = "ACTIVE"
 RESOLVED = "RESOLVED"
+EXPIRED = "EXPIRED"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,11 @@ class SignalRecord:
     details: dict
     first_seen_at: datetime
     last_seen_at: datetime
+    # When status left ACTIVE -- set by both reconcile() (status=RESOLVED)
+    # and expire_active_signals() (status=EXPIRED). The column name
+    # reflects the first of the two states this repository ever had;
+    # check status, not just whether this is set, to tell which one
+    # actually happened.
     resolved_at: datetime | None
 
 
@@ -105,6 +112,17 @@ class SignalRepository:
     seen this sweep. An empty candidate list is not a no-op -- it
     correctly resolves everything evaluated and absent, as long as
     evaluated_keys says those identities were actually checked.
+
+    RESOLVED and EXPIRED are both terminal, non-ACTIVE states, but mean
+    different things: RESOLVED means a sweep positively evaluated this
+    exact (event, market, outcome) and found the condition gone (see
+    reconcile()). EXPIRED (see expire_active_signals) means detection
+    stopped being able to evaluate it at all -- the event fell out of
+    this project's "events touched this cycle" scope (see
+    OddsIngestionService.touched_events/pipeline.run_ingestion) and its
+    lifecycle has run out, not that anything about the signal itself was
+    disproven. Conflating the two would claim a certainty ("the surebet
+    closed") this system never actually confirmed.
     """
 
     def __init__(self, connection: Connection) -> None:
@@ -183,6 +201,60 @@ class SignalRepository:
                 (ACTIVE, signal_type),
             ).fetchall()
         return [self._map_row(row) for row in rows]
+
+    def expire_active_signals(
+        self, *, event_start_cutoff: datetime, expired_at: datetime
+    ) -> list[str]:
+        """Marks EXPIRED every ACTIVE signal whose event started before
+        event_start_cutoff -- a lifecycle boundary the *caller* computes
+        (see AppConfig.signal_ttl/pipeline.run_detection); this
+        repository has no opinion on what "too old" means, only how to
+        act once told, so a future per-sport or per-MarketPhase TTL
+        policy can change how that cutoff is computed without touching
+        this method's signature.
+
+        Also requires last_seen_at < expired_at: without this, a signal
+        reconcile() just reconfirmed as ACTIVE *this same* detection
+        cycle would be immediately re-expired by this call running right
+        after it, since event_start_cutoff alone only looks at how long
+        ago the event started, not whether it is still actively being
+        observed. Pass the exact same "now" to both calls in one
+        run_detection() invocation (see persist_detected_signals's
+        observed_at parameter) so a signal touched this cycle has
+        last_seen_at == expired_at and is correctly excluded here.
+
+        Deliberately separate from reconcile(): reconcile() reflects
+        what *this sweep* positively found; this is lifecycle
+        maintenance independent of any sweep's outcome, and runs even
+        for signal types/events that produced no candidates at all this
+        cycle (or weren't touched by it -- see class docstring).
+        """
+        with self._connection:
+            rows = self._connection.execute(
+                """
+                SELECT s.id FROM signals s
+                JOIN events e ON e.id = s.event_id
+                WHERE s.status = ?
+                  AND e.start_time < ?
+                  AND s.last_seen_at < ?
+                """,
+                (ACTIVE, to_utc_iso(event_start_cutoff), expired_at.isoformat()),
+            ).fetchall()
+            expired_ids = [row["id"] for row in rows]
+
+            for signal_id in expired_ids:
+                self._connection.execute(
+                    "UPDATE signals SET status = ?, resolved_at = ? WHERE id = ?",
+                    (EXPIRED, expired_at.isoformat(), signal_id),
+                )
+
+        if expired_ids:
+            logger.info(
+                "signal.expired",
+                extra={"count": len(expired_ids), "ids": expired_ids},
+            )
+
+        return expired_ids
 
     def _find(self, candidate: SignalCandidate) -> Row | None:
         return self._connection.execute(

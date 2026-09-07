@@ -56,13 +56,16 @@ class ValueGapCandidate:
 class SurebetDetectionSweep:
     """candidates plus which (event, market) combinations were actually
     evaluated this sweep -- distinguishing "evaluated, genuinely no
-    surebet" from "not evaluated at all" (missing/stale data) matters to
-    a caller like SignalRepository.reconcile(): resolving an ACTIVE
-    signal is only correct in the first case. An event skipped for
-    missing snapshots or failed freshness is absent from both candidates
-    *and* evaluated_keys, so it must not be resolved just because it
-    didn't produce a candidate this time. outcome is always None here --
-    see SignalIdentity.
+    surebet" from "not evaluated at all" (missing/stale data, or missing
+    one of the three outcomes) matters to a caller like
+    SignalRepository.reconcile(): resolving an ACTIVE signal is only
+    correct in the first case. An event skipped for missing snapshots,
+    failed freshness, or fewer than all three outcomes currently quoted
+    is absent from both candidates *and* evaluated_keys, so it must not
+    be resolved just because it didn't produce a candidate this time --
+    a previously-ACTIVE surebet whose third leg simply isn't being
+    quoted this poll is not the same as that arbitrage having closed.
+    outcome is always None here -- see SignalIdentity.
     """
 
     candidates: list[SurebetCandidate]
@@ -118,7 +121,8 @@ def detect_surebet_candidates(
 
     Returns both the candidates and which (event, market) combinations
     were actually evaluated (see SurebetDetectionSweep) -- an event with
-    no snapshots yet, or whose snapshots failed freshness, is absent from
+    no snapshots yet, whose snapshots failed freshness, or for which
+    fewer than all three outcomes are currently quoted is absent from
     evaluated_keys as well as candidates, so a caller reconciling
     persisted signals can tell "genuinely no surebet here" apart from
     "couldn't tell this sweep".
@@ -142,15 +146,22 @@ def detect_surebet_candidates(
         if not freshness.valid:
             continue
 
+        best = find_best_odds(snapshots, event_id=event.id, market=market)
+        if len(best) != 3:
+            # Missing an outcome entirely (e.g. no bookmaker currently
+            # quotes "X") is the same "couldn't tell" case freshness
+            # failing already is -- not "evaluated, no surebet". If a
+            # previously-ACTIVE surebet's third leg simply stopped being
+            # quoted this poll, that must not be resolvable: nothing here
+            # confirms the arbitrage is actually gone, only that this
+            # sweep can't see all three legs to check.
+            continue
+
         # From here on the event's data was good enough to draw a real
         # conclusion from -- "no candidate" past this point means "no
         # surebet", not "couldn't tell". outcome=None: SUREBET has no
         # per-outcome identity (see SignalIdentity).
         evaluated_keys.add(SignalIdentity(event_id=event.id, market=market, outcome=None))
-
-        best = find_best_odds(snapshots, event_id=event.id, market=market)
-        if len(best) != 3:
-            continue
 
         arbitrage = calculate_arbitrage(best)
         if not arbitrage.is_surebet:

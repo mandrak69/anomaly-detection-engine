@@ -185,6 +185,29 @@ def test_evaluated_keys_includes_a_fresh_event_with_no_surebet():
     assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", MARKET, None)})
 
 
+def test_evaluated_keys_excludes_an_event_missing_one_outcome():
+    # A previously-ACTIVE surebet whose third leg simply isn't being
+    # quoted by anyone this poll must not be resolvable -- missing an
+    # outcome entirely is a "couldn't tell this sweep" case, the same as
+    # missing snapshots or failed freshness, not "evaluated, no surebet".
+    # Regression test: evaluated_keys.add() used to run before the
+    # len(best) != 3 check, so this event would incorrectly count as
+    # evaluated even though only two of the three outcomes were priced.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "1", "1.50")
+    save(repository, "e1", "Bet1", "X", "3.50")
+    # No "2" outcome saved at all.
+
+    sweep = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert sweep.candidates == []
+    assert sweep.evaluated_keys == frozenset()
+
+
 def test_detect_value_gap_candidates_finds_favorable_outliers_only():
     repository = make_repository()
     event = make_event("e2", "C", "D")
