@@ -7,6 +7,7 @@ import pytest
 import anomaly_detection_engine.config as config
 import anomaly_detection_engine.pipeline as pipeline
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
+from anomaly_detection_engine.collectors.api_football_collector import ApiFootballCollector
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
@@ -28,6 +29,7 @@ def _clear_source_env(monkeypatch):
         "ODDS_API_CAPTURE_DIR",
         "MOZZART_MODE",
         "MOZZART_CAPTURE_DIR",
+        "API_FOOTBALL_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -140,6 +142,37 @@ def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
     collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 2
+
+
+def test_api_football_key_adds_a_supplemental_collector(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 3
+    assert isinstance(collectors[2], ApiFootballCollector)
+    assert collectors[2].provider_id == "api-football"
+
+
+def test_no_api_football_key_means_no_supplemental_collector(monkeypatch):
+    _clear_source_env(monkeypatch)
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert not any(isinstance(c, ApiFootballCollector) for c in collectors)
+
+
+def test_mozzart_and_api_football_can_both_be_active_at_once(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 4
+    assert isinstance(collectors[2], MozzartFileCollector)
+    assert isinstance(collectors[3], ApiFootballCollector)
 
 
 def test_run_ingestion_returns_only_events_touched_this_cycle(monkeypatch):

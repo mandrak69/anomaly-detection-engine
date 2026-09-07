@@ -56,6 +56,10 @@ class AppConfig:
     mozzart_mode: str
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
+    # None means "not configured" -- api-football.com is an opt-in
+    # supplemental source (see pipeline._supplemental_collectors), the
+    # same shape as mozzart_capture_dir above, not a required setting.
+    api_football_key: str | None
 
 
 def load_config() -> AppConfig:
@@ -78,4 +82,5 @@ def load_config() -> AppConfig:
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
         signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
+        api_football_key=os.environ.get("API_FOOTBALL_KEY"),
     )

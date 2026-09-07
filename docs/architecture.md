@@ -356,6 +356,8 @@ The collector may internally use any acquisition method:
 ```text
 JsonOddsCollector           local file, source-independent demo format
 TheOddsApiCollector          documented public API, HTTP GET
+ApiFootballCollector          documented public API, two HTTP GETs
+                              joined locally (see below)
 ManualCaptureCollector        generic: watches a fixed drop file, hands
                               its contents to an injected parse
                               function, archives it -- fetches nothing
@@ -365,6 +367,22 @@ ManualCaptureCollector        generic: watches a fixed drop file, hands
                                  function TheOddsApiCollector's HTTP
                                  path uses)
 ```
+
+`ApiFootballCollector` (api-football.com/api-sports.io) is a second
+real pre-match provider, added to prove cross-provider matching against
+real data rather than only this project's own fixtures. Its `/odds` and
+`/fixtures` endpoints are date-scoped (`?date=YYYY-MM-DD`), not
+sport/competition-scoped the way `TheOddsApiCollector`'s `sport_key` is,
+and `/odds` identifies each entry only by `fixture.id` -- team names
+live on the separate `/fixtures` response for the same date. So
+`collect()` makes two HTTP calls (both for the same date) and joins
+them locally by `fixture.id` (`parse_api_football_response`), unlike
+every other collector here, which parses one self-contained response. A
+fixture present in the odds response but missing from the fixtures
+response is skipped, not an error -- there is no home/away team name to
+build a `RawEventOdds` from. Odds come from the `"Match Winner"` bet
+(`"Home"`/`"Draw"`/`"Away"`, mapped onto `"1"`/`"X"`/`"2"`); auth is a
+request header (`x-apisports-key`), not a URL query param.
 
 `ManualCaptureCollector` separates *acquisition* (watch a drop file,
 archive after reading) from *parsing* (source-specific, injected as a
@@ -1074,6 +1092,16 @@ only analyzes `DEFAULT_MARKET` (pre-match), matching this project's
 stated MVP scope -- `LIVE_MARKET` detection later means a sweep
 parameterized by explicit `MarketIdentity` values, not swapping which
 single constant `run_detection` hardcodes.
+
+**Resolved:** an eighth round, shifting from architectural cleanup to
+proof -- a second real pre-match source, `ApiFootballCollector` (see
+Collector Contract above), wired in as an opt-in supplemental collector
+(`API_FOOTBALL_KEY`), the same shape Mozzart already uses. Against a
+genuinely different real provider (not another fixture), this exercised
+`provider_id`, team normalization, competition mapping, fixture
+matching, UTC normalization, raw payload retention, bookmaker identity,
+and freshness all at once, rather than any one of them in isolation.
+Verified against a real captured response before writing test fixtures.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)

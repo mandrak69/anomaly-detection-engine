@@ -115,6 +115,7 @@ anomaly-detection-engine/
 │       │   ├── opportunity_detection.py
 │       │   └── outlier_detector.py
 │       ├── collectors/
+│       │   ├── api_football_collector.py
 │       │   ├── base.py
 │       │   ├── json_collector.py
 │       │   ├── manual_capture_collector.py
@@ -377,6 +378,7 @@ Current implementations:
 JsonOddsCollector
 TheOddsApiCollector          + TheOddsApiManualCollector
 MozzartFileCollector
+ApiFootballCollector
 ManualCaptureCollector        generic drop-file + archive base the two
                               manual collectors above are built on
 ```
@@ -398,6 +400,45 @@ bookmaker changing, which would otherwise make ingestion treat it as a
 brand-new, unrelated bookmaker. Collectors with no such stable identifier
 (the JSON demo, Mozzart) leave `source_id` unset and keep the old
 derived-from-name behavior.
+
+`ApiFootballCollector` talks to https://www.api-football.com (api-sports.io)
+pre-match 1X2 odds -- a genuinely different real provider from
+the-odds-api.com, added specifically to prove cross-provider matching
+against real (not fixture) data: different team-name spellings, a
+different league-naming convention, a different bookmaker set. It is a
+supplemental collector (opt-in via `API_FOOTBALL_KEY`, the same shape
+Mozzart's `MOZZART_CAPTURE_DIR` already is -- see `_supplemental_collectors`),
+so it layers on top of whichever primary source is active rather than
+replacing it. Two real shape differences from every other collector
+here, both consequences of api-football.com's actual API, not a design
+choice made in this codebase:
+
+```text
+date-scoped, not competition-scoped   /odds and /fixtures both take a
+                                       ?date=YYYY-MM-DD, not a sport/
+                                       league key -- collect() defaults
+                                       to today's UTC date, recomputed
+                                       every poll
+two calls, joined locally             /odds identifies each entry only
+                                       by fixture.id; team names live on
+                                       the separate /fixtures response
+                                       for the same date. collect()
+                                       fetches both and joins them by
+                                       fixture.id (parse_api_football_
+                                       response) -- a fixture present in
+                                       one response but not the other is
+                                       skipped, not an error
+```
+
+Odds come from the `"Match Winner"` bet (values `"Home"`/`"Draw"`/`"Away"`,
+mapped onto `"1"`/`"X"`/`"2"`); a bookmaker's own stable `bookmakers[].id`
+becomes `RawEventOdds.source_id`, the same role the-odds-api's `"key"`
+plays. Auth is a request header (`x-apisports-key`), not a URL query
+param -- pass `api_key=` or set the `API_FOOTBALL_KEY` environment
+variable (never hardcode a real key in source or commit it). The free
+plan (100 requests/day, no credit card, register directly at
+`dashboard.api-football.com` -- not every RapidAPI-listed free tier
+skips the card) is enough to exercise this end to end.
 
 Which primary source `pipeline.build_collectors()` uses is chosen by
 `ODDS_SOURCE`, resolved once in `config.load_config()` and validated
@@ -496,16 +537,20 @@ ODDS_SOURCE=the-odds-api ODDS_API_MODE=manual ODDS_API_CAPTURE_DIR=./odds-api-ca
 
 # Mozzart as a supplemental source alongside whichever primary is active
 MOZZART_CAPTURE_DIR=./mozzart python -m anomaly_detection_engine.app
+
+# api-football.com as a supplemental source alongside whichever primary is active
+API_FOOTBALL_KEY=<key> python -m anomaly_detection_engine.app
 ```
 
-Mozzart (and `TheOddsApiManualCollector` in manual mode) run as
-**supplemental** sources alongside whichever primary source is active --
-collected in the same cycle and matched against the same `FixtureCatalog`
-(see Matching below) as everyone else, so their odds are compared against
-everyone else's (best odds, opportunity report, movement report all see
-them). Adding another manual-capture source later (MaxBet, Soccer, ...)
-is the same shape: its own `parse` function, wrapped in
-`ManualCaptureCollector`, its own mode env var, appended in `app.py`'s
+Mozzart, `ApiFootballCollector`, and `TheOddsApiManualCollector` (in
+manual mode) all run as **supplemental** sources alongside whichever
+primary source is active -- collected in the same cycle and matched
+against the same `FixtureCatalog` (see Matching below) as everyone else,
+so their odds are compared against everyone else's (best odds,
+opportunity report, movement report all see them). Adding another
+manual-capture source later (MaxBet, Soccer, ...) is the same shape as
+Mozzart: its own `parse` function, wrapped in `ManualCaptureCollector`,
+its own mode env var, appended in `pipeline.py`'s
 `_supplemental_collectors()` -- no other wiring changes.
 
 **What actually binds a drop directory to a bookmaker** is the env var
@@ -1439,6 +1484,7 @@ rate limiting
 [x] run_detection() no longer prints anything -- it returns its summary dict and app.py's main() does the printing, so the core stays usable by any caller that wants detection with no console output as a side effect
 [x] serialize_raw_event_odds's docstring corrected -- it claimed no collector retains the original source payload, no longer true since CollectionResult (see Data Collection above)
 [x] ACTIVE/RESOLVED/EXPIRED extracted into SignalStatus(StrEnum) in models/signal.py, the same treatment SignalType already got -- SignalRecord.status is now SignalStatus, not a bare str
+[x] Second real pre-match source: ApiFootballCollector (api-football.com) -- a genuinely different provider (different team-name spellings, league naming, bookmaker set), wired in as an opt-in supplemental collector (API_FOOTBALL_KEY), proving cross-provider matching against real data instead of only fixtures
 ```
 
 ---
@@ -1763,6 +1809,33 @@ Deliberately left alone: core detection still only analyzes
 -- adding `LIVE_MARKET` detection later means a sweep parameterized by
 explicit `MarketIdentity` values, not swapping which single constant
 `run_detection` hardcodes.
+
+**Done:** an eighth round, shifting from "what can we still improve
+architecturally" to "what will actually prove the system works" -- a
+second real pre-match source, `ApiFootballCollector`
+(api-football.com/api-sports.io), wired in as an opt-in supplemental
+collector (`API_FOOTBALL_KEY`) alongside whichever primary is active,
+the same shape Mozzart already uses. The point wasn't just "one more
+collector" -- it was proof, against a genuinely different real provider
+(not another fixture), that `provider_id`, team normalization,
+competition mapping, fixture matching, UTC normalization, raw payload
+retention, bookmaker identity, and freshness all actually hold up
+outside this project's own test fixtures. Two real shape differences
+from every existing collector surfaced immediately, both consequences
+of api-football.com's actual API rather than a design choice: its
+`/odds`/`/fixtures` endpoints are date-scoped (`?date=YYYY-MM-DD`), not
+competition-scoped the way the-odds-api.com's `sport_key` is, and the
+`/odds` response identifies each entry only by `fixture.id` -- team
+names live on the separate `/fixtures` response for the same date, so
+`collect()` makes two HTTP calls and joins them locally by `fixture.id`
+(`parse_api_football_response`), a genuinely different collector shape
+from every single-response parser this project had before. Odds come
+from the `"Match Winner"` bet (`"Home"`/`"Draw"`/`"Away"`, mapped onto
+`"1"`/`"X"`/`"2"`); auth is a request header (`x-apisports-key`), not a
+URL query param the way the-odds-api.com's is. Verified against a real
+captured response (13 real bookmakers -- 10Bet, Bet365, Pinnacle,
+Betfair, and others -- for a real Argentine league fixture) before
+writing the trimmed test fixtures.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

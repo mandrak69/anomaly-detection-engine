@@ -10,6 +10,7 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
+from anomaly_detection_engine.collectors.api_football_collector import ApiFootballCollector
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
@@ -102,23 +103,38 @@ def _mozzart_collector(config: AppConfig) -> OddsCollector | None:
     return MozzartFileCollector(Path(config.mozzart_capture_dir))
 
 
-def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
-    """Manual-capture collectors layered on top of whichever primary
-    source is active in build_collectors(), so they land in the same
-    ingestion cycle and get matched against the same FixtureCatalog as
-    everyone else instead of running in isolation. Each is opt-in via
-    its own *_CAPTURE_DIR env var, so a run with none configured behaves
-    exactly as before.
+def _api_football_collector(config: AppConfig) -> OddsCollector | None:
+    """Builds the api-football.com supplemental collector, if
+    API_FOOTBALL_KEY is set. Opt-in the same way Mozzart is -- absence of
+    the key means this source is simply not configured, not an error.
+    """
+    if not config.api_football_key:
+        return None
 
-    Adding another manual-capture source (MaxBet, Soccer, ...) later is
-    the same shape: its own _xxx_collector() helper reading its own
-    AppConfig fields, appended here -- no other wiring changes needed.
+    return ApiFootballCollector(api_key=config.api_football_key)
+
+
+def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
+    """Collectors layered on top of whichever primary source is active in
+    build_collectors(), so they land in the same ingestion cycle and get
+    matched against the same FixtureCatalog as everyone else instead of
+    running in isolation. Each is opt-in via its own env var (a capture
+    dir, an API key), so a run with none configured behaves exactly as
+    before.
+
+    Adding another source later is the same shape: its own
+    _xxx_collector() helper reading its own AppConfig fields, appended
+    here -- no other wiring changes needed.
     """
     collectors: list[OddsCollector] = []
 
     mozzart = _mozzart_collector(config)
     if mozzart is not None:
         collectors.append(mozzart)
+
+    api_football = _api_football_collector(config)
+    if api_football is not None:
+        collectors.append(api_football)
 
     return collectors
 
