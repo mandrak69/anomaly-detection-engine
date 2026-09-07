@@ -14,20 +14,24 @@ class MarketType(StrEnum):
 # surebet/arbitrage check makes sense (see analysis.opportunity_detection.
 # detect_surebet_candidates and analysis.arbitrage.calculate_arbitrage,
 # whose margin formula sums over exactly these outcomes) -- THREE_WAY
-# needs all of 1/X/2 priced, TOTALS needs both OVER/UNDER. Lives here,
-# not in analysis/, since it is a fact about what a market type *is*,
-# not a detection-specific policy; VALUE_GAP detection has no equivalent
-# need (it evaluates whichever outcomes are present, individually).
+# needs all of 1/X/2 priced, TOTALS needs both OVER/UNDER, HANDICAP (the
+# 3-way "Handicap Result" flavor this project detects, see
+# HANDICAP_MINUS_1_MARKET below -- not 2-way Asian Handicap, deliberately
+# not modeled yet) also needs all of 1/X/2. Lives here, not in analysis/,
+# since it is a fact about what a market type *is*, not a
+# detection-specific policy; VALUE_GAP detection has no equivalent need
+# (it evaluates whichever outcomes are present, individually).
 REQUIRED_OUTCOMES: dict[MarketType, tuple[str, ...]] = {
     MarketType.THREE_WAY: ("1", "X", "2"),
     MarketType.TOTALS: ("OVER", "UNDER"),
+    MarketType.HANDICAP: ("1", "X", "2"),
 }
 
 
 def required_outcomes(market_type: MarketType) -> tuple[str, ...]:
     """Looks up REQUIRED_OUTCOMES, raising ValueError (not KeyError, and
     not silently treating an unmapped type as "any outcomes will do")
-    for a market_type with no known outcome set yet -- e.g. HANDICAP,
+    for a market_type with no known outcome set yet -- e.g. MONEYLINE,
     not wired into detection yet even though the enum value already
     exists.
     """
@@ -145,4 +149,27 @@ TOTALS_2_5_MARKET = MarketIdentity(
     period=MarketPeriod.FULL_TIME,
     phase=MarketPhase.PRE_MATCH,
     line=Decimal("2.5"),
+)
+
+# The third market type this project detects, chosen deliberately as the
+# *3-way* "Handicap Result" flavor (Home/Draw/Away still all possible,
+# just with a fixed number of goals subtracted from the home side before
+# settlement) rather than 2-way Asian Handicap: Asian Handicap's own
+# real response shape (api-football.com's "Asian Handicap" bet) labels
+# each side's line independently ("Home -0.5" and "Away -0.5" both
+# appear, rather than a complementary "Home -0.5"/"Away +0.5" pair), and
+# getting that pairing semantically right needs more care than this
+# round's scope -- "Handicap Result" avoids the ambiguity entirely by
+# reusing THREE_WAY's exact 1/X/2 outcome shape (see REQUIRED_OUTCOMES
+# above), just at a specific handicap line. -1 (home team's goals
+# reduced by 1 for settlement) is a commonly-offered whole-goal line,
+# same "pick one concrete line" discipline TOTALS_2_5_MARKET already
+# follows -- api-football.com's "Handicap Result" bet bundles many lines
+# ("Home -1"/"Draw -1"/"Away -1", "Home -2"/..., "Home +1"/...) into one
+# response the same way "Goals Over/Under" does for totals.
+HANDICAP_MINUS_1_MARKET = MarketIdentity(
+    market_type=MarketType.HANDICAP,
+    period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
+    line=Decimal("-1"),
 )

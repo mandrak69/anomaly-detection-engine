@@ -213,7 +213,7 @@ Examples:
 THREE_WAY + FULL_TIME + PRE_MATCH
 THREE_WAY + FULL_TIME + LIVE
 TOTALS + FULL_TIME + PRE_MATCH + 2.5
-HANDICAP + FULL_TIME + PRE_MATCH + -1.5
+HANDICAP + FULL_TIME + PRE_MATCH + -1
 ```
 
 Only semantically equivalent markets may be compared -- enforced end to
@@ -233,13 +233,22 @@ value -- every collector must explicitly say which phase it produces
 `PRE_MATCH`; `MozzartFileCollector` reads mozzartbet.com's `/live/matches`
 endpoint, genuinely live data, and uses `LIVE_MARKET` instead).
 
-`TOTALS + FULL_TIME + PRE_MATCH + 2.5` above isn't just an illustrative
-example -- `models.market.TOTALS_2_5_MARKET` is a real constant
-`ApiFootballCollector` produces (alongside `DEFAULT_MARKET`, from the
-same real response's "Goals Over/Under" bet), the second market type
-this project actually detects. Adding it is what surfaced (and fixed)
-`detect_surebet_candidates` hardcoding `len(best) == 3` -- see Surebet
-Detection below for `required_outcomes`.
+`TOTALS + FULL_TIME + PRE_MATCH + 2.5` and `HANDICAP + FULL_TIME +
+PRE_MATCH + -1` above aren't just illustrative examples --
+`models.market.TOTALS_2_5_MARKET`/`HANDICAP_MINUS_1_MARKET` are real
+constants `ApiFootballCollector` produces (alongside `DEFAULT_MARKET`,
+from the same real response's `"Goals Over/Under"`/`"Handicap Result"`
+bets), the second and third market types this project actually detects.
+Adding TOTALS is what surfaced (and fixed) `detect_surebet_candidates`
+hardcoding `len(best) == 3` -- see Surebet Detection below for
+`required_outcomes`. `HANDICAP_MINUS_1_MARKET` is deliberately the
+*3-way* "Handicap Result" flavor (Home/Draw/Away still all possible,
+reusing THREE_WAY's exact outcome codes at `required_outcomes(HANDICAP)`
+-- see below), not 2-way Asian Handicap: api-football.com's own "Asian
+Handicap" bet labels each side's line independently (`"Home -0.5"` and
+`"Away -0.5"` both appear, rather than a complementary `"Home
+-0.5"`/`"Away +0.5"` pair), and getting that pairing semantically right
+is deliberately left for later rather than guessed at here.
 
 `line`/`rules`/`specifier` are canonicalized on construction
 (`__post_init__`), not by every caller remembering to: `line` goes
@@ -438,15 +447,19 @@ two calls, joined locally             /odds identifies each entry only
                                        skipped, not an error
 ```
 
-This collector produces two `MarketIdentity`s per bookmaker, each only
-if that bookmaker actually has a complete line: 1X2 from the `"Match
-Winner"` bet (`"Home"`/`"Draw"`/`"Away"` mapped onto `"1"`/`"X"`/`"2"`,
-`DEFAULT_MARKET`) and TOTALS 2.5 from the `"Goals Over/Under"` bet
-(`TOTALS_2_5_MARKET`) -- api-football.com bundles every line that bet
-covers (0.5, 1.5, 2.5, 3.5, ...) into one `values` list shaped `"Over
-2.5"`/`"Under 2.5"`, so only the `"... 2.5"` entries are extracted, not
-every line offered (see MarketIdentity above for why only 2.5, for now).
-A bookmaker's own stable `bookmakers[].id` becomes `RawEventOdds.
+This collector produces up to three `MarketIdentity`s per bookmaker,
+each only if that bookmaker actually has a complete line: 1X2 from the
+`"Match Winner"` bet (`"Home"`/`"Draw"`/`"Away"` mapped onto
+`"1"`/`"X"`/`"2"`, `DEFAULT_MARKET`), TOTALS 2.5 from the `"Goals
+Over/Under"` bet (`TOTALS_2_5_MARKET`), and HANDICAP -1 from the
+`"Handicap Result"` bet (`HANDICAP_MINUS_1_MARKET`, reusing the same
+`"Home"`/`"Draw"`/`"Away"` mapping) -- api-football.com bundles every
+line each of these last two bets covers (0.5, 1.5, 2.5, 3.5, ... for
+totals; -3, -2, -1, +1, +2, +3, ... for handicap) into one `values` list
+shaped `"Over 2.5"`/`"Under 2.5"` or `"Home -1"`/`"Draw -1"`/`"Away -1"`,
+so only the one specific line's entries are extracted from each, not
+every line offered (see MarketIdentity above for why only these two
+lines, for now). A bookmaker's own stable `bookmakers[].id` becomes `RawEventOdds.
 source_id`, the same role the-odds-api's `"key"` plays. Auth is a
 request header (`x-apisports-key`), not a URL query param -- pass
 `api_key=` or set the `API_FOOTBALL_KEY` environment variable (never
@@ -888,7 +901,8 @@ BEST       2.10   3.75   3.60
 
 The margin formula generalizes to however many outcomes a market's
 `required_outcomes` (`models.market.required_outcomes`) says it needs
-all priced -- three for THREE_WAY, two for TOTALS:
+all priced -- three for THREE_WAY and HANDICAP (the 3-way "Handicap
+Result" flavor this project detects), two for TOTALS:
 
 ```text
 margin = sum(1 / best_odds[outcome] for outcome in required_outcomes)
@@ -903,6 +917,10 @@ per-event breakdown); `detect_surebet_candidates` derives it from
 (not `len(best) == 3`) before treating an event as evaluated -- an event
 missing any one of a TOTALS market's two legs is exactly as much
 "couldn't tell this sweep" as a THREE_WAY market missing its draw price.
+HANDICAP reuses THREE_WAY's exact `("1", "X", "2")` outcome codes (same
+market shape, just at a fixed handicap line, e.g. `HANDICAP_MINUS_1_MARKET`)
+-- but the two are never compared or merged, since `market_type` is
+itself part of `MarketIdentity`'s equality.
 
 If:
 
@@ -1510,6 +1528,7 @@ rate limiting
 [x] ACTIVE/RESOLVED/EXPIRED extracted into SignalStatus(StrEnum) in models/signal.py, the same treatment SignalType already got -- SignalRecord.status is now SignalStatus, not a bare str
 [x] Second real pre-match source: ApiFootballCollector (api-football.com) -- a genuinely different provider (different team-name spellings, league naming, bookmaker set), wired in as an opt-in supplemental collector (API_FOOTBALL_KEY), proving cross-provider matching against real data instead of only fixtures
 [x] Second market type: TOTALS_2_5_MARKET (models/market.py), produced end-to-end by ApiFootballCollector from a real "Goals Over/Under" bet -- surfaced (and fixed) detect_surebet_candidates hardcoding len(best) == 3; required_outcomes(market_type) now drives both the "all outcomes present" check and calculate_arbitrage's margin formula
+[x] Third market type: HANDICAP_MINUS_1_MARKET (models/market.py), the 3-way "Handicap Result" flavor (reuses THREE_WAY's 1/X/2 outcome codes), produced end-to-end by ApiFootballCollector from a real "Handicap Result" bet -- 2-way Asian Handicap deliberately deferred (api-football.com's own shape needs real home/away line-pairing semantics this round didn't settle)
 ```
 
 ---
@@ -1892,6 +1911,29 @@ same boundary as `LIVE_MARKET` before it: proving the detection layer
 generalizes is a different question from deciding `run_detection` should
 sweep multiple markets, and that decision is left open rather than made
 implicitly by this round.
+
+**Done:** a tenth round, closing out the roadmap's "prove it" trio with
+a third market type -- HANDICAP -1 (`models.market.HANDICAP_MINUS_1_MARKET`),
+produced end-to-end by `ApiFootballCollector` from a real `"Handicap
+Result"` bet, the same bundled-many-lines-in-one-response shape as
+`"Goals Over/Under"` already had (just with the line embedded in the
+`value` string with an explicit sign, `"Home -1"`/`"Draw -1"`/`"Away
+-1"`, instead of `"Over 2.5"`/`"Under 2.5"`). Deliberately the *3-way*
+"Handicap Result" flavor, not 2-way Asian Handicap: api-football.com's
+own "Asian Handicap" bet labels each side's line independently (`"Home
+-0.5"` and `"Away -0.5"` both appear as separate rows, not a
+complementary `"Home -0.5"`/`"Away +0.5"` pair), and getting that
+pairing semantically right needs more care than this round's scope --
+"Handicap Result" sidesteps the ambiguity entirely by reusing THREE_WAY's
+exact `("1", "X", "2")` outcome shape at `required_outcomes(HANDICAP)`,
+so `calculate_arbitrage`/`find_best_odds`/`detect_outliers` needed zero
+further changes, the same "already generic enough" story TOTALS proved
+for `find_best_odds`/`detect_outliers` last round. `MarketIdentity`
+itself needed no changes either -- `market_type` alone already keeps a
+HANDICAP snapshot from ever being compared against a THREE_WAY one for
+the same event, even though they share identical outcome codes.
+2-way Asian Handicap support remains open for whenever the home/away
+line-pairing semantics are worth settling properly.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

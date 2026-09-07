@@ -28,6 +28,12 @@ TOTALS_MARKET = MarketIdentity(
     phase=MarketPhase.PRE_MATCH,
     line=Decimal("2.5"),
 )
+HANDICAP_MARKET = MarketIdentity(
+    market_type=MarketType.HANDICAP,
+    period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
+    line=Decimal("-1"),
+)
 NOW = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 FRESH = FreshnessPolicy(
     max_snapshot_age=timedelta(hours=1), max_observation_spread=timedelta(hours=1)
@@ -278,6 +284,52 @@ def test_totals_2_5_and_3_5_snapshots_are_never_compared_together():
     # Only the 2.5-line OVER belongs to this market -- the 3.5-line
     # UNDER must not be pulled in, so this stays "couldn't tell", not a
     # (bogus, cross-line) surebet.
+    assert sweep.candidates == []
+    assert sweep.evaluated_keys == frozenset()
+
+
+def test_detect_surebet_candidates_works_for_the_handicap_market():
+    # HANDICAP (the 3-way "Handicap Result" flavor -- see
+    # models.market.HANDICAP_MINUS_1_MARKET) reuses THREE_WAY's exact
+    # 1/X/2 outcome shape, just at a specific line -- proves
+    # required_outcomes generalizes by market_type, not just by outcome
+    # count (TOTALS has 2 outcomes, HANDICAP has 3 just like THREE_WAY,
+    # but is a genuinely different market and must never be compared
+    # against a THREE_WAY snapshot for the same event).
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "1", "3.00", market=HANDICAP_MARKET)
+    save(repository, "e1", "Bet1", "X", "4.00", market=HANDICAP_MARKET)
+    save(repository, "e1", "Bet2", "2", "4.00", market=HANDICAP_MARKET)
+
+    sweep = detect_surebet_candidates(
+        [event], repository, HANDICAP_MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert len(sweep.candidates) == 1
+    candidate = sweep.candidates[0]
+    assert candidate.market == HANDICAP_MARKET
+    assert {leg.outcome for leg in candidate.legs} == {"1", "X", "2"}
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", HANDICAP_MARKET, None)})
+
+
+def test_handicap_and_three_way_snapshots_are_never_compared_together():
+    # Same event, same outcome codes (1/X/2), different market_type --
+    # must never be pulled into the same sweep despite the identical
+    # outcome labels.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "1", "6.00", market=HANDICAP_MARKET)
+    save(repository, "e1", "Bet1", "X", "3.95", market=HANDICAP_MARKET)
+    # "2" only saved under THREE_WAY, not HANDICAP.
+    save(repository, "e1", "Bet1", "2", "1.05", market=MARKET)
+
+    sweep = detect_surebet_candidates(
+        [event], repository, HANDICAP_MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
     assert sweep.candidates == []
     assert sweep.evaluated_keys == frozenset()
 

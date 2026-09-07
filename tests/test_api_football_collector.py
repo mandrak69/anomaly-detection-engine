@@ -67,12 +67,29 @@ SAMPLE_ODDS_RESPONSE = {
                                 {"value": "Under 3.5", "odd": "1.17"},
                             ],
                         },
+                        {
+                            # Same bundling pattern, this time with an
+                            # explicit sign on the line itself -- only
+                            # "... -1" must be extracted (see
+                            # models.market.HANDICAP_MINUS_1_MARKET).
+                            "id": 9,
+                            "name": "Handicap Result",
+                            "values": [
+                                {"value": "Home -1", "odd": "6.00"},
+                                {"value": "Draw -1", "odd": "3.95"},
+                                {"value": "Away -1", "odd": "1.42"},
+                                {"value": "Home +1", "odd": "1.42"},
+                                {"value": "Draw +1", "odd": "4.00"},
+                                {"value": "Away +1", "odd": "6.00"},
+                            ],
+                        },
                     ],
                 },
                 {
                     # incomplete_book has no "Match Winner" bet at all,
-                    # and an incomplete 2.5 Over/Under line (no "Under") --
-                    # neither market should produce a record for it.
+                    # an incomplete 2.5 Over/Under line (no "Under"), and
+                    # no Handicap Result bet -- none of the three markets
+                    # should produce a record for it.
                     "id": 99,
                     "name": "IncompleteBook",
                     "bets": [
@@ -135,10 +152,11 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     collection = collector.collect()
     result = collection.records
 
-    # Bet365 -> one THREE_WAY + one TOTALS record; IncompleteBook has no
-    # Match Winner bet and an incomplete 2.5 Over/Under line, so it
-    # produces neither.
-    assert len(result) == 2
+    # Bet365 -> one THREE_WAY + one TOTALS + one HANDICAP record;
+    # IncompleteBook has no Match Winner bet, an incomplete 2.5
+    # Over/Under line, and no Handicap Result bet at all, so it produces
+    # none of the three.
+    assert len(result) == 3
 
     three_way = next(r for r in result if r.market.market_type == MarketType.THREE_WAY)
     assert three_way.source == "Bet365"
@@ -186,6 +204,27 @@ def test_incomplete_over_under_line_is_skipped():
 
     result = collector.collect().records
     assert all(r.source != "IncompleteBook" for r in result)
+
+
+def test_extracts_only_the_minus_1_line_from_the_bundled_handicap_result_bet():
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+
+    result = collector.collect().records
+
+    handicap = [r for r in result if r.market.market_type == MarketType.HANDICAP]
+    assert len(handicap) == 1
+    raw = handicap[0]
+    assert raw.source == "Bet365"
+    assert raw.market.line == Decimal("-1")
+    assert raw.odds == {
+        "1": Decimal("6.00"),
+        "X": Decimal("3.95"),
+        "2": Decimal("1.42"),
+    }
 
 
 def test_source_identifies_the_provider():
@@ -278,5 +317,5 @@ def test_parse_api_football_response_directly():
         json.dumps(SAMPLE_ODDS_RESPONSE),
         observed_at=datetime.fromisoformat("2026-09-07T12:30:00+00:00"),
     )
-    assert len(result) == 2
+    assert len(result) == 3
     assert all(r.home_team == "River Plate" for r in result)

@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
-from anomaly_detection_engine.models.market import DEFAULT_MARKET, TOTALS_2_5_MARKET
+from anomaly_detection_engine.models.market import (
+    DEFAULT_MARKET,
+    HANDICAP_MINUS_1_MARKET,
+    TOTALS_2_5_MARKET,
+)
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,8 @@ _MATCH_WINNER_BET_NAME = "Match Winner"
 _OUTCOME_CODES = {"Home": "1", "Draw": "X", "Away": "2"}
 _OVER_UNDER_BET_NAME = "Goals Over/Under"
 _TOTALS_2_5_LINE = "2.5"
+_HANDICAP_RESULT_BET_NAME = "Handicap Result"
+_HANDICAP_MINUS_1_LINE = "-1"
 
 
 class ApiFootballError(RuntimeError):
@@ -31,10 +37,11 @@ def parse_api_football_response(
     fixtures_raw: str | bytes, odds_raw: str | bytes, observed_at: datetime
 ) -> list[RawEventOdds]:
     """Maps one day's api-football.com /fixtures + /odds responses onto
-    RawEventOdds -- up to two records per bookmaker per fixture, one for
-    the "Match Winner" (1X2, DEFAULT_MARKET) bet and one for the "Goals
-    Over/Under" bet's 2.5 line (TOTALS_2_5_MARKET), each only produced
-    if that bookmaker actually has a complete line for it.
+    RawEventOdds -- up to three records per bookmaker per fixture: the
+    "Match Winner" (1X2, DEFAULT_MARKET) bet, the "Goals Over/Under"
+    bet's 2.5 line (TOTALS_2_5_MARKET), and the "Handicap Result" bet's
+    -1 line (HANDICAP_MINUS_1_MARKET) -- each only produced if that
+    bookmaker actually has a complete line for it.
 
     Two real differences from every other collector in this project,
     both consequences of api-football.com's actual response shape (not
@@ -106,6 +113,12 @@ def parse_api_football_response(
             totals_odds = _extract_totals_2_5_odds(bookmaker)
             if totals_odds is not None:
                 result.append(RawEventOdds(**common, market=TOTALS_2_5_MARKET, odds=totals_odds))
+
+            handicap_odds = _extract_handicap_minus_1_odds(bookmaker)
+            if handicap_odds is not None:
+                result.append(
+                    RawEventOdds(**common, market=HANDICAP_MINUS_1_MARKET, odds=handicap_odds)
+                )
 
     return result
 
@@ -201,10 +214,49 @@ def _extract_totals_2_5_odds(bookmaker: dict) -> dict[str, Decimal] | None:
     return odds
 
 
+def _extract_handicap_minus_1_odds(bookmaker: dict) -> dict[str, Decimal] | None:
+    """api-football.com's "Handicap Result" bet bundles many handicap
+    lines ("Home -1"/"Draw -1"/"Away -1", "Home -2"/..., "Home +1"/...)
+    into one values list -- this project only extracts the -1 line (see
+    models.market.HANDICAP_MINUS_1_MARKET), the 3-way flavor where
+    Home/Draw/Away are all still possible (unlike 2-way Asian Handicap,
+    deliberately not modeled here -- see that constant's own docstring).
+    Reuses _OUTCOME_CODES: "Home -1" maps the same way "Home" does for
+    Match Winner, just filtered to this one specific line first.
+    """
+    handicap_result = next(
+        (bet for bet in bookmaker.get("bets", []) if bet.get("name") == _HANDICAP_RESULT_BET_NAME),
+        None,
+    )
+    if handicap_result is None:
+        return None
+
+    odds: dict[str, Decimal] = {}
+    for value in handicap_result.get("values", []):
+        odd = value.get("odd")
+        raw_value = value.get("value")
+        if odd is None or not isinstance(raw_value, str):
+            continue
+
+        direction, _, line = raw_value.partition(" ")
+        if line != _HANDICAP_MINUS_1_LINE:
+            continue
+
+        code = _OUTCOME_CODES.get(direction)
+        if code is not None:
+            odds[code] = Decimal(odd)
+
+    if set(odds) != {"1", "X", "2"}:
+        return None
+
+    return odds
+
+
 class ApiFootballCollector(OddsCollector):
     """Collector for https://www.api-football.com (api-sports.io)
-    pre-match odds: 1X2 ("Match Winner") and the 2.5 line of Goals
-    Over/Under (see parse_api_football_response for both).
+    pre-match odds: 1X2 ("Match Winner"), the 2.5 line of Goals
+    Over/Under, and the -1 line of Handicap Result (see
+    parse_api_football_response for all three).
 
     Requires an API key: pass api_key= explicitly, or set the
     API_FOOTBALL_KEY environment variable. Never hardcode a real key in

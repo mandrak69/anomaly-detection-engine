@@ -80,8 +80,16 @@ def test_required_outcomes_totals():
     assert required_outcomes(MarketType.TOTALS) == ("OVER", "UNDER")
 
 
+def test_required_outcomes_handicap():
+    # The 3-way "Handicap Result" flavor this project detects (see
+    # HANDICAP_MINUS_1_MARKET) reuses THREE_WAY's exact outcome shape --
+    # Home/Draw/Away are all still possible, just with a fixed handicap
+    # applied before settlement.
+    assert required_outcomes(MarketType.HANDICAP) == ("1", "X", "2")
+
+
 def test_required_outcomes_raises_for_an_unmapped_market_type():
-    # HANDICAP's enum value exists but isn't wired into detection yet --
+    # MONEYLINE's enum value exists but isn't wired into detection yet --
     # must fail loudly, not silently accept "any outcomes will do".
-    with pytest.raises(ValueError, match="HANDICAP|handicap"):
-        required_outcomes(MarketType.HANDICAP)
+    with pytest.raises(ValueError, match="MONEYLINE|moneyline"):
+        required_outcomes(MarketType.MONEYLINE)

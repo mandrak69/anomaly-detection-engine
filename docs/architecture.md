@@ -501,7 +501,7 @@ Examples:
 THREE_WAY + FULL_TIME + PRE_MATCH
 THREE_WAY + FULL_TIME + LIVE
 TOTALS + FULL_TIME + PRE_MATCH + 2.5
-HANDICAP + FULL_TIME + PRE_MATCH + -1.5
+HANDICAP + FULL_TIME + PRE_MATCH + -1
 ```
 
 Observations with different identities must not be compared -- enforced
@@ -518,18 +518,24 @@ declares which phase it produces explicitly (`DEFAULT_MARKET` for
 pre-match sources; `MozzartFileCollector`'s `/live/matches` data uses
 `LIVE_MARKET` instead).
 
-`TOTALS + FULL_TIME + PRE_MATCH + 2.5` above is a real constant
-(`TOTALS_2_5_MARKET`), not just an example -- `ApiFootballCollector`
-produces it alongside `DEFAULT_MARKET`, the second market type this
-project actually detects. `models.market.required_outcomes(market_type)`
-is what a market type's outcome set actually *is* (`("1", "X", "2")` for
-THREE_WAY, `("OVER", "UNDER")` for TOTALS) -- `analysis.
-opportunity_detection.detect_surebet_candidates` uses it (checking
-`set(best) == set(required_outcomes)`, not a hardcoded outcome count)
-instead of assuming three outcomes, and feeds it to `analysis.
-arbitrage.calculate_arbitrage`'s own `required_outcomes` parameter,
-which already summed a generic margin over however many outcomes it was
-given.
+`TOTALS + FULL_TIME + PRE_MATCH + 2.5` and `HANDICAP + FULL_TIME +
+PRE_MATCH + -1` above are real constants (`TOTALS_2_5_MARKET`,
+`HANDICAP_MINUS_1_MARKET`), not just examples -- `ApiFootballCollector`
+produces both alongside `DEFAULT_MARKET`, the second and third market
+types this project actually detects. `models.market.
+required_outcomes(market_type)` is what a market type's outcome set
+actually *is* (`("1", "X", "2")` for THREE_WAY and HANDICAP -- the same
+codes, since `HANDICAP_MINUS_1_MARKET` is the *3-way* "Handicap Result"
+flavor, not 2-way Asian Handicap, deliberately deferred; `("OVER",
+"UNDER")` for TOTALS) -- `analysis.opportunity_detection.
+detect_surebet_candidates` uses it (checking `set(best) ==
+set(required_outcomes)`, not a hardcoded outcome count) instead of
+assuming three outcomes, and feeds it to `analysis.arbitrage.
+calculate_arbitrage`'s own `required_outcomes` parameter, which already
+summed a generic margin over however many outcomes it was given.
+HANDICAP and THREE_WAY sharing outcome codes is harmless -- `market_type`
+is itself part of `MarketIdentity`'s equality, so the two are never
+compared or merged despite the identical `"1"`/`"X"`/`"2"` labels.
 
 `line`/`rules`/`specifier` are canonicalized in `__post_init__`, not by
 every caller: `line` goes through `canonical_decimal()`
@@ -1132,6 +1138,21 @@ Deliberately not wired into `run_detection`'s core sweep (still
 before it: proving the detection layer generalizes is a different
 question from deciding `run_detection` should sweep multiple markets,
 left open rather than decided implicitly here.
+
+**Resolved:** a tenth round, closing out the roadmap's "prove it" trio
+with a third market type -- HANDICAP -1 (see MarketIdentity above),
+produced end-to-end by `ApiFootballCollector` from a real `"Handicap
+Result"` bet, the same bundled-many-lines-in-one-response shape
+`"Goals Over/Under"` already had. Deliberately the 3-way flavor, not
+2-way Asian Handicap (api-football.com's own "Asian Handicap" bet needs
+real home/away line-pairing semantics this round didn't settle) --
+"Handicap Result" sidesteps that by reusing THREE_WAY's exact outcome
+codes, so `calculate_arbitrage`/`find_best_odds`/`detect_outliers`
+needed zero further changes, the same "already generic enough" story
+TOTALS proved for the latter two last round. `MarketIdentity` itself
+needed no changes either -- `market_type` alone already keeps a
+HANDICAP snapshot from ever being compared against a THREE_WAY one for
+the same event, even though they share identical outcome codes.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
