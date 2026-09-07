@@ -1557,6 +1557,7 @@ rate limiting
 [x] poller.py: a continuous ingest+detect runner (run_forever, one process, configurable POLL_INTERVAL_SECONDS) alongside app.py's existing single-shot entrypoint -- the first actual odds-monitoring process, not just a poll cycle that exits; isolates a whole cycle's own failure (logs and keeps going) on top of OddsIngestionService's existing per-collector isolation, and handles SIGINT/SIGTERM for a clean stop between cycles
 [x] ApiFootballCollector.collect() now fetches and merges every page of a paginated response instead of only warning about page 1 -- replaces the previous round's warning-only handling, with a bounded page-count safety cap so a misbehaving response can't loop an unattended poller forever
 [x] scripts/inspect_data.py: data-sanity CLI (summary/events/event/cross-provider commands), deliberately not a report -- quick, direct answers to "is the dataset actually good" (counts per table, one event's full odds history, which events have been independently resolved by 2+ distinct providers) while running a real continuous ingest
+[x] config.load_dotenv(): optional .env file support (app.py/poller.py/inspect_data.py all call it before load_config()) so scaling to many real providers' API keys doesn't mean retyping `$env:` exports into every new terminal -- a real env var always wins over the file; .env is already gitignored, .env.example is the committed, secret-free template
 ```
 
 ---
@@ -2132,6 +2133,29 @@ match found and verified via `inspect_data.py cross-provider` -- is
 explicitly operational, not something this round's code changes can
 themselves complete; it is the next step once a real deployment is
 actually running.
+
+**Done:** a small follow-up while setting up the first real soak run --
+scaling to real providers means real API keys, and retyping `$env:`
+exports into a fresh terminal every time doesn't scale past one or two.
+`config.load_dotenv()` loads optional `KEY=value` lines from a `.env`
+file at the repo root into `os.environ`, called explicitly by `app.py`/
+`poller.py`/`inspect_data.py` before `load_config()` -- deliberately
+*not* called from inside `load_config()` itself, so `load_config()`
+stays a pure read of whatever `os.environ` already holds and the
+existing test suite's `monkeypatch.setenv`/`delenv` pattern keeps
+working regardless of whether a developer happens to have a real `.env`
+sitting in their checkout. A real environment variable always wins over
+the file (`os.environ.setdefault`), the standard dotenv precedence.
+`.env` was already covered by `.gitignore`; `.env.example` is a new,
+secret-free committed template listing every env var this project reads.
+Caught one real bug while smoke-testing this end to end: `Path.read_text
+(encoding="utf-8")` does not strip a leading BOM, and several common
+Windows tools (PowerShell's own `Set-Content -Encoding utf8`, Notepad's
+"UTF-8") write one -- the BOM stayed attached to the first line's key,
+so `API_FOOTBALL_KEY` silently became a key nothing else could ever
+match. Fixed by reading with `encoding="utf-8-sig"` instead, which
+strips a BOM if present and behaves identically to plain UTF-8 for a
+file that has none.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

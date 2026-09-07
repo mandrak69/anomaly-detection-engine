@@ -21,7 +21,7 @@ offline inspection).
 import argparse
 import sqlite3
 
-from anomaly_detection_engine.config import load_config
+from anomaly_detection_engine.config import load_config, load_dotenv
 from anomaly_detection_engine.storage.database import create_connection, initialize_database
 
 
@@ -193,6 +193,7 @@ def cmd_cross_provider(connection: sqlite3.Connection) -> None:
 
 
 def _connect(db_path: str | None) -> sqlite3.Connection:
+    load_dotenv()
     resolved_path = db_path or load_config().db_path
     connection = create_connection(resolved_path)
     initialize_database(connection)

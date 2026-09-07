@@ -18,6 +18,11 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "anomaly_detect
 # the second one wait instead of failing outright.
 DB_BUSY_TIMEOUT_SECONDS = 30
 
+# Project root's .env -- see load_dotenv() below. Already covered by
+# .gitignore's ".env" entry, so a real one sitting here never gets
+# committed by accident.
+DEFAULT_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
 _VALID_ODDS_SOURCES = ("demo", "the-odds-api", "api-football")
 
 
@@ -64,6 +69,68 @@ class AppConfig:
     # field is where the key comes from; ApiFootballCollector itself
     # raises if it ends up unset when actually needed.
     api_football_key: str | None
+
+
+def load_dotenv(path: Path = DEFAULT_DOTENV_PATH) -> None:
+    """Loads KEY=value pairs from a .env file into os.environ, filling in
+    only variables not already set there -- a real environment variable
+    (the shell, a process manager, CI) always wins over whatever the file
+    says, the same precedence every dotenv-style tool uses. A missing
+    file is not an error: .env is entirely optional, every existing
+    *_KEY/*_CAPTURE_DIR field already works from real env vars alone.
+
+    Exists for the case this project is now actually meant to scale to
+    -- many real providers, each with its own API key, none of which fit
+    comfortably as `$env:` exports retyped into every new terminal.  One
+    gitignored file with as many `PROVIDER_KEY=...` lines as needed,
+    loaded once at startup, both fixes that and keeps every existing
+    env-var-only workflow (CI, a container's own env, `$env:` set by
+    hand for a one-off run) working unchanged.
+
+    Deliberately NOT called from load_config() itself: load_config()
+    must stay a pure read of whatever os.environ already holds at the
+    moment it runs, so the existing test suite (which explicitly
+    clears/sets specific env vars via monkeypatch immediately before
+    calling load_config()) keeps working regardless of whether the
+    developer running the tests happens to have a real .env file sitting
+    in the repo root -- load_config() itself never touches the
+    filesystem. Every real entrypoint (app.py, poller.py) calls this
+    once, explicitly, before load_config().
+
+    Deliberately minimal -- no variable expansion, no multi-line values,
+    just KEY=value lines (blank lines and #-comments skipped, one layer
+    of matching quotes stripped from the value): this project's
+    dependency-free philosophy (the only *runtime* dependency is
+    rapidfuzz) doesn't justify a python-dotenv dependency for a handful
+    of lines.
+    """
+    if not path.exists():
+        return
+
+    # utf-8-sig, not utf-8: several common Windows editors/tools
+    # (PowerShell's own `Set-Content -Encoding utf8`, Notepad's "UTF-8")
+    # write a leading BOM. Plain utf-8 leaves that BOM character
+    # attached to the first line's key, silently producing a key like
+    # "﻿API_FOOTBALL_KEY" that never matches what the rest of the
+    # app reads via os.environ.get("API_FOOTBALL_KEY") -- verified
+    # directly: this exact bug, on this exact file-writing path.
+    # utf-8-sig strips the BOM if present and is otherwise identical to
+    # utf-8 for a file that has none.
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
 
 
 def load_config() -> AppConfig:

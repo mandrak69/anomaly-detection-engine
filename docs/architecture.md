@@ -1299,6 +1299,20 @@ prove -- a 24-48h soak run, and a genuine cross-provider match verified
 via `inspect_data.py cross-provider` -- is explicitly operational, not
 something further code changes alone can complete.
 
+**Resolved:** a small follow-up while setting up the first real soak
+run. `config.load_dotenv()` loads optional `KEY=value` lines from a
+`.env` file at the repo root into `os.environ` (a real env var always
+wins, via `os.environ.setdefault`) -- `app.py`/`poller.py`/
+`inspect_data.py` call it explicitly before `load_config()`, but
+`load_config()` itself deliberately never calls it, so it stays a pure
+read of `os.environ` and the existing `monkeypatch.setenv`/`delenv`
+test pattern is unaffected by whether a real `.env` happens to exist.
+`.env.example` is a new, secret-free committed template. Caught one
+real bug while smoke-testing this: reading with plain `encoding="utf-8"`
+does not strip a leading BOM, and PowerShell's own `Set-Content
+-Encoding utf8` writes one, silently corrupting the first line's key --
+fixed by reading with `encoding="utf-8-sig"` instead.
+
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
 remains deliberately deferred -- the right boundary to draw before this
