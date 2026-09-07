@@ -15,6 +15,7 @@ from anomaly_detection_engine.models.market import (
 )
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -97,6 +98,7 @@ def build_service(collector):
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
         raw_payload_repository=raw_payload_repository,
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="test"),
         collector_version="0.1.0",
     )
     return service, odds_repository, collector_run_repository, raw_payload_repository
@@ -127,10 +129,10 @@ def test_successful_run_persists_snapshots():
     assert raw_payloads[0].rejection_reason is None
     assert '"source": "Mozzart"' in raw_payloads[0].payload
 
-    # No source_id provided (Mozzart has no stable per-bookmaker id) --
-    # falls back to a normalized form of the display name, the old
-    # behavior preserved for collectors that don't supply one.
-    assert snapshots[0].bookmaker.id == "mozzart"
+    # Bookmaker.id is now the canonical bookmaker registry's own
+    # generated id (see BookmakerCatalog), not derived from the raw
+    # source_id/name -- only the display name is still the raw one.
+    assert snapshots[0].bookmaker.id.startswith("bookmaker-")
     assert snapshots[0].bookmaker.name == "Mozzart"
 
 
@@ -164,23 +166,44 @@ def test_collector_failure_leaves_source_payload_unset():
     assert stored.parser_version == "1"
 
 
-def test_stable_source_id_is_preferred_over_a_name_derived_id():
+def test_stable_source_id_survives_a_display_name_change():
     # A source that provides its own stable identifier (e.g.
-    # the-odds-api's "bet365") must have that used as Bookmaker.id, not
-    # something derived from the display name -- the display name can
-    # change ("Bet365" -> "Bet365 UK") without the underlying bookmaker
-    # changing, which would otherwise make ingestion treat it as a new,
-    # unrelated bookmaker.
-    raw = build_raw_event(source="Bet365 UK", source_id="bet365")
-    collector = StubCollector(raw_events=[raw])
-    service, odds_repository, _, _ = build_service(collector)
+    # the-odds-api's "bet365") must keep resolving to the same canonical
+    # Bookmaker even if the display name changes ("Bet365" -> "Bet365
+    # UK") between polls -- otherwise ingestion would treat the renamed
+    # bookmaker as a new, unrelated one. See BookmakerCatalog: the
+    # canonical id itself is never derived from source_id/source_name,
+    # only cached against them.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    bookmaker_catalog = BookmakerCatalog(connection, provider_id="stub")
 
-    service.run()
+    odds_repository = OddsRepository(connection)
 
-    snapshots = odds_repository.find_by_event("event-001")
-    assert len(snapshots) == 3
-    assert all(s.bookmaker.id == "bet365" for s in snapshots)
-    assert all(s.bookmaker.name == "Bet365 UK" for s in snapshots)
+    def run_with(source_name: str, observed_at: datetime) -> None:
+        service = OddsIngestionService(
+            collector=StubCollector(
+                raw_events=[
+                    build_raw_event(
+                        source=source_name, source_id="bet365", observed_at=observed_at
+                    )
+                ]
+            ),
+            matcher=build_matcher(),
+            odds_repository=odds_repository,
+            collector_run_repository=CollectorRunRepository(connection),
+            raw_payload_repository=RawPayloadRepository(connection),
+            bookmaker_catalog=bookmaker_catalog,
+        )
+        service.run()
+
+    run_with("Bet365 UK", datetime.fromisoformat("2026-08-27T10:00:00+00:00"))
+    run_with("Bet365", datetime.fromisoformat("2026-08-27T11:00:00+00:00"))
+
+    ids = {s.bookmaker.id for s in odds_repository.find_by_event("event-001")}
+    assert len(ids) == 1
+    assert next(iter(ids)).startswith("bookmaker-")
 
 
 def test_partial_run_when_one_record_fails_validation():
@@ -298,6 +321,7 @@ def test_metrics_are_updated_when_provided():
         odds_repository=OddsRepository(connection),
         collector_run_repository=CollectorRunRepository(connection),
         raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
         metrics=metrics,
     )
 
@@ -356,6 +380,7 @@ def test_a_record_that_raises_during_matching_is_rejected_without_aborting_the_r
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
         raw_payload_repository=raw_payload_repository,
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
     )
 
     # Must not raise -- the run has to reach a final CollectorRun state
@@ -407,6 +432,7 @@ def test_raw_payload_save_failure_makes_the_run_partial_not_success():
         odds_repository=OddsRepository(connection),
         collector_run_repository=CollectorRunRepository(connection),
         raw_payload_repository=_RawPayloadRepositoryThatAlwaysFails(),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
     )
 
     run = service.run()
@@ -446,6 +472,7 @@ def test_unexpected_abort_after_partial_success_is_partial_with_error_details():
         odds_repository=OddsRepository(connection),
         collector_run_repository=CollectorRunRepository(connection),
         raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
     )
 
     # Must not raise -- even an abort with nothing salvageable still
@@ -469,6 +496,7 @@ def test_unexpected_abort_before_anything_succeeds_is_failed_with_error_details(
         odds_repository=OddsRepository(connection),
         collector_run_repository=CollectorRunRepository(connection),
         raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
     )
 
     run = service.run()

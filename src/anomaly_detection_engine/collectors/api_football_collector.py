@@ -72,6 +72,17 @@ def parse_api_football_response(
     fixtures_data = _load_envelope(fixtures_raw, what="fixtures")
     odds_data = _load_envelope(odds_raw, what="odds")
 
+    # collect() never sends a page= param and never requests page 2+ --
+    # fine while a day's results fit on one page (true for every response
+    # seen so far), but a real response that ever grows past api-football
+    # .com's per-page limit would otherwise be silently truncated with no
+    # sign anything was missed. Logged, not raised: full pagination
+    # (looping collect() over every page) is real work deferred until it
+    # is actually needed for continuous/production polling -- this is
+    # only the "fail loud instead of silently incomplete" floor until then.
+    _warn_if_paginated(fixtures_data, what="fixtures")
+    _warn_if_paginated(odds_data, what="odds")
+
     team_names = _team_names_by_fixture_id(fixtures_data)
 
     result: list[RawEventOdds] = []
@@ -89,6 +100,20 @@ def parse_api_football_response(
             continue
         start_time = datetime.fromisoformat(raw_date)
 
+        # Per-fixture (not per-bookmaker -- api-football.com only reports
+        # one "update" timestamp for the whole odds entry, unlike
+        # the-odds-api's per-bookmaker last_update), so every bookmaker
+        # under this fixture shares the same source_timestamp. Same
+        # freshness reasoning as the-odds-api's last_update -> see
+        # RawEventOdds.quote_time and OddsSnapshot.quote_time: without
+        # this, source_timestamp stays None and quote_time silently falls
+        # back to observed_at (when *we* polled), hiding how stale the
+        # underlying quote actually was.
+        raw_update = item.get("update")
+        source_timestamp = (
+            datetime.fromisoformat(raw_update) if raw_update else None
+        )
+
         for bookmaker in item.get("bookmakers", []):
             bookmaker_id = bookmaker.get("id")
             source_id = str(bookmaker_id) if bookmaker_id is not None else None
@@ -100,6 +125,7 @@ def parse_api_football_response(
                 "away_team": away_team,
                 "start_time": start_time,
                 "observed_at": observed_at,
+                "source_timestamp": source_timestamp,
                 # api-football.com's own stable per-bookmaker id (e.g. 8
                 # for "Bet365") -- see RawEventOdds.source_id for why this
                 # must not be derived from the display name.
@@ -138,6 +164,27 @@ def _load_envelope(raw: str | bytes, *, what: str) -> dict:
         raise ApiFootballError(f"api-football.com {what} request returned errors: {errors}")
 
     return data
+
+
+def _warn_if_paginated(data: dict, *, what: str) -> None:
+    """api-football.com's envelope carries paging.current/paging.total;
+    collect() only ever fetches page 1 (no page= param sent at all), so
+    a total > 1 means this response's dataset is incomplete -- see this
+    function's call site for why that is only logged, not raised, for
+    now.
+    """
+    paging = data.get("paging") or {}
+    total = paging.get("total")
+    if isinstance(total, int) and total > 1:
+        logger.warning(
+            "api_football.response_paginated",
+            extra={
+                "what": what,
+                "current_page": paging.get("current"),
+                "total_pages": total,
+                "date": data.get("parameters", {}).get("date"),
+            },
+        )
 
 
 def _team_names_by_fixture_id(fixtures_data: dict) -> dict[int, tuple[str, str]]:

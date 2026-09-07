@@ -516,6 +516,41 @@ def _migration_6_collector_run_provenance(connection: sqlite3.Connection) -> Non
     _add_column_if_missing(connection, "collector_runs", "source_payload", "TEXT")
 
 
+def _migration_7_bookmaker_catalog(connection: sqlite3.Connection) -> None:
+    """Adds the canonical bookmaker registry BookmakerCatalog uses to
+    resolve a raw (provider, bookmaker) sighting to one stable identity
+    across providers -- see storage.bookmaker_catalog. Deliberately not a
+    backfill of odds_snapshots.bookmaker_id/movements.bookmaker_id: every
+    row written before this migration already has a stable bookmaker_id
+    string (the old raw.source_id-or-lowercased-name scheme), and
+    retroactively resolving those historical strings through the new
+    catalog is a one-off data-migration script, not something this
+    schema migration should silently attempt. Every statement here is
+    its own idempotent CREATE ... IF NOT EXISTS, so this is safe to
+    re-run for the same reason migration 1/3 are.
+    """
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS bookmakers (
+            id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_bookmakers_normalized_name
+            ON bookmakers(normalized_name);
+
+        CREATE TABLE IF NOT EXISTS source_bookmaker_mappings (
+            provider_id TEXT NOT NULL,
+            source_bookmaker_id TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            bookmaker_id TEXT NOT NULL REFERENCES bookmakers(id),
+            PRIMARY KEY (provider_id, source_bookmaker_id)
+        );
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -523,6 +558,7 @@ MIGRATIONS: list[Migration] = [
     _migration_4_market_phase,
     _migration_5_event_competition_id,
     _migration_6_collector_run_provenance,
+    _migration_7_bookmaker_catalog,
 ]
 
 

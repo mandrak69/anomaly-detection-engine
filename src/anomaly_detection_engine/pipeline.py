@@ -21,9 +21,15 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import (
 from anomaly_detection_engine.config import AppConfig
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.models.event import Event
-from anomaly_detection_engine.models.market import DEFAULT_MARKET, MarketIdentity
+from anomaly_detection_engine.models.market import (
+    DEFAULT_MARKET,
+    HANDICAP_MINUS_1_MARKET,
+    TOTALS_2_5_MARKET,
+    MarketIdentity,
+)
 from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP
 from anomaly_detection_engine.runtime import Runtime
+from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -50,6 +56,17 @@ ALIASES = {
 DEMO_FRESHNESS_POLICY = FreshnessPolicy(
     max_snapshot_age=timedelta(minutes=5),
     max_observation_spread=timedelta(minutes=5),
+)
+
+# Every market run_detection actually analyzes. A market's collector(s)
+# ingesting it (see ApiFootballCollector) is necessary but not
+# sufficient for detection to happen -- this tuple is what closes that
+# gap; adding a new detected market later is exactly one line here,
+# nothing else in run_detection changes.
+DETECTED_MARKETS = (
+    DEFAULT_MARKET,
+    TOTALS_2_5_MARKET,
+    HANDICAP_MINUS_1_MARKET,
 )
 
 
@@ -200,6 +217,11 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
         catalog = FixtureCatalog(
             runtime.connection, provider_id=collector.provider_id, aliases=ALIASES
         )
+        # Same per-provider scoping FixtureCatalog uses (see its own
+        # docstring): two collectors for the same real provider (auto vs.
+        # manual capture) share one bookmaker-mapping cache, so a
+        # bookmaker resolved by one is immediately reused by the other.
+        bookmaker_catalog = BookmakerCatalog(runtime.connection, provider_id=collector.provider_id)
 
         service = OddsIngestionService(
             collector=collector,
@@ -207,6 +229,7 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
             odds_repository=runtime.odds_repository,
             collector_run_repository=runtime.collector_run_repository,
             raw_payload_repository=runtime.raw_payload_repository,
+            bookmaker_catalog=bookmaker_catalog,
             collector_version="0.1.0",
             metrics=runtime.metrics,
         )
@@ -363,10 +386,28 @@ def persist_detected_signals(
 
 def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict:
     """Detects and persists signals/movements for every ingested event,
-    then expires ACTIVE signals whose event's lifecycle has run out --
-    the last step of the *core* pipeline: collect -> validate -> match ->
-    persist observations -> detect anomalies -> persist signals ->
-    expire stale signals.
+    across every market in DETECTED_MARKETS, then expires ACTIVE signals
+    whose event's lifecycle has run out -- the last step of the *core*
+    pipeline: collect -> validate -> match -> persist observations ->
+    detect anomalies (per market) -> persist signals -> expire stale
+    signals.
+
+    One persist_detected_signals() call per DETECTED_MARKETS entry, not
+    one call analyzing every market at once: detect_surebet_candidates/
+    detect_value_gap_candidates and SignalRepository.reconcile() are all
+    already scoped to a single MarketIdentity per call (see
+    SignalCandidate.identity, which includes market), so looping here is
+    the natural fit -- reconciling one market's sweep can never resolve
+    a signal belonging to a market this cycle didn't just evaluate,
+    since evaluated_keys/SignalIdentity carry the market they came from.
+
+    movements_recorded is summed across the loop (each market's sweep
+    finds its own, disjoint set of movements), but active_surebets/
+    active_value_gaps are read once *after* the whole loop, not taken
+    from any single iteration's return value -- SignalRepository.
+    find_active() counts ACTIVE signals across every market at once, so
+    the last market processed would otherwise clobber the true
+    cross-market total in summary.
 
     Deliberately imports nothing from reporting.* and prints nothing at
     all -- returns its summary dict for the caller to do with as it
@@ -380,21 +421,23 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     kept out of the core pipeline on purpose so the core never depends
     on it.
 
-    Expiry is a separate step from detection, not folded into the same
-    sweep: run_ingestion() already scopes `events` to what was actually
-    touched this cycle (see OddsIngestionService.touched_events), so a
-    long-finished match that nothing reports on anymore never reaches
-    persist_detected_signals at all, and its ACTIVE signals would
+    Expiry is a separate step from detection, not folded into any
+    per-market sweep, and runs exactly once after every market has been
+    processed: run_ingestion() already scopes `events` to what was
+    actually touched this cycle (see OddsIngestionService.touched_events),
+    so a long-finished match that nothing reports on anymore never
+    reaches persist_detected_signals at all, and its ACTIVE signals would
     otherwise stay ACTIVE forever -- "not evaluated" is not the same
     claim as "confirmed gone" (see SignalRepository.reconcile()), so
     reconcile() alone can never resolve them. expire_active_signals is
     the explicit, separate acknowledgment that a signal's event has
     simply run out of runway, regardless of whether this cycle evaluated
-    it. now is computed once and threaded through both calls: a signal
-    reconcile() just reconfirmed ACTIVE has last_seen_at == now, which
-    excludes it from expire_active_signals's own cutoff check -- without
-    sharing the same instant, a signal genuinely re-confirmed this exact
-    cycle could be immediately re-expired by the very next line.
+    it. now is computed once and threaded through every persist call and
+    the final expire_active_signals call: a signal reconcile() just
+    reconfirmed ACTIVE has last_seen_at == now, which excludes it from
+    expire_active_signals's own cutoff check -- without sharing the same
+    instant, a signal genuinely re-confirmed this exact cycle could be
+    immediately re-expired by the very next line.
     """
     analysis_time = (
         datetime.now(UTC)
@@ -403,17 +446,26 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     )
     now = datetime.now(UTC)
 
-    summary = persist_detected_signals(
-        events,
-        runtime.odds_repository,
-        runtime.signal_repository,
-        runtime.movement_repository,
-        market=DEFAULT_MARKET,
-        freshness_policy=DEMO_FRESHNESS_POLICY,
-        analysis_time=analysis_time,
-        min_value_gap_percent=config.min_value_gap_percent,
-        observed_at=now,
-    )
+    movements_recorded = 0
+    for market in DETECTED_MARKETS:
+        sweep = persist_detected_signals(
+            events,
+            runtime.odds_repository,
+            runtime.signal_repository,
+            runtime.movement_repository,
+            market=market,
+            freshness_policy=DEMO_FRESHNESS_POLICY,
+            analysis_time=analysis_time,
+            min_value_gap_percent=config.min_value_gap_percent,
+            observed_at=now,
+        )
+        movements_recorded += sweep["movements_recorded"]
+
+    summary = {
+        "active_surebets": len(runtime.signal_repository.find_active(SUREBET)),
+        "active_value_gaps": len(runtime.signal_repository.find_active(VALUE_GAP)),
+        "movements_recorded": movements_recorded,
+    }
 
     expired_ids = runtime.signal_repository.expire_active_signals(
         event_start_cutoff=now - config.signal_ttl,

@@ -6,9 +6,10 @@ from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.matching.event_matcher import EventResolver
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.models.event import Event
-from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.models.odds import OddsSnapshot
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
+from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import (
@@ -35,6 +36,7 @@ class OddsIngestionService:
         odds_repository: OddsRepository,
         collector_run_repository: CollectorRunRepository,
         raw_payload_repository: RawPayloadRepository,
+        bookmaker_catalog: BookmakerCatalog,
         collector_version: str | None = None,
         metrics: IngestionMetrics | None = None,
     ) -> None:
@@ -43,6 +45,7 @@ class OddsIngestionService:
         self._odds_repository = odds_repository
         self._collector_run_repository = collector_run_repository
         self._raw_payload_repository = raw_payload_repository
+        self._bookmaker_catalog = bookmaker_catalog
         self._collector_version = collector_version
         self._metrics = metrics
         self._touched_events: dict[str, Event] = {}
@@ -228,15 +231,17 @@ class OddsIngestionService:
 
             self._touched_events[match.event.id] = match.event
 
-            # Prefer the source's own stable identifier (raw.source_id,
-            # e.g. the-odds-api's "bet365") over deriving one from the
-            # display name -- a display name can change ("Bet365" ->
-            # "Bet365 UK") without the underlying bookmaker changing,
-            # which would otherwise make the same real bookmaker look
-            # like a new one. Collectors with no such stable id (JSON
-            # demo, Mozzart) leave source_id unset, keeping the old
-            # derived-from-name behavior.
-            bookmaker = Bookmaker(raw.source_id or raw.source.lower(), raw.source)
+            # Resolved through the canonical bookmaker registry, not
+            # built directly from raw.source_id/raw.source -- the same
+            # real bookmaker reported by two different providers under
+            # two different provider-specific ids (the-odds-api's
+            # "bet365" vs api-football's "8") must resolve to the same
+            # canonical Bookmaker.id, or every downstream min_bookmakers/
+            # consensus/outlier check would see them as two unrelated
+            # bookmakers. See storage.bookmaker_catalog.BookmakerCatalog.
+            bookmaker = self._bookmaker_catalog.resolve(
+                source_bookmaker_id=raw.source_id, source_name=raw.source
+            )
 
             snapshots = [
                 OddsSnapshot(

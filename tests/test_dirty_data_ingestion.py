@@ -8,6 +8,7 @@ from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.collector_run import CollectorRunStatus
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -48,6 +49,7 @@ def test_ingestion_rejects_each_kind_of_dirty_record_but_keeps_the_valid_one():
         odds_repository=odds_repository,
         collector_run_repository=collector_run_repository,
         raw_payload_repository=raw_payload_repository,
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="json"),
     )
 
     run = service.run()

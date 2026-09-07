@@ -1529,6 +1529,10 @@ rate limiting
 [x] Second real pre-match source: ApiFootballCollector (api-football.com) -- a genuinely different provider (different team-name spellings, league naming, bookmaker set), wired in as an opt-in supplemental collector (API_FOOTBALL_KEY), proving cross-provider matching against real data instead of only fixtures
 [x] Second market type: TOTALS_2_5_MARKET (models/market.py), produced end-to-end by ApiFootballCollector from a real "Goals Over/Under" bet -- surfaced (and fixed) detect_surebet_candidates hardcoding len(best) == 3; required_outcomes(market_type) now drives both the "all outcomes present" check and calculate_arbitrage's margin formula
 [x] Third market type: HANDICAP_MINUS_1_MARKET (models/market.py), the 3-way "Handicap Result" flavor (reuses THREE_WAY's 1/X/2 outcome codes), produced end-to-end by ApiFootballCollector from a real "Handicap Result" bet -- 2-way Asian Handicap deliberately deferred (api-football.com's own shape needs real home/away line-pairing semantics this round didn't settle)
+[x] TOTALS_2_5_MARKET/HANDICAP_MINUS_1_MARKET actually wired into run_detection()'s detection sweep (pipeline.DETECTED_MARKETS) -- both were already ingested end-to-end but never analyzed, so no TOTALS/HANDICAP signal could ever be created regardless of how good the arbitrage was
+[x] ApiFootballCollector now reads each fixture's "update" field into RawEventOdds.source_timestamp -- same freshness-timestamp gap already fixed for the-odds-api's last_update, previously left quote_time silently falling back to observed_at (when *we* polled, not when the quote was actually current)
+[x] Canonical bookmaker registry (BookmakerCatalog + bookmakers/source_bookmaker_mappings), deliberately conservative (exact/normalized-name matching only, no fuzzy auto-merge) -- the same real bookmaker reported by two providers under two different provider-specific ids (the-odds-api's "bet365" vs api-football's "8") now resolves to one canonical Bookmaker.id instead of being treated as two unrelated bookmakers
+[x] ApiFootballCollector.collect() logs a warning if a response's paging.total > 1 (page 1 is all it ever fetches) -- non-blocking for now, but no longer silently incomplete
 ```
 
 ---
@@ -1934,6 +1938,83 @@ HANDICAP snapshot from ever being compared against a THREE_WAY one for
 the same event, even though they share identical outcome codes.
 2-way Asian Handicap support remains open for whenever the home/away
 line-pairing semantics are worth settling properly.
+
+**Done:** an eleventh round, closing the gap between "ingested" and
+"actually analyzed" for the two market types added over the previous two
+rounds, plus three smaller correctness/robustness fixes surfaced by
+reviewing that state. `run_detection()` previously called
+`persist_detected_signals` with `market=DEFAULT_MARKET` only, even though
+`ApiFootballCollector` had ingested TOTALS/HANDICAP snapshots since the
+prior two rounds -- a real cross-provider TOTALS surebet would sit in
+`odds_snapshots` forever, never evaluated. `pipeline.DETECTED_MARKETS`
+(`DEFAULT_MARKET`, `TOTALS_2_5_MARKET`, `HANDICAP_MINUS_1_MARKET`) is now
+looped over inside `run_detection`, one `persist_detected_signals` call
+per market. This is safe to loop naively because `SignalRepository.
+reconcile()`'s stale-resolution is already scoped by `SignalIdentity`
+(which carries `market`) -- a TOTALS sweep's `evaluated_keys` can never
+contain a HANDICAP or DEFAULT_MARKET identity, so reconciling one market
+can never resolve a signal belonging to a market this cycle didn't just
+evaluate. `movements_recorded` is summed across the loop; `active_surebets`/
+`active_value_gaps` are read once via `SignalRepository.find_active()`
+*after* the whole loop instead of taken from any one iteration's return
+value, since `find_active()` counts across every market at once and the
+last market processed would otherwise silently clobber the true total.
+Proven with a new pipeline integration test that persists a
+TOTALS-shaped surebet snapshot (the same OVER/UNDER-only shape
+`ApiFootballCollector` actually produces) and asserts `run_detection()`
+creates a real `SUREBET` signal whose market is `TOTALS_2_5_MARKET`, not
+just `DEFAULT_MARKET`.
+
+Second: `parse_api_football_response` now reads each fixture's own
+`"update"` timestamp into `RawEventOdds.source_timestamp` -- the exact
+freshness gap already fixed for the-odds-api's `last_update` in an
+earlier round, just missed for this collector at the time, since
+api-football.com's `"update"` lives once per fixture (not once per
+bookmaker the way the-odds-api's `last_update` does), so it is read
+once outside the bookmaker loop and shared by every bookmaker under that
+fixture.
+
+Third, and the largest piece: a canonical bookmaker registry
+(`storage.bookmaker_catalog.BookmakerCatalog`, `bookmakers` +
+`source_bookmaker_mappings`, migration 7). Before this,
+`OddsIngestionService` built `Bookmaker(raw.source_id or
+raw.source.lower(), raw.source)` directly from whatever a provider
+happened to report -- the same real Bet365 became two different
+`Bookmaker` identities (`"bet365"` from the-odds-api, `"8"` from
+api-football), silently corrupting every downstream `min_bookmakers`/
+consensus/outlier check that assumes one bookmaker has one identity.
+`BookmakerCatalog.resolve()` follows the same shape FixtureCatalog
+already uses for teams/competitions (an existing-mapping cache keyed by
+provider, falling back to name resolution, falling back to creating a
+new canonical row), but deliberately without any fuzzy matching: a
+`bookmakers.normalized_name` column is `UNIQUE` at the schema level, so
+"an existing canonical bookmaker with this normalized name" is always
+zero-or-one matches, never a guess between ambiguous candidates. This is
+intentionally far more conservative than team/competition matching --
+team names genuinely vary a lot across sources and fuzzy matching earns
+its keep there, but bookmaker brand names are a small, stable set, and a
+wrong auto-merge here (e.g. deciding "Pinnacle" and "Pinnacle Sports" are
+the same bookmaker when they might be genuinely different products)
+would permanently contaminate consensus math, whereas failing to merge
+two spellings of the same real bookmaker only costs a harmless temporary
+duplicate. The canonical `Bookmaker.id` is always a freshly generated
+`bookmaker-<uuid>`, never a provider's own bookmaker id -- the-odds-api's
+`"bet365"` and api-football's `"8"` are only ever recorded as mappings,
+so this system's own domain identity never depends on one provider's
+identifiers surviving unchanged. `OddsIngestionService` now takes a
+`bookmaker_catalog` constructor parameter and resolves through it instead
+of building `Bookmaker` by hand; `run_ingestion()` constructs one
+`BookmakerCatalog` per collector, scoped by `provider_id`, the same
+per-provider cache-sharing `FixtureCatalog` already does.
+
+Fourth, and explicitly non-blocking: `ApiFootballCollector.collect()`
+still only ever fetches page 1 of a date's results (no `page=` param is
+sent, and `paging.total` was never inspected) -- real risk for a date
+with enough fixtures to actually paginate, but not yet observed in
+practice. `parse_api_football_response` now logs a warning when a
+response's `paging.total > 1`, so a paginated day is visible instead of
+silently incomplete; looping `collect()` over every page is deferred
+until continuous/production polling actually needs it.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

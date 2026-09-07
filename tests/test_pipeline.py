@@ -12,7 +12,7 @@ from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.market import DEFAULT_MARKET
+from anomaly_detection_engine.models.market import DEFAULT_MARKET, TOTALS_2_5_MARKET, MarketType
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.runtime import build_runtime
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
@@ -357,3 +357,53 @@ def test_run_detection_does_not_expire_a_signal_still_being_touched(monkeypatch)
 
     assert second["signals_expired"] == 0
     assert len(runtime.signal_repository.find_active("SUREBET")) == 1
+
+
+def _save_totals_surebet_snapshots(odds_repository, event_id, observed_at):
+    # Shaped like what ApiFootballCollector actually extracts from a real
+    # "Goals Over/Under" bet's 2.5 line (see
+    # collectors.api_football_collector._extract_totals_2_5_odds) --
+    # OVER/UNDER only, no 1/X/2 -- proving run_detection's DETECTED_MARKETS
+    # loop reaches TOTALS_2_5_MARKET, not just DEFAULT_MARKET.
+    for outcome, odds in [("OVER", "2.10"), ("UNDER", "2.10")]:
+        odds_repository.save(
+            OddsSnapshot(
+                event_id=event_id,
+                bookmaker=Bookmaker("bet1", "Bet1"),
+                market=TOTALS_2_5_MARKET,
+                outcome=outcome,
+                odds=Decimal(odds),
+                observed_at=observed_at,
+            )
+        )
+
+
+def test_run_detection_detects_a_totals_surebet_not_just_default_market(monkeypatch):
+    # Before DETECTED_MARKETS (see pipeline.py), run_detection() only
+    # ever called persist_detected_signals with market=DEFAULT_MARKET --
+    # a TOTALS-shaped snapshot like ApiFootballCollector now ingests
+    # could never produce a signal, no matter how good the arbitrage,
+    # because nothing ever asked detect_surebet_candidates to look at
+    # TOTALS_2_5_MARKET. This is the "API-Football TOTALS snapshot ->
+    # run_detection() -> TOTALS signal can be created" proof.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    start_time = datetime.fromisoformat("2026-09-08T00:15:00+00:00")
+    match = FixtureCatalog(runtime.connection, provider_id="api-football").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=start_time,
+    )
+    event = match.event
+    observed_at = datetime.fromisoformat("2026-09-07T12:01:17+00:00")
+    _save_totals_surebet_snapshots(runtime.odds_repository, event.id, observed_at=observed_at)
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 1
+    active = runtime.signal_repository.find_active("SUREBET")
+    assert len(active) == 1
+    assert active[0].market.market_type == MarketType.TOTALS
+    assert active[0].market.line == Decimal("2.5")

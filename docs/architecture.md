@@ -770,6 +770,19 @@ movements                 append-only point-in-time transitions,
                           (including full MarketIdentity with
                           market_phase) so a re-run detection sweep
                           can't duplicate one
+bookmakers                canonical bookmaker registry (migration 7),
+                          unique per normalized_name (case/whitespace/
+                          punctuation-only normalization -- no fuzzy
+                          matching, see BookmakerCatalog below)
+source_bookmaker_mappings  (provider_id, source_bookmaker_id) ->
+                          bookmaker_id, the permanent memory behind
+                          BookmakerCatalog's cross-provider bookmaker
+                          matching -- source_bookmaker_id is the
+                          provider's own stable id when it has one
+                          (e.g. api-football's "8"), or
+                          normalize_bookmaker_name(source_name)
+                          otherwise, for providers with no stable
+                          per-bookmaker id (JSON demo, Mozzart)
 ```
 
 `OddsRepository.save_all()` persists every outcome of one raw ingested
@@ -794,13 +807,13 @@ reflect the previous one.
 
 Competitions/leagues now have their own canonical registry
 (`competitions`/`source_competition_mappings`, see Storage Strategy
-above) the same way teams do. Bookmakers are still a plain string
-(`bookmaker_name` on `odds_snapshots`), not a normalized table -- a
-future table may include:
-
-```text
-bookmakers
-```
+above) the same way teams do. Bookmakers now do too
+(`bookmakers`/`source_bookmaker_mappings`, migration 7,
+`storage.bookmaker_catalog.BookmakerCatalog`) -- deliberately without
+`FixtureCatalog`'s fuzzy matching, since bookmaker brand names are a
+small, stable set where a wrong auto-merge would permanently corrupt
+consensus/outlier math, unlike a harmless duplicate identity; see the
+eleventh round below for the full rationale.
 
 ---
 
@@ -1153,6 +1166,75 @@ TOTALS proved for the latter two last round. `MarketIdentity` itself
 needed no changes either -- `market_type` alone already keeps a
 HANDICAP snapshot from ever being compared against a THREE_WAY one for
 the same event, even though they share identical outcome codes.
+
+**Resolved:** an eleventh round, closing the gap between "ingested" and
+"actually analyzed" left open by rounds nine and ten, plus three smaller
+fixes surfaced reviewing that state. `run_detection()` still called
+`persist_detected_signals` with `market=DEFAULT_MARKET` only, even though
+`ApiFootballCollector` had been ingesting TOTALS/HANDICAP snapshots since
+those two rounds -- a real cross-provider TOTALS or HANDICAP arbitrage
+would sit in `odds_snapshots` forever, never evaluated.
+`pipeline.DETECTED_MARKETS` (`DEFAULT_MARKET`, `TOTALS_2_5_MARKET`,
+`HANDICAP_MINUS_1_MARKET`) is now looped over inside `run_detection`, one
+`persist_detected_signals` call per market. Looping naively is safe here
+because `SignalRepository.reconcile()`'s stale-resolution is already
+scoped by `SignalIdentity` (which carries `market`) -- see Storage
+Strategy above -- so a TOTALS sweep's `evaluated_keys` can never contain
+a HANDICAP or DEFAULT_MARKET identity, and reconciling one market can
+never resolve a signal belonging to a market this cycle didn't just
+evaluate. `movements_recorded` is summed across the loop, but
+`active_surebets`/`active_value_gaps` are read once via
+`SignalRepository.find_active()` *after* the whole loop rather than taken
+from any single iteration's return value, since `find_active()` counts
+across every market at once and the last market processed would
+otherwise silently clobber the true cross-market total.
+
+Second, `parse_api_football_response` now reads each fixture's own
+`"update"` field into `RawEventOdds.source_timestamp` -- the same
+freshness-timestamp gap already closed for the-odds-api's `last_update`
+in an earlier round, just missed for this collector at the time. Read
+once per fixture item (outside the bookmaker loop), since
+api-football.com reports one `"update"` per odds entry, not one per
+bookmaker the way the-odds-api's `last_update` is.
+
+Third, and the largest piece: a canonical bookmaker registry
+(`BookmakerCatalog`, `bookmakers` + `source_bookmaker_mappings`,
+migration 7). Before this, ingestion built `Bookmaker(raw.source_id or
+raw.source.lower(), raw.source)` directly from whatever a provider
+reported -- the same real Bet365 became two different `Bookmaker`
+identities (the-odds-api's `"bet365"`, api-football's `"8"`), silently
+corrupting every downstream `min_bookmakers`/consensus/outlier check
+that assumes one real bookmaker has one identity. `BookmakerCatalog.
+resolve()` follows the same shape `FixtureCatalog` already uses for
+teams/competitions (an existing-mapping cache keyed by provider, falling
+back to name resolution, falling back to creating a new canonical row),
+deliberately without any fuzzy matching: `bookmakers.normalized_name` is
+`UNIQUE` at the schema level, so "an existing canonical bookmaker with
+this normalized name" is always zero-or-one matches, never a guess
+between ambiguous candidates. This is intentionally more conservative
+than `FixtureCatalog`'s own team/competition matching -- team names
+genuinely vary a lot across sources and fuzzy matching earns its keep
+there, but bookmaker brand names are a small, stable set, and a wrong
+auto-merge here (deciding two differently-named bookmakers are the same
+when they might be genuinely different products/feeds) would permanently
+contaminate consensus math, whereas failing to merge two spellings of
+the same real bookmaker only costs a harmless, temporary duplicate
+identity. The canonical `Bookmaker.id` is always a freshly generated
+`bookmaker-<uuid>`, never a provider's own bookmaker id, so this
+project's own domain identity never depends on any one provider's
+identifiers surviving unchanged -- `"bet365"`/`"8"` are only ever
+recorded as mappings. `OddsIngestionService` now takes a
+`bookmaker_catalog` constructor parameter and resolves through it;
+`run_ingestion()` constructs one `BookmakerCatalog` per collector, scoped
+by `provider_id`, the same per-provider cache-sharing `FixtureCatalog`
+already does.
+
+Fourth, and explicitly non-blocking: `ApiFootballCollector.collect()`
+still only ever fetches page 1 of a date's results -- `paging.total` was
+never inspected. `parse_api_football_response` now logs a warning when a
+response's `paging.total > 1`, so a paginated day is visible instead of
+silently incomplete; actually looping `collect()` over every page is
+deferred until continuous/production polling needs it.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
