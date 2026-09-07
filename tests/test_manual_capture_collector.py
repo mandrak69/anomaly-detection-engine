@@ -30,7 +30,9 @@ def test_returns_empty_when_no_capture_is_waiting(tmp_path):
     collector = ManualCaptureCollector(
         tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
     )
-    assert collector.collect() == []
+    collection = collector.collect()
+    assert collection.records == []
+    assert collection.source_payload is None
 
 
 def test_reads_and_archives_a_capture(tmp_path):
@@ -40,12 +42,30 @@ def test_reads_and_archives_a_capture(tmp_path):
     collector = ManualCaptureCollector(
         tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
     )
-    result = collector.collect()
+    collection = collector.collect()
+    result = collection.records
 
     assert len(result) == 1
     assert result[0].home_team == "Partizan"
+    assert collection.source_payload == "Partizan,Crvena Zvezda,2.10,3.40,3.20"
     assert not drop_path.exists()
     assert list((tmp_path / "history").glob("capture_*.json"))
+
+
+def test_parser_version_defaults_to_1_but_is_overridable(tmp_path):
+    default_collector = ManualCaptureCollector(
+        tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
+    )
+    versioned_collector = ManualCaptureCollector(
+        tmp_path,
+        parse=dummy_parse,
+        source_label="dummy:test",
+        provider_id="dummy",
+        parser_version="2",
+    )
+
+    assert default_collector.parser_version == "1"
+    assert versioned_collector.parser_version == "2"
 
 
 def test_second_capture_is_archived_separately_from_the_first(tmp_path):
@@ -90,7 +110,7 @@ def test_custom_filename_and_source_label(tmp_path):
     )
 
     assert collector.source == "dummy:custom"
-    result = collector.collect()
+    result = collector.collect().records
 
     assert len(result) == 1
     assert list((tmp_path / "history").glob("snapshot_*.txt"))
@@ -107,6 +127,6 @@ def test_observed_at_reflects_the_file_modification_time(tmp_path):
     collector = ManualCaptureCollector(
         tmp_path, parse=dummy_parse, source_label="dummy:test", provider_id="dummy"
     )
-    result = collector.collect()
+    result = collector.collect().records
 
     assert result[0].observed_at == datetime.fromisoformat("2026-08-27T10:00:00+00:00")

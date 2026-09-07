@@ -70,8 +70,10 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
         fetch=fetch_stub(SAMPLE_RESPONSE),
     )
 
-    result = collector.collect()
+    collection = collector.collect()
+    result = collection.records
 
+    assert collection.source_payload == json.dumps(SAMPLE_RESPONSE)
     assert len(result) == 1  # incomplete_book has no Draw outcome, skipped
     raw = result[0]
 
@@ -111,7 +113,7 @@ def test_uses_api_key_from_environment_variable(monkeypatch):
 
     collector = TheOddsApiCollector(sport_key="soccer_epl", fetch=fetch_stub([]))
 
-    assert collector.collect() == []
+    assert collector.collect().records == []
 
 
 def test_collect_never_logs_the_api_key(caplog):
@@ -178,8 +180,10 @@ def test_manual_collector_parses_the_same_response_shape_as_the_auto_one(tmp_pat
     (tmp_path / "capture.json").write_text(json.dumps(SAMPLE_RESPONSE), encoding="utf-8")
 
     collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
-    result = collector.collect()
+    collection = collector.collect()
+    result = collection.records
 
+    assert collection.source_payload == json.dumps(SAMPLE_RESPONSE)
     assert len(result) == 1
     raw = result[0]
     assert raw.source == "Bet365"
@@ -217,4 +221,12 @@ def test_auto_and_manual_collectors_share_one_provider_id(tmp_path):
 
 def test_manual_collector_returns_empty_when_no_capture_waiting(tmp_path):
     collector = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
-    assert collector.collect() == []
+    assert collector.collect().records == []
+
+
+def test_auto_and_manual_collectors_parser_version_defaults_to_1(tmp_path):
+    auto = TheOddsApiCollector(sport_key="soccer_epl", api_key="test-key", fetch=fetch_stub([]))
+    manual = TheOddsApiManualCollector(tmp_path, sport_key="soccer_epl")
+
+    assert auto.parser_version == "1"
+    assert manual.parser_version == "1"

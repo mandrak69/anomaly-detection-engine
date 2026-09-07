@@ -32,6 +32,26 @@ class MarketPhase(StrEnum):
     LIVE = "live"
 
 
+def canonical_decimal(value: Decimal) -> Decimal:
+    """Normalizes a Decimal to the exact form MarketIdentity stores and
+    compares by, so that two numerically-equal but differently-formatted
+    lines (a totals line of "2.50" from one source, "2.5" from another)
+    produce the identical identity everywhere -- not just under Python's
+    own `==` (already true: `Decimal.__eq__` compares value, not
+    formatting), but in every SQL identity/dedupe key too, which stores
+    and compares `str(line)` as plain text ("2.50" != "2.5" there).
+
+    Plain `Decimal.normalize()` almost does this (it strips trailing
+    zeros: `Decimal("2.50").normalize() == Decimal("2.5")`), but for a
+    round number it can flip into exponential notation instead
+    (`Decimal("100").normalize()` is `Decimal("1E+2")`) -- useless as a
+    betting line's text form. Re-expressing through `format(..., "f")`
+    forces fixed-point notation back, so the result is always a plain
+    decimal string like a line actually looks.
+    """
+    return Decimal(format(value.normalize(), "f"))
+
+
 @dataclass(frozen=True)
 class MarketIdentity:
     market_type: MarketType
@@ -40,6 +60,23 @@ class MarketIdentity:
     line: Decimal | None = None
     rules: str | None = None
     specifier: str | None = None
+
+    def __post_init__(self) -> None:
+        # Canonicalize at construction so every MarketIdentity, from
+        # every call site, is already in its comparable form -- callers
+        # never need to remember to canonicalize a line or normalize an
+        # empty string themselves. rules/specifier are normalized to
+        # None (not "") for the same reason: SQL's `COALESCE(x, '')`
+        # already treats NULL and '' as identical for dedupe/identity
+        # purposes, but the Python dataclass's own `==` does not (`None
+        # != ""`) unless both sides agree on one canonical "absent"
+        # value here.
+        if self.line is not None:
+            object.__setattr__(self, "line", canonical_decimal(self.line))
+        if self.rules == "":
+            object.__setattr__(self, "rules", None)
+        if self.specifier == "":
+            object.__setattr__(self, "specifier", None)
 
 
 # Current MVP scope (see README) is limited to full-time 1X2 markets, and

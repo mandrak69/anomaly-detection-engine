@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from anomaly_detection_engine.collectors.base import OddsCollector
+from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
@@ -24,11 +24,13 @@ class JsonOddsCollector(OddsCollector):
     def provider_id(self) -> str:
         return "json-demo"
 
-    def collect(self) -> list[RawEventOdds]:
-        raw_data = json.loads(
-            self.path.read_text(encoding="utf-8"),
-            parse_float=Decimal,
-        )
+    @property
+    def parser_version(self) -> str:
+        return "1"
+
+    def collect(self) -> CollectionResult:
+        source_payload = self.path.read_text(encoding="utf-8")
+        raw_data = json.loads(source_payload, parse_float=Decimal)
 
         result = []
 
@@ -56,4 +58,4 @@ class JsonOddsCollector(OddsCollector):
             extra={"path": str(self.path), "records_produced": len(result)},
         )
 
-        return result
+        return CollectionResult(source_payload=source_payload, records=result)

@@ -117,8 +117,8 @@ start time
 market semantics
 ```
 
-Two implementations of the same `match(...) -> EventMatchResult`
-contract:
+Two implementations of the same `EventResolver` Protocol
+(`matching/event_matcher.py`: `match(...) -> EventMatchResult`):
 
 ```text
 EventMatcher      fixed, in-memory candidate list -- rejects anything
@@ -130,6 +130,11 @@ FixtureCatalog     persistent (teams/events/competitions/
                    rejecting it, and remembers every (provider_id,
                    sport, raw name) resolution permanently
 ```
+
+`OddsIngestionService` type-hints its `matcher` parameter as
+`EventResolver`, not a concrete `EventMatcher` -- every real caller
+(`pipeline.run_ingestion`) actually passes a `FixtureCatalog`, which
+previously only duck-typed the same shape rather than one declaring it.
 
 `FixtureCatalog` reuses `TeamNormalizer` (the same exact/alias/fuzzy
 logic `EventMatcher` uses) internally for both teams and competitions,
@@ -327,11 +332,24 @@ a real deployment would ship to one.
 
 ## Collector Contract
 
-All collectors must ultimately produce:
+`collect()` returns a `CollectionResult`:
 
 ```text
-RawEventOdds
+source_payload   the exact source response (decoded to text), or None
+                 if there was genuinely nothing to collect this cycle
+                 (e.g. a manual-capture drop file isn't there yet) --
+                 never a substitute for a parse failure, which still
+                 raises and propagates unchanged
+records          list[RawEventOdds], same contract as before
 ```
+
+Every `OddsCollector` also exposes `source` (this collector instance's
+label, for `CollectorRun`/logging), `provider_id` (the real-world data
+provider, see Matching Layer), and `parser_version` (its own parsing
+logic's version, distinct from `collector_version` -- see CollectorRun
+below). `source_payload` plus these three are what a future reprocessing
+script needs: which parser produced a given historical response, and
+which real provider it came from.
 
 The collector may internally use any acquisition method:
 
@@ -394,6 +412,10 @@ track status
 track accepted/rejected records
 track collector version
 track errors
+track provider_id/parser_version/source_payload -- the exact response
+    this run's records were parsed from, plus which real provider and
+    which parsing-logic version produced it (see Collector Contract) --
+    None when collect() itself raised (nothing was ever fetched/read)
 ```
 
 Statuses:
@@ -477,6 +499,20 @@ cross-bookmaker discrepancy. `phase` has no default -- every collector
 declares which phase it produces explicitly (`DEFAULT_MARKET` for
 pre-match sources; `MozzartFileCollector`'s `/live/matches` data uses
 `LIVE_MARKET` instead).
+
+`line`/`rules`/`specifier` are canonicalized in `__post_init__`, not by
+every caller: `line` goes through `canonical_decimal()`
+(`Decimal(format(value.normalize(), "f"))`), which strips formatting
+differences (`Decimal("2.50")` -> `Decimal("2.5")`) without producing
+`Decimal.normalize()`'s exponential form for a round number
+(`Decimal("100")` alone would normalize to `Decimal("1E+2")`); `rules=""`/
+`specifier=""` become `None`. Python's own `MarketIdentity.__eq__`
+already treated `Decimal("2.50")` and `Decimal("2.5")` as equal
+(`Decimal.__eq__` compares value, not formatting) -- but every SQL
+identity/dedupe key stores and compares `str(line)` as plain text, where
+"2.50" and "2.5" would not have matched. Canonicalizing at construction
+closes that gap before TOTALS/HANDICAP (the first market types where
+`line` is actually populated) makes it a real, not just theoretical, bug.
 
 ---
 
@@ -606,8 +642,9 @@ migrate(connection):
 database runs every migration, an up-to-date one runs none, and an older
 persistent file (e.g. `signals`/`movements` from before they had
 `market_rules`/`market_specifier`, or before `competitions`/
-`source_competition_mappings`/`market_phase`/`events.competition_id`
-existed) is upgraded in place without losing what it already had. Once
+`source_competition_mappings`/`market_phase`/`events.competition_id`/
+`collector_runs.provider_id`/`parser_version`/`source_payload` existed)
+is upgraded in place without losing what it already had. Once
 shipped, a migration's SQL is immutable -- a database that recorded it
 as applied never runs it again, so a correction is a new migration, not
 an edit to an old one.
@@ -634,7 +671,10 @@ odds_snapshots           unique-indexed on (event, bookmaker, full
                           MarketIdentity including market_phase,
                           outcome, observed_at); re-saving an identical
                           snapshot is a no-op rather than a duplicate row
-collector_runs
+collector_runs            includes provider_id/parser_version/
+                          source_payload (see CollectorRun/Collector
+                          Contract above) -- the exact response this
+                          run's records were parsed from, once per run
 raw_payloads              every ingested RawEventOdds, accepted or
                           rejected, with its rejection reason, linked to
                           its CollectorRun
@@ -933,6 +973,37 @@ Protocol, and preserving the original source payload for live sources
 alongside the parsed `RawEventOdds`. None of these are correctness bugs;
 they are future-growth prep, deliberately left until there are enough
 real market types and sources to know what actually needs generalizing.
+
+**Resolved:** a fifth round, picking up the four items the previous round
+deliberately deferred. `MarketIdentity.line`/`rules`/`specifier` are now
+canonicalized on construction (`canonical_decimal()`, `rules=""`/
+`specifier=""` -> `None`) -- see MarketIdentity above; Python's own
+`__eq__` already treated differently-formatted equal Decimals as equal,
+but every SQL identity/dedupe key compared their `str()` form as plain
+text, where they would not have matched. `run_ingestion()` no longer
+hands `run_detection` every event `FixtureCatalog.list_events()` has ever
+created; each `OddsIngestionService` now reports its own `touched_events`
+(every event a record actually matched against this run), unioned across
+the cycle's polls -- a long-finished match simply stops being handed to
+detection once nothing reports on it anymore, rather than being
+evaluated and reported stale forever with no data source ever saying the
+match is over. `SignalType`/`SignalIdentity` moved into a new
+`models/signal.py`, closing `storage.signal_repository`'s inverted
+dependency on the Analysis Layer for its own persisted-signal identity
+concept -- `SurebetCandidate`/`ValueGapCandidate` stay in
+`analysis.opportunity_detection` (detection-layer outputs, not shared
+domain types), and `signal_repository`'s `from_surebet`/`from_value_gap`
+adapters still import them, a normal one-directional "convert this into
+what storage needs" dependency, not the same problem. The `EventResolver`
+Protocol (see Matching Layer above) now names the shape
+`OddsIngestionService` actually depends on. Collectors now return
+`CollectionResult` (`source_payload` plus the parsed records) instead of
+a bare list -- see Collector Contract above; `CollectorRun` gained
+`provider_id`/`parser_version`/`source_payload` (migration 6) so the
+exact response a run's records were parsed from survives once per run,
+alongside the already-persisted per-record `RawEventOdds` in
+`raw_payloads` -- a parser bug can now be fixed and the original
+historical response reprocessed.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)

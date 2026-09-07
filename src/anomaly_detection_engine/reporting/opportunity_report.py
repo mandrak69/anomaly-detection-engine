@@ -4,13 +4,12 @@ from decimal import Decimal
 
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.opportunity_detection import (
-    SUREBET,
-    VALUE_GAP,
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import MarketIdentity
+from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
 __all__ = [

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from anomaly_detection_engine.collectors.base import OddsCollector
+from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
 from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
@@ -176,7 +176,11 @@ class TheOddsApiCollector(OddsCollector):
     def provider_id(self) -> str:
         return "the-odds-api"
 
-    def collect(self) -> list[RawEventOdds]:
+    @property
+    def parser_version(self) -> str:
+        return "1"
+
+    def collect(self) -> CollectionResult:
         url = (
             f"{self._base_url}/sports/{self._sport_key}/odds/"
             f"?apiKey={self._api_key}&regions={self._regions}"
@@ -198,7 +202,8 @@ class TheOddsApiCollector(OddsCollector):
             extra={"sport_key": self._sport_key, "raw_records_produced": len(result)},
         )
 
-        return result
+        source_payload = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        return CollectionResult(source_payload=source_payload, records=result)
 
     @staticmethod
     def _http_get(url: str) -> bytes:

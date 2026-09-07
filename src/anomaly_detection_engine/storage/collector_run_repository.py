@@ -22,9 +22,12 @@ class CollectorRunRepository:
                 records_rejected,
                 collector_version,
                 error_type,
-                error_message
+                error_message,
+                provider_id,
+                parser_version,
+                source_payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.id,
@@ -38,6 +41,9 @@ class CollectorRunRepository:
                 run.collector_version,
                 run.error_type,
                 run.error_message,
+                run.provider_id,
+                run.parser_version,
+                run.source_payload,
             ),
         )
         self._connection.commit()
@@ -64,4 +70,7 @@ class CollectorRunRepository:
             collector_version=row["collector_version"],
             error_type=row["error_type"],
             error_message=row["error_message"],
+            provider_id=row["provider_id"],
+            parser_version=row["parser_version"],
+            source_payload=row["source_payload"],
         )

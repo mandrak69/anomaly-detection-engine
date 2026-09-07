@@ -8,14 +8,8 @@ from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validat
 from anomaly_detection_engine.analysis.outlier_detector import detect_outliers
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import MarketIdentity
+from anomaly_detection_engine.models.signal import SignalIdentity
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
-
-# Shared signal-type labels -- defined here (not in reporting/ or storage/)
-# since both depend on this module for the candidate types themselves;
-# reporting.opportunity_report and storage.signal_repository both import
-# these rather than defining their own copies.
-SUREBET = "SUREBET"
-VALUE_GAP = "VALUE_GAP"
 
 
 @dataclass(frozen=True)
@@ -56,21 +50,6 @@ class ValueGapCandidate:
     bookmaker: str
     odds: Decimal
     deviation_percent: Decimal
-
-
-@dataclass(frozen=True)
-class SignalIdentity:
-    """The same (event, market, outcome) identity a persisted signal is
-    keyed on (see storage.signal_repository.SignalCandidate) -- used here
-    to describe exactly what a detection sweep was actually able to
-    evaluate, at the same granularity signals themselves are resolved
-    at. outcome is None for SUREBET (its identity has no per-outcome
-    granularity: one arbitrage covers all three outcomes together).
-    """
-
-    event_id: str
-    market: MarketIdentity
-    outcome: str | None
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,18 @@ class CollectorRun:
     collector_version: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    # provider_id/parser_version identify the real-world data provider
+    # and the version of its parsing logic (see collectors.base.
+    # OddsCollector), and source_payload is the exact source response
+    # this run's records were parsed from (see
+    # collectors.base.CollectionResult) -- together, what a future
+    # reprocessing script needs to know which parser to re-run against
+    # which historical payload after a parser bug fix. All three are
+    # None for a run that never reached a successful collect() (e.g.
+    # the collector itself raised).
+    provider_id: str | None = None
+    parser_version: str | None = None
+    source_payload: str | None = None
 
     @property
     def duration_seconds(self) -> float:

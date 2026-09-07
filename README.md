@@ -232,6 +232,20 @@ value -- every collector must explicitly say which phase it produces
 `PRE_MATCH`; `MozzartFileCollector` reads mozzartbet.com's `/live/matches`
 endpoint, genuinely live data, and uses `LIVE_MARKET` instead).
 
+`line`/`rules`/`specifier` are canonicalized on construction
+(`__post_init__`), not by every caller remembering to: `line` goes
+through `canonical_decimal()`, which strips formatting differences
+(`Decimal("2.50")` -> `Decimal("2.5")`) without ever producing
+`Decimal.normalize()`'s exponential form for a round number
+(`Decimal("100")` would otherwise normalize to `Decimal("1E+2")`, useless
+as a betting line's text form); `rules=""`/`specifier=""` are normalized
+to `None`. Without this, two sources reporting the identical TOTALS/
+HANDICAP line under different precision would still compare equal under
+Python's own `MarketIdentity.__eq__` (`Decimal.__eq__` already compares
+value, not formatting) but *not* under any SQL identity/dedupe key, which
+stores and compares `str(line)` as plain text -- "2.50" and "2.5" would
+silently fail to match/dedupe against each other at the storage layer.
+
 ### RawEventOdds
 
 Common source-independent representation produced by collectors. Includes
@@ -281,6 +295,9 @@ records_received
 records_accepted
 records_rejected
 collector_version
+provider_id
+parser_version
+source_payload
 errors
 ```
 
@@ -352,7 +369,7 @@ TEMPORAL
 
 The project defines a generic `OddsCollector` interface.
 
-Each collector transforms source-specific data into the internal `RawEventOdds` contract.
+Each collector transforms source-specific data into the internal `RawEventOdds` contract, returned from `collect()` as a `CollectionResult(source_payload, records)` -- `source_payload` is the exact response (decoded to text) those records were parsed from, `None` only when there was genuinely nothing to collect this cycle (a manual-capture drop file not there yet), never as a stand-in for a parse failure (which still raises). Every collector also exposes `source`/`provider_id`/`parser_version` (see Matching below for `provider_id`); `OddsIngestionService` persists `source_payload` plus all three onto the `CollectorRun` (see CollectorRun below) once per run, alongside the parsed `RawEventOdds` already persisted per-record in `raw_payloads` -- together, what a parser bug fix needs to reprocess a run's exact historical response.
 
 Current implementations:
 
@@ -1348,6 +1365,10 @@ rate limiting
 [x] provider_id (the real-world data provider) separated from OddsCollector.source/collector_id (one collector instance's label) -- FixtureCatalog now caches team/competition mappings per provider_id, so an auto and a manual collector for the same provider share one cache
 [x] FixtureCatalog concurrency safety: match()'s whole resolve-or-create cycle runs inside one BEGIN IMMEDIATE transaction, so concurrent watch_capture.py processes serialize on SQLite's writer lock instead of racing the same "does this exist yet" check
 [x] Event.competition_id (stable FK into competitions) added -- event identity is now keyed on this id instead of the league display string, so a future competition rename can't silently detach existing events from later matches
+[x] MarketIdentity.line/rules/specifier canonicalized on construction (canonical_decimal() strips formatting differences like "2.50" vs "2.5"; rules=""/specifier="" normalized to None) so Python equality and every SQL identity/dedupe key agree, ahead of adding TOTALS/HANDICAP
+[x] run_ingestion() scoped to events actually touched this cycle (OddsIngestionService.touched_events) instead of FixtureCatalog.list_events() (every event ever created) -- a long-finished match stops being evaluated once nothing reports on it anymore, instead of being permanently re-checked and permanently "stale"
+[x] SignalType/SignalIdentity extracted into models/signal.py, closing storage.signal_repository's inverted dependency on analysis.opportunity_detection; EventResolver Protocol added (matching/event_matcher.py) so OddsIngestionService type-hints what it actually needs instead of a concrete EventMatcher it is normally not given
+[x] Collectors now return CollectionResult (source_payload plus the parsed records, not just the records) -- the exact source response is persisted once per CollectorRun (provider_id/parser_version/source_payload columns) alongside the already-persisted per-record RawEventOdds, so a parser bug can be fixed and historical data reprocessed
 ```
 
 ---
@@ -1394,21 +1415,6 @@ Everything above is done. Genuinely open next:
     -- worth doing before this becomes a generic (non-sports-odds)
     anomaly engine, not before
 [ ] Pyright (or mypy) in CI alongside ruff, now that both are wired in
-[ ] Event lifecycle (completed/expired) -- run_ingestion's
-    list_events() returns every event ever seen, so a long-finished
-    match's ACTIVE signal is never confirmed RESOLVED, just never
-    re-evaluated
-[ ] Canonicalize Decimal line representation (e.g. Decimal("2.5") vs a
-    "2.50"-shaped value) and normalize rules=""/specifier="" to None
-    consistently, before adding TOTALS/HANDICAP
-[ ] Extract SignalType/SignalIdentity into models/signal.py (closes
-    storage.signal_repository's current inverted dependency on
-    analysis.opportunity_detection) + an EventResolver Protocol
-    (OddsIngestionService type-hints matcher: EventMatcher but is
-    actually passed a FixtureCatalog)
-[ ] Preserve the original source payload (bytes/JSON), not just the
-    parsed RawEventOdds, for live sources -- manual captures already
-    keep a history/ folder; the-odds-api's live responses don't
 ```
 
 ---
@@ -1590,6 +1596,45 @@ framework" are planned before then either -- the current problem is far
 more valuably solved through an accurate domain model and reliable
 ingestion/matching than through infrastructure this project doesn't yet
 have the real multi-market, multi-source pressure to actually need.
+
+**Done:** a fifth round, picking up the four items the previous round
+deliberately deferred as "future-growth prep, not now." `MarketIdentity.
+line`/`rules`/`specifier` are now canonicalized on construction
+(`canonical_decimal()`, plus normalizing `rules=""`/`specifier=""` to
+`None`) -- `Decimal("2.50")` and `Decimal("2.5")` already compared equal
+in Python, but their differently-formatted `str()` forms did not compare
+equal in SQL, so two sources reporting the identical TOTALS/HANDICAP line
+under different precision would have silently failed to dedupe/match at
+the storage layer even though the domain objects considered them the
+same market. `run_ingestion()` no longer hands `run_detection` every
+event `FixtureCatalog` has ever created (`list_events()`); each
+`OddsIngestionService` now reports its own `touched_events` (every event
+a record actually matched against this run), and `run_ingestion` unions
+those across the cycle's polls -- a long-finished match simply stops
+being handed to detection once nothing reports on it anymore, instead of
+being evaluated and reported "stale" forever with no data source ever
+telling this project the match is actually over. `SignalType`/
+`SignalIdentity` moved out of `analysis.opportunity_detection` into a new
+`models/signal.py`, closing `storage.signal_repository`'s inverted
+dependency on the analysis layer for its own persisted-signal identity
+concept; `SurebetCandidate`/`ValueGapCandidate` stay in `analysis.
+opportunity_detection` (genuine detection-layer outputs, not shared
+domain types) and `signal_repository`'s `from_surebet`/`from_value_gap`
+adapters still import them, which is a normal, one-directional "convert
+this into what storage needs" dependency, not the same problem. An
+`EventResolver` Protocol (`matching/event_matcher.py`) now names the
+`match(...) -> EventMatchResult` shape `OddsIngestionService` actually
+depends on -- it was type-hinted `matcher: EventMatcher` while every real
+caller passes a `FixtureCatalog`, which only ever duck-typed the same
+shape. Finally, collectors now return `CollectionResult` (`source_payload`
+plus the parsed records they came from, not just the records) instead of
+a bare list; `CollectorRun` gained `provider_id`/`parser_version`/
+`source_payload` columns (migration 6) so the exact response a run's
+records were parsed from survives once per run, alongside the
+already-persisted per-record `RawEventOdds` in `raw_payloads` -- a parser
+bug can now be fixed and the original historical response reprocessed,
+where before only what the buggy parser produced at the time would have
+survived.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

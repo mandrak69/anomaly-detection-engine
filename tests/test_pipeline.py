@@ -13,7 +13,9 @@ from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsAp
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import DEFAULT_MARKET
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.runtime import build_runtime
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
+from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.signal_repository import SignalRepository
@@ -138,6 +140,37 @@ def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
     collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 2
+
+
+def test_run_ingestion_returns_only_events_touched_this_cycle(monkeypatch):
+    # run_ingestion() must not return catalog.list_events() (every event
+    # the shared FixtureCatalog has ever created) -- an event from a
+    # long-past run that today's collectors never mention again would
+    # otherwise be handed to run_detection forever, permanently
+    # evaluated and permanently "stale". Only what this cycle's polls
+    # actually touched should come back.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    stale_match = FixtureCatalog(runtime.connection, provider_id="old-source").match(
+        sport="football",
+        league="Old League",
+        home_team_raw="Old Home",
+        away_team_raw="Old Away",
+        start_time=datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+    )
+    stale_event_id = stale_match.event.id
+
+    events = pipeline.run_ingestion(runtime, cfg)
+
+    event_ids = {event.id for event in events}
+    assert stale_event_id not in event_ids
+    # Both demo JSON polls report the same two real matches under
+    # several spellings -- aliasing/fuzzy matching collapses them to
+    # exactly two canonical events, both of which this cycle did touch.
+    assert len(events) == 2
 
 
 def _repositories():

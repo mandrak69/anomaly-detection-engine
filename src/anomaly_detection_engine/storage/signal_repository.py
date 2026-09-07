@@ -8,9 +8,6 @@ from sqlite3 import Connection, Row
 from uuid import uuid4
 
 from anomaly_detection_engine.analysis.opportunity_detection import (
-    SUREBET,
-    VALUE_GAP,
-    SignalIdentity,
     SurebetCandidate,
     ValueGapCandidate,
 )
@@ -20,6 +17,7 @@ from anomaly_detection_engine.models.market import (
     MarketPhase,
     MarketType,
 )
+from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
 
 logger = logging.getLogger(__name__)
 

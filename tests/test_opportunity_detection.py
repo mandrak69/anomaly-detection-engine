@@ -4,7 +4,6 @@ from decimal import Decimal
 
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.opportunity_detection import (
-    SignalIdentity,
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
@@ -16,6 +15,7 @@ from anomaly_detection_engine.models.market import (
     MarketType,
 )
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.models.signal import SignalIdentity
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 

@@ -3,8 +3,9 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from anomaly_detection_engine.collectors.base import OddsCollector
-from anomaly_detection_engine.matching.event_matcher import EventMatcher
+from anomaly_detection_engine.matching.event_matcher import EventResolver
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
+from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
@@ -30,7 +31,7 @@ class OddsIngestionService:
     def __init__(
         self,
         collector: OddsCollector,
-        matcher: EventMatcher,
+        matcher: EventResolver,
         odds_repository: OddsRepository,
         collector_run_repository: CollectorRunRepository,
         raw_payload_repository: RawPayloadRepository,
@@ -44,6 +45,24 @@ class OddsIngestionService:
         self._raw_payload_repository = raw_payload_repository
         self._collector_version = collector_version
         self._metrics = metrics
+        self._touched_events: dict[str, Event] = {}
+
+    @property
+    def touched_events(self) -> list[Event]:
+        """Every event this run actually resolved a raw record against
+        -- not every event the matcher/FixtureCatalog has ever seen.
+
+        Deliberately narrower than "every event in the catalog": a
+        persistent FixtureCatalog remembers every event it has ever
+        created, including matches that finished months ago and will
+        never be polled again, and nothing about this project's data
+        sources says when a match is over. Scoping the caller's working
+        set to "events actually touched this cycle" instead means a
+        long-finished match simply stops being re-evaluated once
+        collectors stop reporting anything for it, rather than being
+        evaluated forever and permanently flagged stale.
+        """
+        return list(self._touched_events.values())
 
     def run(self) -> CollectorRun:
         run_id = str(uuid4())
@@ -53,7 +72,7 @@ class OddsIngestionService:
         logger.info("ingestion.run.started", extra={"run_id": run_id, "source": source})
 
         try:
-            raw_events = self._collector.collect()
+            collection = self._collector.collect()
         except Exception as exc:
             logger.error(
                 "ingestion.collector.failed",
@@ -74,8 +93,14 @@ class OddsIngestionService:
                 rejection_reasons=[],
                 error_type=type(exc).__name__,
                 error_message=str(exc),
+                # No CollectionResult -- collect() itself raised, so
+                # there is no source_payload to keep (it was never even
+                # fetched/read), but provider_id/parser_version are
+                # static collector properties, known regardless.
+                source_payload=None,
             )
 
+        raw_events = collection.records
         records_received = 0
         records_accepted = 0
         records_rejected = 0
@@ -171,6 +196,7 @@ class OddsIngestionService:
             rejection_reasons=rejection_reasons,
             error_type=type(unexpected_error).__name__ if unexpected_error else None,
             error_message=str(unexpected_error) if unexpected_error else None,
+            source_payload=collection.source_payload,
         )
 
     def _ingest_one(self, raw: RawEventOdds) -> tuple[bool, str | None]:
@@ -199,6 +225,8 @@ class OddsIngestionService:
             )
             if match.event is None:
                 return False, f"identity: {match.reason}"
+
+            self._touched_events[match.event.id] = match.event
 
             # Prefer the source's own stable identifier (raw.source_id,
             # e.g. the-odds-api's "bet365") over deriving one from the
@@ -269,6 +297,7 @@ class OddsIngestionService:
         records_accepted: int,
         records_rejected: int,
         rejection_reasons: list[str],
+        source_payload: str | None,
         error_type: str | None = None,
         error_message: str | None = None,
     ) -> CollectorRun:
@@ -284,6 +313,9 @@ class OddsIngestionService:
             collector_version=self._collector_version,
             error_type=error_type,
             error_message=error_message,
+            provider_id=self._collector.provider_id,
+            parser_version=self._collector.parser_version,
+            source_payload=source_payload,
         )
         self._collector_run_repository.save(run)
 

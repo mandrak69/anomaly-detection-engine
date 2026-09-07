@@ -67,8 +67,10 @@ def test_maps_a_clean_match_into_raw_event_odds(tmp_path):
     drop_capture(tmp_path, [football_match()])
 
     collector = MozzartFileCollector(tmp_path)
-    result = collector.collect()
+    collection = collector.collect()
+    result = collection.records
 
+    assert collection.source_payload is not None
     assert len(result) == 1
     raw = result[0]
     assert raw.source == "Mozzart"
@@ -86,7 +88,9 @@ def test_maps_a_clean_match_into_raw_event_odds(tmp_path):
 
 def test_returns_empty_when_no_capture_is_waiting(tmp_path):
     collector = MozzartFileCollector(tmp_path)
-    assert collector.collect() == []
+    collection = collector.collect()
+    assert collection.records == []
+    assert collection.source_payload is None
 
 
 def test_archives_the_capture_after_reading_it(tmp_path):
@@ -107,10 +111,10 @@ def test_second_capture_after_first_is_archived_separately(tmp_path):
     collector = MozzartFileCollector(tmp_path)
 
     drop_capture(tmp_path, [football_match(home="First")])
-    first = collector.collect()
+    first = collector.collect().records
 
     drop_capture(tmp_path, [football_match(home="Second")])
-    second = collector.collect()
+    second = collector.collect().records
 
     assert first[0].home_team == "First"
     assert second[0].home_team == "Second"
@@ -168,7 +172,7 @@ def test_skips_matches_missing_the_final_result_group(tmp_path):
     drop_capture(tmp_path, [football_match(include_final_result=False)])
 
     collector = MozzartFileCollector(tmp_path)
-    assert collector.collect() == []
+    assert collector.collect().records == []
 
 
 def test_skips_deactivated_or_incomplete_outcomes(tmp_path):
@@ -183,21 +187,21 @@ def test_skips_deactivated_or_incomplete_outcomes(tmp_path):
     drop_capture(tmp_path, [incomplete])
 
     collector = MozzartFileCollector(tmp_path)
-    assert collector.collect() == []
+    assert collector.collect().records == []
 
 
 def test_skips_non_football_matches(tmp_path):
     drop_capture(tmp_path, [football_match(sport_name="Košarka")])
 
     collector = MozzartFileCollector(tmp_path)
-    assert collector.collect() == []
+    assert collector.collect().records == []
 
 
 def test_custom_filename(tmp_path):
     drop_capture(tmp_path, [football_match()], filename="mozzart_snapshot.json")
 
     collector = MozzartFileCollector(tmp_path, filename="mozzart_snapshot.json")
-    result = collector.collect()
+    result = collector.collect().records
 
     assert len(result) == 1
     assert not (tmp_path / "mozzart_snapshot.json").exists()
@@ -219,3 +223,7 @@ def test_provider_id_is_stable_across_capture_directories(tmp_path):
 
     assert MozzartFileCollector(tmp_path).provider_id == "mozzart"
     assert MozzartFileCollector(other_dir).provider_id == "mozzart"
+
+
+def test_parser_version_defaults_to_1(tmp_path):
+    assert MozzartFileCollector(tmp_path).parser_version == "1"

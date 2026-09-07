@@ -11,8 +11,10 @@ def test_json_collector_reads_sample_data():
 
     collector = JsonOddsCollector(sample_path)
 
-    result = collector.collect()
+    collection = collector.collect()
+    result = collection.records
 
+    assert collection.source_payload == sample_path.read_text(encoding="utf-8")
     assert len(result) == 6
 
     first = result[0]
@@ -47,3 +49,4 @@ def test_two_demo_polls_share_one_provider_id():
     assert first_poll.provider_id == "json-demo"
     assert second_poll.provider_id == "json-demo"
     assert first_poll.source != second_poll.source
+    assert first_poll.parser_version == "1"

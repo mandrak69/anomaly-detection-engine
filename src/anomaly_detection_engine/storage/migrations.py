@@ -483,12 +483,37 @@ def _migration_5_event_competition_id(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_6_collector_run_provenance(connection: sqlite3.Connection) -> None:
+    """Adds provider_id/parser_version/source_payload to collector_runs,
+    so a run's exact source response survives alongside the RawEventOdds
+    already stored per-record in raw_payloads (see
+    storage.raw_payload_repository) -- without the original payload, a
+    parser bug can only be fixed going forward; with it, a fixed parser
+    can be re-run against exactly what a source returned historically.
+
+    One row per CollectorRun, not per raw_payloads row: source_payload
+    is the one response a whole run's records were parsed from (a
+    the-odds-api poll returns many bookmakers across many events in one
+    response), so storing it once per run avoids repeating the same
+    payload once per record it produced.
+
+    All three columns are nullable and left unbackfilled for existing
+    rows -- no collector captured a raw payload before this migration,
+    so there is nothing to recover, the same reasoning migration 4's
+    market_phase backfill did not need to apply here.
+    """
+    _add_column_if_missing(connection, "collector_runs", "provider_id", "TEXT")
+    _add_column_if_missing(connection, "collector_runs", "parser_version", "TEXT")
+    _add_column_if_missing(connection, "collector_runs", "source_payload", "TEXT")
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
     _migration_3_competitions,
     _migration_4_market_phase,
     _migration_5_event_competition_id,
+    _migration_6_collector_run_provenance,
 ]
 
 

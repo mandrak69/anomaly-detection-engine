@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from anomaly_detection_engine.collectors.base import OddsCollector
+from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 logger = logging.getLogger(__name__)
@@ -33,17 +33,22 @@ class ManualCaptureCollector(OddsCollector):
     rather than duplicating the drop-file/archive mechanics.
 
     Each collect() call:
-      - returns [] if the drop file isn't there yet (nothing new this
-        cycle -- not an error);
+      - returns CollectionResult(source_payload=None, records=[]) if the
+        drop file isn't there yet (nothing new this cycle -- not an
+        error);
       - otherwise reads it, calls `parse(raw_text, observed_at)` where
         observed_at is the file's own modification time (when the
         capture actually happened, not whenever this happens to run),
         then archives the file into `capture_dir/history/` under a
         timestamped + unique-suffixed name so the drop slot is free for
-        the next capture;
+        the next capture, and returns CollectionResult(source_payload=
+        raw_text, records=parse's result) -- the exact bytes just read,
+        alongside what they parsed into;
       - a parse failure leaves the file in place (not archived) so it
         stays visible to inspect instead of silently vanishing into
-        history.
+        history, and still raises/propagates rather than being folded
+        into CollectionResult -- a payload that failed to parse was not
+        successfully "collected".
     """
 
     def __init__(
@@ -53,6 +58,7 @@ class ManualCaptureCollector(OddsCollector):
         parse: ParseFn,
         source_label: str,
         provider_id: str,
+        parser_version: str = "1",
         filename: str = "capture.json",
         history_dirname: str = "history",
     ) -> None:
@@ -60,6 +66,7 @@ class ManualCaptureCollector(OddsCollector):
         self._parse = parse
         self._source_label = source_label
         self._provider_id = provider_id
+        self._parser_version = parser_version
         self._filename = filename
         self._history_dir = capture_dir / history_dirname
 
@@ -71,14 +78,18 @@ class ManualCaptureCollector(OddsCollector):
     def provider_id(self) -> str:
         return self._provider_id
 
-    def collect(self) -> list[RawEventOdds]:
+    @property
+    def parser_version(self) -> str:
+        return self._parser_version
+
+    def collect(self) -> CollectionResult:
         drop_path = self.capture_dir / self._filename
         if not drop_path.exists():
             logger.info(
                 "manual_capture_collector.no_new_capture",
                 extra={"path": str(drop_path), "source": self._source_label},
             )
-            return []
+            return CollectionResult(source_payload=None, records=[])
 
         observed_at = datetime.fromtimestamp(drop_path.stat().st_mtime, tz=UTC)
         raw_text = drop_path.read_text(encoding="utf-8")
@@ -97,7 +108,7 @@ class ManualCaptureCollector(OddsCollector):
             },
         )
 
-        return result
+        return CollectionResult(source_payload=raw_text, records=result)
 
     def _archive(self, path: Path, observed_at: datetime) -> Path:
         # Timestamp alone isn't a reliable uniqueness guarantee -- captures

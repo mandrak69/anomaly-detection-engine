@@ -2,7 +2,7 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal
 
-from anomaly_detection_engine.collectors.base import OddsCollector
+from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.collector_run import CollectorRunStatus
@@ -38,10 +38,14 @@ class StubCollector(OddsCollector):
     def provider_id(self) -> str:
         return "stub"
 
-    def collect(self):
+    @property
+    def parser_version(self) -> str:
+        return "1"
+
+    def collect(self) -> CollectionResult:
         if self._error is not None:
             raise self._error
-        return self._raw_events
+        return CollectionResult(source_payload="stub-payload", records=self._raw_events)
 
 
 def build_raw_event(**overrides) -> RawEventOdds:
@@ -130,6 +134,36 @@ def test_successful_run_persists_snapshots():
     assert snapshots[0].bookmaker.name == "Mozzart"
 
 
+def test_successful_run_persists_provenance_metadata_on_the_collector_run():
+    # provider_id/parser_version/source_payload let a future reprocessing
+    # script know which parser to re-run against exactly which historical
+    # response -- see CollectorRun/CollectionResult.
+    collector = StubCollector(raw_events=[build_raw_event()])
+    service, _, collector_run_repository, _ = build_service(collector)
+
+    run = service.run()
+
+    stored = collector_run_repository.find_by_id(run.id)
+    assert stored.provider_id == "stub"
+    assert stored.parser_version == "1"
+    assert stored.source_payload == "stub-payload"
+
+
+def test_collector_failure_leaves_source_payload_unset():
+    collector = StubCollector(error=ValueError("network exploded"))
+    service, _, collector_run_repository, _ = build_service(collector)
+
+    run = service.run()
+
+    stored = collector_run_repository.find_by_id(run.id)
+    assert stored.status == CollectorRunStatus.FAILED
+    assert stored.source_payload is None
+    # provider_id/parser_version are static collector properties, known
+    # even when collect() itself raised before producing anything.
+    assert stored.provider_id == "stub"
+    assert stored.parser_version == "1"
+
+
 def test_stable_source_id_is_preferred_over_a_name_derived_id():
     # A source that provides its own stable identifier (e.g.
     # the-odds-api's "bet365") must have that used as Bookmaker.id, not
@@ -187,6 +221,44 @@ def test_partial_run_when_event_cannot_be_matched():
     raw_payloads = raw_payload_repository.find_by_collector_run(run.id)
     rejected = next(p for p in raw_payloads if not p.accepted)
     assert rejected.rejection_reason.startswith("identity:")
+
+
+def test_touched_events_reports_only_events_actually_matched():
+    # touched_events is what run_ingestion() uses (see pipeline.py) to
+    # scope analysis instead of every event a persistent FixtureCatalog
+    # has ever created -- a record that never resolves an event must not
+    # show up here, the same as it never gets a snapshot saved.
+    valid = build_raw_event()
+    unmatched = build_raw_event(home_team="Totally Unknown Team FC")
+
+    collector = StubCollector(raw_events=[valid, unmatched])
+    service, _, _, _ = build_service(collector)
+
+    service.run()
+
+    assert [event.id for event in service.touched_events] == ["event-001"]
+
+
+def test_touched_events_deduplicates_repeated_records_for_the_same_event():
+    collector = StubCollector(raw_events=[build_raw_event(), build_raw_event(source="Soccer")])
+    service, _, _, _ = build_service(collector)
+
+    service.run()
+
+    assert len(service.touched_events) == 1
+    assert service.touched_events[0].id == "event-001"
+
+
+def test_touched_events_is_empty_before_run_and_when_nothing_matches():
+    unmatched = build_raw_event(home_team="Totally Unknown Team FC")
+    collector = StubCollector(raw_events=[unmatched])
+    service, _, _, _ = build_service(collector)
+
+    assert service.touched_events == []
+
+    service.run()
+
+    assert service.touched_events == []
 
 
 def test_all_records_rejected_returns_failed_status():

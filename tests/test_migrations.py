@@ -8,6 +8,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_3_competitions,
     _migration_4_market_phase,
     _migration_5_event_competition_id,
+    _migration_6_collector_run_provenance,
 )
 
 
@@ -280,3 +281,44 @@ def test_migration_5_is_safe_to_re_run():
     assert "competition_id" in columns
     row = connection.execute("SELECT * FROM events WHERE id = 'e1'").fetchone()
     assert row["competition_id"] is not None
+
+
+def test_migration_6_adds_collector_run_provenance_columns():
+    connection = make_connection()
+    _migration_1_initial_schema(connection)
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-1", "old-source", "2026-01-01T00:00:00+00:00",
+         "2026-01-01T00:00:01+00:00", "success", 1, 1, 0),
+    )
+    connection.commit()
+
+    initialize_database(connection)
+
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(collector_runs)")}
+    assert {"provider_id", "parser_version", "source_payload"} <= columns
+
+    # Pre-existing rows are left unbackfilled (nothing to recover) --
+    # not NOT NULL, so this must not raise, and stays NULL.
+    row = connection.execute(
+        "SELECT * FROM collector_runs WHERE id = 'run-1'"
+    ).fetchone()
+    assert row["provider_id"] is None
+    assert row["source_payload"] is None
+
+
+def test_migration_6_is_safe_to_re_run():
+    connection = make_connection()
+    _migration_1_initial_schema(connection)
+
+    _migration_6_collector_run_provenance(connection)
+    _migration_6_collector_run_provenance(connection)  # must not raise
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(collector_runs)")}
+    assert {"provider_id", "parser_version", "source_payload"} <= columns

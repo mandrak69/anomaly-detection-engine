@@ -5,9 +5,6 @@ from decimal import Decimal
 import pytest
 
 from anomaly_detection_engine.analysis.opportunity_detection import (
-    SUREBET,
-    VALUE_GAP,
-    SignalIdentity,
     SurebetCandidate,
     SurebetLeg,
     ValueGapCandidate,
@@ -19,6 +16,7 @@ from anomaly_detection_engine.models.market import (
     MarketPhase,
     MarketType,
 )
+from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.signal_repository import (
     ACTIVE,

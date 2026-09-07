@@ -5,8 +5,6 @@ from pathlib import Path
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.movement_detection import detect_movements
 from anomaly_detection_engine.analysis.opportunity_detection import (
-    SUREBET,
-    VALUE_GAP,
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
@@ -21,6 +19,7 @@ from anomaly_detection_engine.config import AppConfig
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import DEFAULT_MARKET, MarketIdentity
+from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP
 from anomaly_detection_engine.runtime import Runtime
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
@@ -156,15 +155,26 @@ def build_collectors(config: AppConfig) -> list[OddsCollector]:
 
 def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
     """Runs every configured collector's poll cycle and returns every
-    event known to the shared FixtureCatalog afterward, ready for
-    analysis -- the "collect -> validate -> match -> persist" half of the
-    pipeline, deliberately separate from analysis/reporting below.
+    event actually touched this cycle, ready for analysis -- the
+    "collect -> validate -> match -> persist" half of the pipeline,
+    deliberately separate from analysis/reporting below.
+
+    Deliberately not catalog.list_events() (every event the shared
+    FixtureCatalog has ever created, across every run this database has
+    ever seen): none of this project's sources say when a match is
+    over, so a long-finished event would otherwise be handed to
+    run_detection forever, always failing freshness and permanently
+    "stale" instead of simply falling out of consideration once nothing
+    reports on it anymore. Each OddsIngestionService.touched_events
+    reports only the events its own poll actually resolved a record
+    against; the union across every poll this cycle is this function's
+    return value.
     """
     collectors = build_collectors(config)
     sources = ", ".join(collector.source for collector in collectors)
     print(f"Sources: {sources} ({len(collectors)} poll(s))")
 
-    catalog: FixtureCatalog | None = None
+    touched: dict[str, Event] = {}
 
     for poll_number, collector in enumerate(collectors, start=1):
         # One FixtureCatalog per collector, scoped to that collector's
@@ -191,8 +201,10 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
             f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
             f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
         )
+        for event in service.touched_events:
+            touched[event.id] = event
 
-    return catalog.list_events() if catalog is not None else []
+    return list(touched.values())
 
 
 def demo_analysis_time(events: list[Event], odds_repository: OddsRepository) -> datetime:
