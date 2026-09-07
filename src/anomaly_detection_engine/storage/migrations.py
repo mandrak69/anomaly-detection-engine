@@ -194,22 +194,31 @@ def _migration_2_full_market_identity(connection: sqlite3.Connection) -> None:
     full MarketIdentity tuple but previously stopped at market_line. See
     the "Fix MarketIdentity propagation..." commit this mirrors.
 
-    Idempotent, not transactional: Python's sqlite3 module does not roll
-    back DDL (CREATE/ALTER/DROP) or PRAGMA statements the way it does
-    plain DML, even inside `with connection:` -- verified directly (a
-    CREATE TABLE/ALTER TABLE/PRAGMA survives an exception raised right
-    after it inside a `with connection:` block, unlike an INSERT in the
-    same position). True cross-statement atomicity for this kind of
-    migration isn't available without Python 3.12's `autocommit=False`,
-    which this project can't rely on (requires-python >=3.11). So instead
-    every step here is safe to re-run: _add_column_if_missing() only
-    ALTERs a column that isn't already there (a bare second ALTER TABLE
-    ADD COLUMN would raise "duplicate column"), and each index rebuild
-    already DROPs (IF EXISTS) immediately before recreating it, so a
-    retry after a crash between any two statements here -- including one
-    between this function finishing and migrate() recording the new
-    PRAGMA user_version below -- converges to the same end state rather
-    than erroring.
+    Idempotent, not transactional: Python's sqlite3 module (legacy
+    isolation_level-based transaction handling) only auto-opens an
+    implicit transaction before DML (INSERT/UPDATE/DELETE), never before
+    DDL (CREATE/ALTER/DROP) or PRAGMA -- so a bare execute() of one of
+    those runs in autocommit mode and survives a later rollback()/an
+    exception inside `with connection:`, even though SQLite itself can
+    genuinely roll back DDL -- verified directly (a CREATE TABLE/
+    ALTER TABLE/PRAGMA survives an exception raised right after it
+    inside a `with connection:` block, unlike an INSERT in the same
+    position). DDL *can* be made transactional with an explicit BEGIN
+    first (the same technique FixtureCatalog.match() uses for its own
+    writes) -- Python 3.12's `autocommit=False` is not actually required
+    for that. The real obstacle for *this* migration specifically is
+    that migration 1/3 use executescript(), which always commits any
+    pending transaction before running the script, so wrapping it in a
+    manual BEGIN would just get silently committed away before the
+    script even starts. So instead every step here is made safe to
+    re-run: _add_column_if_missing() only ALTERs a column that isn't
+    already there (a bare second ALTER TABLE ADD COLUMN would raise
+    "duplicate column"), and each index rebuild already DROPs
+    (IF EXISTS) immediately before recreating it, so a retry after a
+    crash between any two statements here -- including one between this
+    function finishing and migrate() recording the new PRAGMA
+    user_version below -- converges to the same end state rather than
+    erroring.
     """
     _add_column_if_missing(connection, "signals", "market_rules", "TEXT")
     _add_column_if_missing(connection, "signals", "market_specifier", "TEXT")
@@ -525,15 +534,19 @@ def migrate(connection: sqlite3.Connection) -> None:
     starts at 0, so every migration runs) or one already fully migrated
     (none do).
 
-    Not wrapped in a transaction: SQLite's DDL/PRAGMA statements are not
-    rolled back by Python's sqlite3 module the way plain DML is (a
-    portability constraint, not an oversight -- true DDL transactions
-    need Python 3.12's autocommit=False, and this project supports
-    >=3.11). If the process is interrupted between a migration finishing
-    and the PRAGMA user_version write just below landing, the next
-    startup re-runs that same migration -- which is exactly why every
-    migration must be idempotent (safe to apply twice), not merely
-    "wrapped in a transaction" that SQLite would not actually honor here.
+    Not wrapped in a transaction: Python's sqlite3 module only
+    auto-opens an implicit transaction before DML, never before DDL/
+    PRAGMA, so those run in autocommit mode by default and are not
+    rolled back the way plain INSERT/UPDATE/DELETE are (see
+    _migration_2_full_market_identity's docstring for the verified
+    details, including why an explicit BEGIN -- not actually Python
+    3.12's autocommit=False -- would fix this for individual execute()
+    calls, and why executescript() specifically defeats even that). If
+    the process is interrupted between a migration finishing and the
+    PRAGMA user_version write just below landing, the next startup
+    re-runs that same migration -- which is exactly why every migration
+    must be idempotent (safe to apply twice), not merely "wrapped in a
+    transaction" that would not actually cover DDL here anyway.
     """
     current_version = connection.execute("PRAGMA user_version").fetchone()[0]
 

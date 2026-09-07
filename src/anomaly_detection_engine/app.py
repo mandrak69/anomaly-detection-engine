@@ -11,7 +11,10 @@ def main() -> None:
     runtime = build_runtime(config)
 
     events = run_ingestion(runtime, config)
-    run_detection(runtime, events, config)
+    summary = run_detection(runtime, events, config)
+
+    print(f"Detection: {summary}")
+    print(f"Metrics: {runtime.metrics.snapshot()}")
 
 
 if __name__ == "__main__":

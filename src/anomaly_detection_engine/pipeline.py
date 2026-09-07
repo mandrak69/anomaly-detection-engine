@@ -5,6 +5,8 @@ from pathlib import Path
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
 from anomaly_detection_engine.analysis.movement_detection import detect_movements
 from anomaly_detection_engine.analysis.opportunity_detection import (
+    SurebetCandidate,
+    ValueGapCandidate,
     detect_surebet_candidates,
     detect_value_gap_candidates,
 )
@@ -24,11 +26,7 @@ from anomaly_detection_engine.runtime import Runtime
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
-from anomaly_detection_engine.storage.signal_repository import (
-    SignalRepository,
-    from_surebet,
-    from_value_gap,
-)
+from anomaly_detection_engine.storage.signal_repository import SignalCandidate, SignalRepository
 
 # Known variant spellings fed to every FixtureCatalog instance below --
 # harmless where irrelevant (e.g. for Mozzart's own Serbian team names),
@@ -232,6 +230,42 @@ def demo_analysis_time(events: list[Event], odds_repository: OddsRepository) -> 
     return max(all_quote_times) if all_quote_times else datetime.now(UTC)
 
 
+def from_surebet(candidate: SurebetCandidate) -> SignalCandidate:
+    """Adapts a detection-layer SurebetCandidate into the storage-layer
+    SignalCandidate SignalRepository.reconcile() actually needs. Lives
+    here, in the orchestration layer that already depends on both
+    analysis and storage, rather than in storage.signal_repository
+    itself -- storage has no business importing analysis.
+    opportunity_detection's candidate types just to convert them; that
+    dependency belongs to whoever is wiring detection into persistence.
+    """
+    return SignalCandidate(
+        signal_type=SUREBET,
+        event_id=candidate.event.id,
+        market=candidate.market,
+        outcome=None,
+        edge_percent=candidate.profit_percent,
+        details={
+            "legs": [
+                {"outcome": leg.outcome, "bookmaker": leg.bookmaker, "odds": str(leg.odds)}
+                for leg in candidate.legs
+            ]
+        },
+    )
+
+
+def from_value_gap(candidate: ValueGapCandidate) -> SignalCandidate:
+    """See from_surebet -- same adapter role for ValueGapCandidate."""
+    return SignalCandidate(
+        signal_type=VALUE_GAP,
+        event_id=candidate.event.id,
+        market=candidate.market,
+        outcome=candidate.outcome,
+        edge_percent=candidate.deviation_percent,
+        details={"bookmaker": candidate.bookmaker, "odds": str(candidate.odds)},
+    )
+
+
 def persist_detected_signals(
     events: list[Event],
     odds_repository: OddsRepository,
@@ -318,12 +352,17 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     persist observations -> detect anomalies -> persist signals ->
     expire stale signals.
 
-    Deliberately imports nothing from reporting.* and prints nothing
-    beyond a terse summary of what it did: a "worth telling a human"
-    threshold, and any rendering of a human-facing report, is a
-    presentation decision, not a detection fact -- see
-    reporting.console.print_reports for that, kept out of the core
-    pipeline on purpose so the core never depends on it.
+    Deliberately imports nothing from reporting.* and prints nothing at
+    all -- returns its summary dict for the caller to do with as it
+    likes (print it, log it, feed a future dashboard). Whether/how to
+    display anything, including this function's own terse summary, is a
+    presentation decision, not a detection fact; app.py's main() prints
+    it, but this function itself must stay usable by any caller that
+    only wants detection with no console output as a side effect (a
+    test, a future notification service, ...). See
+    reporting.console.print_reports for the full human-facing report,
+    kept out of the core pipeline on purpose so the core never depends
+    on it.
 
     Expiry is a separate step from detection, not folded into the same
     sweep: run_ingestion() already scopes `events` to what was actually
@@ -365,8 +404,5 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
         expired_at=now,
     )
     summary["signals_expired"] = len(expired_ids)
-
-    print(f"Detection: {summary}")
-    print(f"Metrics: {runtime.metrics.snapshot()}")
 
     return summary

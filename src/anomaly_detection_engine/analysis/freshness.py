@@ -8,6 +8,14 @@ from anomaly_detection_engine.models.odds import OddsSnapshot
 class FreshnessPolicy:
     max_snapshot_age: timedelta
     max_observation_spread: timedelta
+    # A snapshot's quote_time landing a few seconds ahead of analysis_time
+    # isn't data corruption -- it's ordinary clock skew between this
+    # process and a real provider's own clock. Only a skew *larger* than
+    # this counts as "snapshot-from-future"; unlike the two thresholds
+    # above (genuine per-deployment business decisions with no universal
+    # default), this is a technical tolerance most callers want the same
+    # sensible value for, so it defaults rather than being required.
+    allowed_future_skew: timedelta = timedelta(seconds=10)
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,12 @@ def validate_freshness(
     quote the source itself computed or cached hours earlier; a source
     that timestamps its own prices is telling us something age-relevant
     that a poll timestamp alone can't.
+
+    A quote_time up to policy.allowed_future_skew ahead of analysis_time
+    is tolerated, not rejected as "snapshot-from-future" -- a few
+    seconds of clock skew between this process and a real provider's own
+    clock is normal and not evidence of corrupted data. Only a skew
+    larger than that is treated as genuinely suspicious.
     """
     if not snapshots:
         return FreshnessResult(
@@ -48,7 +62,7 @@ def validate_freshness(
     for snapshot in snapshots:
         age = analysis_time - snapshot.quote_time
 
-        if age.total_seconds() < 0:
+        if age < -policy.allowed_future_skew:
             return FreshnessResult(
                 valid=False,
                 stale_sources=(),

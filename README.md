@@ -759,9 +759,20 @@ The engine uses a configurable `FreshnessPolicy`, for example:
 ```text
 maximum snapshot age
 maximum observation spread
+allowed future clock skew   default 10s -- see below
 ```
 
 Cross-source analysis must not compare stale or temporally incoherent observations.
+
+`allowed_future_skew` (default `timedelta(seconds=10)`) is a small
+tolerance for a snapshot's `quote_time` landing slightly ahead of
+`analysis_time` -- a few seconds of clock skew between this process and
+a real provider's own clock is normal, not evidence of corrupted data,
+so only a skew larger than this is rejected as `snapshot-from-future`.
+Unlike `max_snapshot_age`/`max_observation_spread` (genuine
+per-deployment business thresholds with no universal default), this is
+a technical tolerance most callers want the same sensible value for, so
+it defaults instead of being required.
 
 `validate_freshness` measures age against an explicit `analysis_time`
 parameter, required everywhere it's used (`detect_surebet_candidates`,
@@ -1061,21 +1072,28 @@ scratch/test database, but is no longer the architectural answer to a
 schema change.
 
 Each migration is idempotent, not wrapped in a transaction with its
-`PRAGMA user_version` bump -- verified directly that Python's sqlite3
-module does not roll back DDL (`CREATE`/`ALTER`/`DROP`) or `PRAGMA`
-statements the way it does plain DML, even inside `with connection:` (a
-`CREATE TABLE` survives an exception raised right after it in the same
-`with` block, unlike an `INSERT` in the same position). True
-cross-statement atomicity for this would need Python 3.12's
-`autocommit=False`, which this project can't rely on
-(`requires-python >=3.11`). So instead every migration is safe to re-run:
-`_add_column_if_missing()` only `ALTER`s a column that isn't already
-there (a bare second `ALTER TABLE ADD COLUMN` raises "duplicate column
-name"), and every index rebuild `DROP`s (`IF EXISTS`) immediately before
-recreating it -- a retry after a crash between any two statements,
-including one between a migration finishing and its `PRAGMA
-user_version` write landing, converges to the same end state rather than
-erroring.
+`PRAGMA user_version` bump -- verified directly: Python's sqlite3 module
+(legacy `isolation_level`-based transaction handling) only auto-opens an
+implicit transaction before DML (`INSERT`/`UPDATE`/`DELETE`), never
+before DDL (`CREATE`/`ALTER`/`DROP`) or `PRAGMA`, so a bare `execute()`
+of one of those runs in autocommit mode and survives a later
+`rollback()`/an exception inside `with connection:` (a `CREATE TABLE`
+survives an exception raised right after it in the same `with` block,
+unlike an `INSERT` in the same position), even though SQLite itself can
+genuinely roll back DDL. DDL *can* be made transactional with an
+explicit `BEGIN` first (the same technique `FixtureCatalog.match()` uses
+for its own writes) -- Python 3.12's `autocommit=False` is not actually
+required for that. The real obstacle here is that migrations 1 and 3 use
+`executescript()`, which always commits any pending transaction before
+running the script, so wrapping it in a manual `BEGIN` would just get
+silently committed away before the script even starts. So instead every
+migration is made safe to re-run: `_add_column_if_missing()` only
+`ALTER`s a column that isn't already there (a bare second `ALTER TABLE
+ADD COLUMN` raises "duplicate column name"), and every index rebuild
+`DROP`s (`IF EXISTS`) immediately before recreating it -- a retry after
+a crash between any two statements, including one between a migration
+finishing and its `PRAGMA user_version` write landing, converges to the
+same end state rather than erroring.
 
 `OddsRepository` supports operations such as:
 
@@ -1415,6 +1433,10 @@ rate limiting
 [x] Collectors now return CollectionResult (source_payload plus the parsed records, not just the records) -- the exact source response is persisted once per CollectorRun (provider_id/parser_version/source_payload columns) alongside the already-persisted per-record RawEventOdds, so a parser bug can be fixed and historical data reprocessed
 [x] Fixed detect_surebet_candidates adding an event to evaluated_keys before checking all three outcomes were priced -- a surebet missing one leg this sweep could previously be incorrectly resolved instead of correctly staying "couldn't tell"
 [x] SignalRepository.expire_active_signals + EXPIRED status: an event that stops being touched (see touched_events) can never be resolved by reconcile() since it's never evaluated again -- this separate lifecycle step marks its ACTIVE signals EXPIRED once event.start_time + AppConfig.signal_ttl has passed, guarded so a signal reconfirmed this same cycle is never immediately re-expired
+[x] FreshnessPolicy.allowed_future_skew (default 10s): a snapshot's quote_time landing a few seconds ahead of analysis_time is ordinary clock skew, not corrupted data -- only a skew larger than this tolerance is rejected as snapshot-from-future
+[x] Corrected the migration idempotency comments: Python's sqlite3 only auto-opens an implicit transaction before DML, not DDL/PRAGMA (verified directly), so DDL *can* be made transactional with an explicit BEGIN -- Python 3.12's autocommit=False was never actually required for that; the real obstacle is executescript() (migrations 1/3), which always commits any pending transaction before running
+[x] from_surebet/from_value_gap moved from storage.signal_repository into pipeline.py -- storage no longer imports SurebetCandidate/ValueGapCandidate from the analysis layer at all, closing the last piece of the inverted dependency the previous round only partially fixed
+[x] run_detection() no longer prints anything -- it returns its summary dict and app.py's main() does the printing, so the core stays usable by any caller that wants detection with no console output as a side effect
 ```
 
 ---
@@ -1704,6 +1726,41 @@ which would make the same event's effective lifecycle depend on how
 long a particular provider happened to keep reporting it) plus
 `AppConfig.signal_ttl`, guarded against expiring a signal reconfirmed
 the very same cycle it runs in.
+
+**Done:** a seventh round, a further external review of round six's own
+work -- one P0 fix and four smaller cleanups. `detect_surebet_candidates`
+had the exact same evaluated_keys-ordering bug round six was fixing for
+a different reason: `evaluated_keys.add(...)` ran before checking all
+three outcomes were priced, so a surebet genuinely missing one leg this
+sweep still counted as "evaluated" and could be incorrectly resolved --
+fixed the same way VALUE_GAP's own per-outcome scoping already was, see
+Storage Strategy above. `FreshnessPolicy` gained `allowed_future_skew`
+(default 10s): a snapshot's `quote_time` landing a few seconds ahead of
+`analysis_time` is ordinary clock skew between this process and a real
+provider's own clock, not corrupted data, so only a larger skew is
+rejected as `snapshot-from-future`. The migration idempotency comments
+(Storage Strategy above) turned out to overstate what Python 3.12 is
+actually needed for -- verified directly: Python's sqlite3 only
+auto-opens an implicit transaction before DML, not DDL/PRAGMA, so DDL
+*can* be made transactional with an explicit `BEGIN` (the same technique
+`FixtureCatalog.match()` already uses); `autocommit=False` was never
+actually required. The real obstacle is `executescript()` (migrations 1
+and 3), which always commits any pending transaction before running the
+script. `from_surebet`/`from_value_gap` moved from
+`storage.signal_repository` into `pipeline.py` -- the previous round's
+domain-type extraction closed the inverted dependency for
+`SignalType`/`SignalIdentity` but left storage still importing
+`SurebetCandidate`/`ValueGapCandidate` from the analysis layer just for
+these two adapters; storage now imports nothing from `analysis` at all.
+Finally, `run_detection()` no longer prints anything -- it returns its
+summary dict and `app.py`'s `main()` does the printing, so the core
+pipeline stays usable by any caller that wants detection with no console
+output as a side effect (a test, a future notification service).
+Deliberately left alone: core detection still only analyzes
+`DEFAULT_MARKET` (pre-match), matching this project's stated MVP scope
+-- adding `LIVE_MARKET` detection later means a sweep parameterized by
+explicit `MarketIdentity` values, not swapping which single constant
+`run_detection` hardcodes.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

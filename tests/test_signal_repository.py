@@ -17,14 +17,13 @@ from anomaly_detection_engine.models.market import (
     MarketType,
 )
 from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
+from anomaly_detection_engine.pipeline import from_surebet, from_value_gap
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.signal_repository import (
     ACTIVE,
     EXPIRED,
     RESOLVED,
     SignalRepository,
-    from_surebet,
-    from_value_gap,
 )
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 

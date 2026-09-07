@@ -7,17 +7,13 @@ from decimal import Decimal
 from sqlite3 import Connection, Row
 from uuid import uuid4
 
-from anomaly_detection_engine.analysis.opportunity_detection import (
-    SurebetCandidate,
-    ValueGapCandidate,
-)
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
     MarketType,
 )
-from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
+from anomaly_detection_engine.models.signal import SignalIdentity
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -32,11 +28,15 @@ class SignalCandidate:
     """What SignalRepository needs to identify and describe one detected
     signal, independent of which analysis module produced it -- callers
     convert their own candidate type (SurebetCandidate, ValueGapCandidate)
-    into this via from_surebet()/from_value_gap() before calling
-    reconcile(). Identity for dedup/upsert purposes is
-    (signal_type, event_id, market, outcome); edge_percent and details
-    are current state that gets updated in place on repeated sightings,
-    not part of what makes two detections "the same" signal.
+    into this via pipeline.from_surebet()/from_value_gap() before calling
+    reconcile(). Those two adapters live in pipeline.py, not here: this
+    module (storage) has no business importing analysis.
+    opportunity_detection's candidate types itself, only the plain
+    SignalCandidate/SignalIdentity shape it actually persists by.
+    Identity for dedup/upsert purposes is (signal_type, event_id, market,
+    outcome); edge_percent and details are current state that gets
+    updated in place on repeated sightings, not part of what makes two
+    detections "the same" signal.
     """
 
     signal_type: str
@@ -69,33 +69,6 @@ class SignalRecord:
     # check status, not just whether this is set, to tell which one
     # actually happened.
     resolved_at: datetime | None
-
-
-def from_surebet(candidate: SurebetCandidate) -> SignalCandidate:
-    return SignalCandidate(
-        signal_type=SUREBET,
-        event_id=candidate.event.id,
-        market=candidate.market,
-        outcome=None,
-        edge_percent=candidate.profit_percent,
-        details={
-            "legs": [
-                {"outcome": leg.outcome, "bookmaker": leg.bookmaker, "odds": str(leg.odds)}
-                for leg in candidate.legs
-            ]
-        },
-    )
-
-
-def from_value_gap(candidate: ValueGapCandidate) -> SignalCandidate:
-    return SignalCandidate(
-        signal_type=VALUE_GAP,
-        event_id=candidate.event.id,
-        market=candidate.market,
-        outcome=candidate.outcome,
-        edge_percent=candidate.deviation_percent,
-        details={"bookmaker": candidate.bookmaker, "odds": str(candidate.odds)},
-    )
 
 
 class SignalRepository:

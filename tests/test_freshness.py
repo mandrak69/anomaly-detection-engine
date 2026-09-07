@@ -81,6 +81,33 @@ def test_invalid_when_snapshot_is_from_the_future():
     assert result.reason == "snapshot-from-future"
 
 
+def test_small_clock_skew_ahead_of_analysis_time_is_tolerated():
+    # A few seconds of clock skew between this process and a real
+    # provider's own clock is normal, not evidence of corrupted data --
+    # only a skew larger than policy.allowed_future_skew (default 10s)
+    # should be rejected.
+    snapshots = [snapshot("A", NOW + timedelta(seconds=5))]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
+
+    assert result.valid is True
+    assert result.reason is None
+
+
+def test_skew_larger_than_the_configured_tolerance_still_rejected():
+    lenient_policy = FreshnessPolicy(
+        max_snapshot_age=timedelta(minutes=5),
+        max_observation_spread=timedelta(minutes=2),
+        allowed_future_skew=timedelta(seconds=2),
+    )
+    snapshots = [snapshot("A", NOW + timedelta(seconds=5))]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=lenient_policy)
+
+    assert result.valid is False
+    assert result.reason == "snapshot-from-future"
+
+
 def test_invalid_when_no_snapshots():
     result = validate_freshness([], analysis_time=NOW, policy=POLICY)
 

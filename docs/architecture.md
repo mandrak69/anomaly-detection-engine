@@ -651,15 +651,23 @@ an edit to an old one.
 
 This is not wrapped in a transaction with its `PRAGMA user_version`
 write, and deliberately so: verified directly that Python's sqlite3
-module does not roll back DDL (`CREATE`/`ALTER`/`DROP`) or `PRAGMA`
-statements the way it does plain DML, even inside `with connection:` (a
-`CREATE TABLE` survives an exception raised right after it in the same
-`with` block; an `INSERT` in the same position does not). True
-cross-statement atomicity would need Python 3.12's `autocommit=False`,
-unavailable here (`requires-python >=3.11`). So each migration is made
-idempotent instead: `_add_column_if_missing()` only `ALTER`s a column
-that isn't already there, and every index rebuild `DROP`s (`IF EXISTS`)
-immediately before recreating it -- a retry after a crash between any
+module (legacy `isolation_level`-based transaction handling) only
+auto-opens an implicit transaction before DML, never before DDL
+(`CREATE`/`ALTER`/`DROP`) or `PRAGMA`, so a bare `execute()` of one of
+those runs in autocommit mode and is not rolled back the way plain DML
+is, even inside `with connection:` (a `CREATE TABLE` survives an
+exception raised right after it in the same `with` block; an `INSERT`
+in the same position does not) -- even though SQLite itself can
+genuinely roll back DDL. An explicit `BEGIN` first (the same technique
+`FixtureCatalog.match()` uses for its own writes) *would* make DDL
+transactional here -- Python 3.12's `autocommit=False` is not actually
+required for that. The real obstacle is `executescript()` (used by
+migrations 1 and 3): it always commits any pending transaction before
+running the script, defeating a manual `BEGIN` before it even starts.
+So each migration is made idempotent instead: `_add_column_if_missing()`
+only `ALTER`s a column that isn't already there, and every index rebuild
+`DROP`s (`IF EXISTS`) immediately before recreating it -- a retry after
+a crash between any
 two statements, including one between a migration finishing and its
 `PRAGMA user_version` write landing, converges to the same end state
 rather than erroring on "duplicate column name" or similar.
@@ -1036,6 +1044,36 @@ rather than a stable domain fact) plus the configured TTL, and guarded
 against expiring a signal reconfirmed the very same detection cycle it
 runs in (`last_seen_at < expired_at`, with both calls in
 `run_detection` sharing one `now`).
+
+**Resolved:** a seventh round, a further external review of round six's
+own work. `detect_surebet_candidates` had the exact same
+evaluated_keys-ordering bug round six fixed for a different reason:
+`evaluated_keys.add(...)` ran before checking all three outcomes were
+priced, so a surebet genuinely missing one leg this sweep still counted
+as "evaluated" and could be incorrectly resolved -- fixed the same way
+VALUE_GAP's own per-outcome scoping already was. `FreshnessPolicy`
+gained `allowed_future_skew` (default 10s) so ordinary clock skew a few
+seconds ahead of `analysis_time` is no longer rejected as
+`snapshot-from-future`. The migration idempotency comments (Storage
+Strategy above) overstated what Python 3.12 is actually needed for --
+verified directly: Python's sqlite3 only auto-opens an implicit
+transaction before DML, not DDL/PRAGMA, so DDL *can* be made
+transactional with an explicit `BEGIN`; `autocommit=False` was never
+actually required, the real obstacle is `executescript()` (migrations 1
+and 3) always committing any pending transaction before running.
+`from_surebet`/`from_value_gap` moved from `storage.signal_repository`
+into `pipeline.py` -- the previous round's domain-type extraction closed
+the inverted dependency for `SignalType`/`SignalIdentity` but left
+storage still importing `SurebetCandidate`/`ValueGapCandidate` from the
+Analysis Layer just for these two adapters; storage now imports nothing
+from `analysis` at all. `run_detection()` no longer prints anything --
+it returns its summary and `app.py`'s `main()` prints it, so the core
+pipeline stays usable by any caller that wants detection with no console
+output as a side effect. Deliberately left alone: core detection still
+only analyzes `DEFAULT_MARKET` (pre-match), matching this project's
+stated MVP scope -- `LIVE_MARKET` detection later means a sweep
+parameterized by explicit `MarketIdentity` values, not swapping which
+single constant `run_detection` hardcodes.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
