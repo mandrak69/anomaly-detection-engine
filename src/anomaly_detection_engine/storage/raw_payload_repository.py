@@ -24,9 +24,13 @@ def serialize_raw_event_odds(raw: RawEventOdds) -> str:
     """Serializes the RawEventOdds contract for storage/reprocessing.
 
     This is the source-independent observation itself (architecture.md's
-    "Raw Payload Layer"), not the original bytes from the wire -- the
-    collector boundary is where any truly source-specific payload would
-    need to be captured, and no collector currently retains that.
+    "Raw Payload Layer"), not the original bytes from the wire -- those
+    are captured separately, once per CollectorRun rather than once per
+    record here: collect() returns a CollectionResult(source_payload,
+    records), and OddsIngestionService persists source_payload onto the
+    CollectorRun itself (see CollectorRun.source_payload/provider_id/
+    parser_version) alongside the RawEventOdds this function serializes
+    per record.
     """
     return json.dumps(asdict(raw), cls=_RawEventEncoder)
 

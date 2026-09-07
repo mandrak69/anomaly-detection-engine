@@ -26,6 +26,28 @@ SUREBET = SignalType.SUREBET
 VALUE_GAP = SignalType.VALUE_GAP
 
 
+class SignalStatus(StrEnum):
+    """The lifecycle states a persisted signal moves through (see
+    storage.signal_repository.SignalRepository): ACTIVE while a sweep
+    keeps reconfirming the condition, RESOLVED when a sweep positively
+    evaluates it and finds the condition gone (reconcile()), EXPIRED
+    when detection simply stops being able to evaluate it at all and its
+    event's lifecycle has run out (expire_active_signals). RESOLVED and
+    EXPIRED are both terminal but mean different things -- see
+    SignalRepository's own docstring.
+    """
+
+    ACTIVE = "ACTIVE"
+    RESOLVED = "RESOLVED"
+    EXPIRED = "EXPIRED"
+
+
+# Same bare-alias reasoning as SUREBET/VALUE_GAP above.
+ACTIVE = SignalStatus.ACTIVE
+RESOLVED = SignalStatus.RESOLVED
+EXPIRED = SignalStatus.EXPIRED
+
+
 @dataclass(frozen=True)
 class SignalIdentity:
     """The (event, market, outcome) triple a persisted signal is keyed

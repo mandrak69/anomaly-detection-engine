@@ -16,7 +16,7 @@ from anomaly_detection_engine.models.market import (
     MarketPhase,
     MarketType,
 )
-from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity
+from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP, SignalIdentity, SignalStatus
 from anomaly_detection_engine.pipeline import from_surebet, from_value_gap
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.signal_repository import (
@@ -89,6 +89,7 @@ def test_first_sighting_creates_an_active_signal():
     assert len(active) == 1
     record = active[0]
     assert record.status == ACTIVE
+    assert isinstance(record.status, SignalStatus)  # not a bare str
     assert record.event_id == "e1"
     assert record.edge_percent == Decimal("10.0")
     assert record.first_seen_at == T0

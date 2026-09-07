@@ -13,14 +13,16 @@ from anomaly_detection_engine.models.market import (
     MarketPhase,
     MarketType,
 )
-from anomaly_detection_engine.models.signal import SignalIdentity
+from anomaly_detection_engine.models.signal import (
+    ACTIVE,
+    EXPIRED,
+    RESOLVED,
+    SignalIdentity,
+    SignalStatus,
+)
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
-
-ACTIVE = "ACTIVE"
-RESOLVED = "RESOLVED"
-EXPIRED = "EXPIRED"
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ class SignalRecord:
     event_id: str
     market: MarketIdentity
     outcome: str | None
-    status: str
+    status: SignalStatus
     edge_percent: Decimal
     details: dict
     first_seen_at: datetime
@@ -86,16 +88,10 @@ class SignalRepository:
     correctly resolves everything evaluated and absent, as long as
     evaluated_keys says those identities were actually checked.
 
-    RESOLVED and EXPIRED are both terminal, non-ACTIVE states, but mean
-    different things: RESOLVED means a sweep positively evaluated this
-    exact (event, market, outcome) and found the condition gone (see
-    reconcile()). EXPIRED (see expire_active_signals) means detection
-    stopped being able to evaluate it at all -- the event fell out of
-    this project's "events touched this cycle" scope (see
-    OddsIngestionService.touched_events/pipeline.run_ingestion) and its
-    lifecycle has run out, not that anything about the signal itself was
-    disproven. Conflating the two would claim a certainty ("the surebet
-    closed") this system never actually confirmed.
+    See models.signal.SignalStatus for what ACTIVE/RESOLVED/EXPIRED each
+    actually mean -- RESOLVED and EXPIRED are both terminal, but
+    conflating them would claim a certainty ("the surebet closed") this
+    system never actually confirmed for the EXPIRED case.
     """
 
     def __init__(self, connection: Connection) -> None:
@@ -349,7 +345,7 @@ class SignalRepository:
                 specifier=row["market_specifier"],
             ),
             outcome=row["outcome"],
-            status=row["status"],
+            status=SignalStatus(row["status"]),
             edge_percent=Decimal(row["edge_percent"]),
             details=json.loads(row["details"]),
             first_seen_at=datetime.fromisoformat(row["first_seen_at"]),

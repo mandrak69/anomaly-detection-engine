@@ -1437,6 +1437,8 @@ rate limiting
 [x] Corrected the migration idempotency comments: Python's sqlite3 only auto-opens an implicit transaction before DML, not DDL/PRAGMA (verified directly), so DDL *can* be made transactional with an explicit BEGIN -- Python 3.12's autocommit=False was never actually required for that; the real obstacle is executescript() (migrations 1/3), which always commits any pending transaction before running
 [x] from_surebet/from_value_gap moved from storage.signal_repository into pipeline.py -- storage no longer imports SurebetCandidate/ValueGapCandidate from the analysis layer at all, closing the last piece of the inverted dependency the previous round only partially fixed
 [x] run_detection() no longer prints anything -- it returns its summary dict and app.py's main() does the printing, so the core stays usable by any caller that wants detection with no console output as a side effect
+[x] serialize_raw_event_odds's docstring corrected -- it claimed no collector retains the original source payload, no longer true since CollectionResult (see Data Collection above)
+[x] ACTIVE/RESOLVED/EXPIRED extracted into SignalStatus(StrEnum) in models/signal.py, the same treatment SignalType already got -- SignalRecord.status is now SignalStatus, not a bare str
 ```
 
 ---
