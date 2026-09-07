@@ -22,6 +22,12 @@ from anomaly_detection_engine.storage.odds_repository import OddsRepository
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
 )
+TOTALS_MARKET = MarketIdentity(
+    market_type=MarketType.TOTALS,
+    period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
+    line=Decimal("2.5"),
+)
 NOW = datetime.fromisoformat("2026-08-27T10:00:00+00:00")
 FRESH = FreshnessPolicy(
     max_snapshot_age=timedelta(hours=1), max_observation_spread=timedelta(hours=1)
@@ -35,12 +41,12 @@ def make_repository():
     return OddsRepository(connection)
 
 
-def save(repository, event_id, bookmaker_name, outcome, odds, observed_at=NOW):
+def save(repository, event_id, bookmaker_name, outcome, odds, observed_at=NOW, market=MARKET):
     repository.save(
         OddsSnapshot(
             event_id=event_id,
             bookmaker=Bookmaker(bookmaker_name.lower(), bookmaker_name),
-            market=MARKET,
+            market=market,
             outcome=outcome,
             odds=Decimal(odds),
             observed_at=observed_at,
@@ -204,6 +210,74 @@ def test_evaluated_keys_excludes_an_event_missing_one_outcome():
         [event], repository, MARKET, freshness_policy=FRESH, analysis_time=NOW
     )
 
+    assert sweep.candidates == []
+    assert sweep.evaluated_keys == frozenset()
+
+
+def test_detect_surebet_candidates_works_for_a_two_outcome_totals_market():
+    # Proves detect_surebet_candidates generalizes beyond THREE_WAY's
+    # three legs: TOTALS only ever has OVER/UNDER (see
+    # models.market.required_outcomes), and the arbitrage math (and the
+    # "all required outcomes present" check) must work the same way for
+    # two outcomes as for three.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "OVER", "2.10", market=TOTALS_MARKET)
+    save(repository, "e1", "Bet2", "UNDER", "2.10", market=TOTALS_MARKET)
+
+    sweep = detect_surebet_candidates(
+        [event], repository, TOTALS_MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert len(sweep.candidates) == 1
+    candidate = sweep.candidates[0]
+    assert candidate.market == TOTALS_MARKET
+    assert {leg.outcome for leg in candidate.legs} == {"OVER", "UNDER"}
+    assert candidate.profit_percent > 0
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", TOTALS_MARKET, None)})
+
+
+def test_totals_surebet_evaluated_keys_require_both_outcomes():
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    save(repository, "e1", "Bet1", "OVER", "2.10", market=TOTALS_MARKET)
+    # No UNDER saved at all -- must not count as evaluated, same as the
+    # THREE_WAY case above.
+
+    sweep = detect_surebet_candidates(
+        [event], repository, TOTALS_MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    assert sweep.candidates == []
+    assert sweep.evaluated_keys == frozenset()
+
+
+def test_totals_2_5_and_3_5_snapshots_are_never_compared_together():
+    # Two different lines are two different markets -- find_latest_for_market
+    # (used internally by detect_surebet_candidates) must never mix them,
+    # e.g. treating a 2.5-line OVER and a 3.5-line UNDER as one market's
+    # two legs.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+    totals_3_5 = MarketIdentity(
+        market_type=MarketType.TOTALS,
+        period=MarketPeriod.FULL_TIME,
+        phase=MarketPhase.PRE_MATCH,
+        line=Decimal("3.5"),
+    )
+
+    save(repository, "e1", "Bet1", "OVER", "2.10", market=TOTALS_MARKET)
+    save(repository, "e1", "Bet1", "UNDER", "10.00", market=totals_3_5)
+
+    sweep = detect_surebet_candidates(
+        [event], repository, TOTALS_MARKET, freshness_policy=FRESH, analysis_time=NOW
+    )
+
+    # Only the 2.5-line OVER belongs to this market -- the 3.5-line
+    # UNDER must not be pulled in, so this stays "couldn't tell", not a
+    # (bogus, cross-line) surebet.
     assert sweep.candidates == []
     assert sweep.evaluated_keys == frozenset()
 

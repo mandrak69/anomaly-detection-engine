@@ -1,11 +1,14 @@
 from decimal import Decimal
 
+import pytest
+
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
     MarketType,
     canonical_decimal,
+    required_outcomes,
 )
 
 
@@ -57,3 +60,28 @@ def test_market_identity_normalizes_empty_rules_and_specifier_to_none():
 
 def test_market_identity_leaves_a_none_line_untouched():
     assert _market(line=None).line is None
+
+
+def test_market_identity_never_mixes_different_totals_lines():
+    # The same market_type/period/phase, only the line differs -- must
+    # be different identities, never merged in dedupe/detection.
+    line_2_5 = _market(line=Decimal("2.5"))
+    line_3_5 = _market(line=Decimal("3.5"))
+
+    assert line_2_5 != line_3_5
+    assert hash(line_2_5) != hash(line_3_5)
+
+
+def test_required_outcomes_three_way():
+    assert required_outcomes(MarketType.THREE_WAY) == ("1", "X", "2")
+
+
+def test_required_outcomes_totals():
+    assert required_outcomes(MarketType.TOTALS) == ("OVER", "UNDER")
+
+
+def test_required_outcomes_raises_for_an_unmapped_market_type():
+    # HANDICAP's enum value exists but isn't wired into detection yet --
+    # must fail loudly, not silently accept "any outcomes will do".
+    with pytest.raises(ValueError, match="HANDICAP|handicap"):
+        required_outcomes(MarketType.HANDICAP)

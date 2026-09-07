@@ -10,6 +10,36 @@ class MarketType(StrEnum):
     HANDICAP = "handicap"
 
 
+# Every outcome a market of this type must have fully quoted before a
+# surebet/arbitrage check makes sense (see analysis.opportunity_detection.
+# detect_surebet_candidates and analysis.arbitrage.calculate_arbitrage,
+# whose margin formula sums over exactly these outcomes) -- THREE_WAY
+# needs all of 1/X/2 priced, TOTALS needs both OVER/UNDER. Lives here,
+# not in analysis/, since it is a fact about what a market type *is*,
+# not a detection-specific policy; VALUE_GAP detection has no equivalent
+# need (it evaluates whichever outcomes are present, individually).
+REQUIRED_OUTCOMES: dict[MarketType, tuple[str, ...]] = {
+    MarketType.THREE_WAY: ("1", "X", "2"),
+    MarketType.TOTALS: ("OVER", "UNDER"),
+}
+
+
+def required_outcomes(market_type: MarketType) -> tuple[str, ...]:
+    """Looks up REQUIRED_OUTCOMES, raising ValueError (not KeyError, and
+    not silently treating an unmapped type as "any outcomes will do")
+    for a market_type with no known outcome set yet -- e.g. HANDICAP,
+    not wired into detection yet even though the enum value already
+    exists.
+    """
+    try:
+        return REQUIRED_OUTCOMES[market_type]
+    except KeyError:
+        raise ValueError(
+            f"No known required-outcomes set for market_type={market_type!r} -- "
+            f"add one to REQUIRED_OUTCOMES before detecting surebets for it."
+        ) from None
+
+
 class MarketPeriod(StrEnum):
     FULL_TIME = "full_time"
     FIRST_HALF = "first_half"
@@ -101,4 +131,18 @@ LIVE_MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY,
     period=MarketPeriod.FULL_TIME,
     phase=MarketPhase.LIVE,
+)
+
+# The second market type this project detects, added specifically to
+# prove MarketIdentity/detection generalize beyond THREE_WAY rather than
+# happening to only work for it. Deliberately only the 2.5 goals line for
+# now, not every line a source might offer (e.g. api-football.com's
+# "Goals Over/Under" bet bundles many lines -- 0.5, 1.5, 2.5, 3.5, ... --
+# into one response; this project only extracts 2.5 from it) -- the same
+# narrow-MVP-first discipline DEFAULT_MARKET/LIVE_MARKET already follow.
+TOTALS_2_5_MARKET = MarketIdentity(
+    market_type=MarketType.TOTALS,
+    period=MarketPeriod.FULL_TIME,
+    phase=MarketPhase.PRE_MATCH,
+    line=Decimal("2.5"),
 )

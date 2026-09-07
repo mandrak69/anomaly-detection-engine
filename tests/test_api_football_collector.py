@@ -10,7 +10,7 @@ from anomaly_detection_engine.collectors.api_football_collector import (
     ApiFootballError,
     parse_api_football_response,
 )
-from anomaly_detection_engine.models.market import MarketPhase
+from anomaly_detection_engine.models.market import MarketPhase, MarketType
 
 # Trimmed but structurally real: taken from a genuine api-football.com
 # /odds?date=... response (round-trip verified against the full response
@@ -51,11 +51,28 @@ SAMPLE_ODDS_RESPONSE = {
                                 {"value": "Away", "odd": "2.80"},
                             ],
                         },
+                        {
+                            # Real api-football.com shape: every line the
+                            # bookmaker offers bundled into one values
+                            # list -- only "... 2.5" must be extracted
+                            # (see models.market.TOTALS_2_5_MARKET).
+                            "id": 5,
+                            "name": "Goals Over/Under",
+                            "values": [
+                                {"value": "Over 1.5", "odd": "1.50"},
+                                {"value": "Under 1.5", "odd": "2.55"},
+                                {"value": "Over 2.5", "odd": "2.55"},
+                                {"value": "Under 2.5", "odd": "1.50"},
+                                {"value": "Over 3.5", "odd": "5.00"},
+                                {"value": "Under 3.5", "odd": "1.17"},
+                            ],
+                        },
                     ],
                 },
                 {
-                    # incomplete_book has no "Match Winner" bet at all --
-                    # must be skipped, same as an incomplete 1X2 line.
+                    # incomplete_book has no "Match Winner" bet at all,
+                    # and an incomplete 2.5 Over/Under line (no "Under") --
+                    # neither market should produce a record for it.
                     "id": 99,
                     "name": "IncompleteBook",
                     "bets": [
@@ -118,24 +135,57 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     collection = collector.collect()
     result = collection.records
 
-    assert len(result) == 1  # IncompleteBook has no Match Winner bet, skipped
-    raw = result[0]
+    # Bet365 -> one THREE_WAY + one TOTALS record; IncompleteBook has no
+    # Match Winner bet and an incomplete 2.5 Over/Under line, so it
+    # produces neither.
+    assert len(result) == 2
 
-    assert raw.source == "Bet365"
-    assert raw.source_id == "8"
-    assert raw.sport == "football"
-    assert raw.league == "Liga Profesional Argentina"
-    assert raw.home_team == "River Plate"
-    assert raw.away_team == "Boca Juniors"
-    assert raw.odds == {
+    three_way = next(r for r in result if r.market.market_type == MarketType.THREE_WAY)
+    assert three_way.source == "Bet365"
+    assert three_way.source_id == "8"
+    assert three_way.sport == "football"
+    assert three_way.league == "Liga Profesional Argentina"
+    assert three_way.home_team == "River Plate"
+    assert three_way.away_team == "Boca Juniors"
+    assert three_way.odds == {
         "1": Decimal("2.80"),
         "X": Decimal("2.90"),
         "2": Decimal("2.80"),
     }
-    assert raw.start_time.tzinfo is not None
-    assert raw.observed_at.tzinfo is not None
-    assert raw.market.phase == MarketPhase.PRE_MATCH
+    assert three_way.start_time.tzinfo is not None
+    assert three_way.observed_at.tzinfo is not None
+    assert three_way.market.phase == MarketPhase.PRE_MATCH
     assert collection.source_payload is not None
+
+
+def test_extracts_only_the_2_5_line_from_the_bundled_goals_over_under_bet():
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+
+    result = collector.collect().records
+
+    totals = [r for r in result if r.market.market_type == MarketType.TOTALS]
+    assert len(totals) == 1
+    raw = totals[0]
+    assert raw.source == "Bet365"
+    assert raw.market.line == Decimal("2.5")
+    assert raw.odds == {"OVER": Decimal("2.55"), "UNDER": Decimal("1.50")}
+
+
+def test_incomplete_over_under_line_is_skipped():
+    # IncompleteBook only has "Over 2.5", no "Under 2.5" -- must not
+    # produce a TOTALS record with a hole in its odds dict.
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+
+    result = collector.collect().records
+    assert all(r.source != "IncompleteBook" for r in result)
 
 
 def test_source_identifies_the_provider():
@@ -228,5 +278,5 @@ def test_parse_api_football_response_directly():
         json.dumps(SAMPLE_ODDS_RESPONSE),
         observed_at=datetime.fromisoformat("2026-09-07T12:30:00+00:00"),
     )
-    assert len(result) == 1
-    assert result[0].home_team == "River Plate"
+    assert len(result) == 2
+    assert all(r.home_team == "River Plate" for r in result)

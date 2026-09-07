@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
-from anomaly_detection_engine.models.market import DEFAULT_MARKET
+from anomaly_detection_engine.models.market import DEFAULT_MARKET, TOTALS_2_5_MARKET
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,8 @@ DEFAULT_BASE_URL = "https://v3.football.api-sports.io"
 API_KEY_ENV_VAR = "API_FOOTBALL_KEY"
 _MATCH_WINNER_BET_NAME = "Match Winner"
 _OUTCOME_CODES = {"Home": "1", "Draw": "X", "Away": "2"}
+_OVER_UNDER_BET_NAME = "Goals Over/Under"
+_TOTALS_2_5_LINE = "2.5"
 
 
 class ApiFootballError(RuntimeError):
@@ -29,7 +31,10 @@ def parse_api_football_response(
     fixtures_raw: str | bytes, odds_raw: str | bytes, observed_at: datetime
 ) -> list[RawEventOdds]:
     """Maps one day's api-football.com /fixtures + /odds responses onto
-    RawEventOdds, one per bookmaker per fixture.
+    RawEventOdds -- up to two records per bookmaker per fixture, one for
+    the "Match Winner" (1X2, DEFAULT_MARKET) bet and one for the "Goals
+    Over/Under" bet's 2.5 line (TOTALS_2_5_MARKET), each only produced
+    if that bookmaker actually has a complete line for it.
 
     Two real differences from every other collector in this project,
     both consequences of api-football.com's actual response shape (not
@@ -78,28 +83,29 @@ def parse_api_football_response(
         start_time = datetime.fromisoformat(raw_date)
 
         for bookmaker in item.get("bookmakers", []):
-            odds = _extract_match_winner_odds(bookmaker)
-            if odds is None:
-                continue
-
             bookmaker_id = bookmaker.get("id")
-            result.append(
-                RawEventOdds(
-                    source=bookmaker.get("name") or "unknown",
-                    sport="football",
-                    league=league_name,
-                    home_team=home_team,
-                    away_team=away_team,
-                    start_time=start_time,
-                    observed_at=observed_at,
-                    market=DEFAULT_MARKET,
-                    odds=odds,
-                    # api-football.com's own stable per-bookmaker id (e.g.
-                    # 8 for "Bet365") -- see RawEventOdds.source_id for why
-                    # this must not be derived from the display name.
-                    source_id=str(bookmaker_id) if bookmaker_id is not None else None,
-                )
-            )
+            source_id = str(bookmaker_id) if bookmaker_id is not None else None
+            common = {
+                "source": bookmaker.get("name") or "unknown",
+                "sport": "football",
+                "league": league_name,
+                "home_team": home_team,
+                "away_team": away_team,
+                "start_time": start_time,
+                "observed_at": observed_at,
+                # api-football.com's own stable per-bookmaker id (e.g. 8
+                # for "Bet365") -- see RawEventOdds.source_id for why this
+                # must not be derived from the display name.
+                "source_id": source_id,
+            }
+
+            match_winner_odds = _extract_match_winner_odds(bookmaker)
+            if match_winner_odds is not None:
+                result.append(RawEventOdds(**common, market=DEFAULT_MARKET, odds=match_winner_odds))
+
+            totals_odds = _extract_totals_2_5_odds(bookmaker)
+            if totals_odds is not None:
+                result.append(RawEventOdds(**common, market=TOTALS_2_5_MARKET, odds=totals_odds))
 
     return result
 
@@ -159,9 +165,46 @@ def _extract_match_winner_odds(bookmaker: dict) -> dict[str, Decimal] | None:
     return odds
 
 
+def _extract_totals_2_5_odds(bookmaker: dict) -> dict[str, Decimal] | None:
+    """api-football.com's "Goals Over/Under" bet bundles every line the
+    bookmaker offers (0.5, 1.5, 2.5, 3.5, ...) into one values list, each
+    entry shaped "Over 2.5"/"Under 2.5" -- this project only extracts the
+    2.5 line (see models.market.TOTALS_2_5_MARKET), so every value whose
+    line isn't "2.5" is ignored, not just every non-Over/Under value.
+    """
+    over_under = next(
+        (bet for bet in bookmaker.get("bets", []) if bet.get("name") == _OVER_UNDER_BET_NAME),
+        None,
+    )
+    if over_under is None:
+        return None
+
+    odds: dict[str, Decimal] = {}
+    for value in over_under.get("values", []):
+        odd = value.get("odd")
+        raw_value = value.get("value")
+        if odd is None or not isinstance(raw_value, str):
+            continue
+
+        direction, _, line = raw_value.partition(" ")
+        if line != _TOTALS_2_5_LINE:
+            continue
+
+        if direction == "Over":
+            odds["OVER"] = Decimal(odd)
+        elif direction == "Under":
+            odds["UNDER"] = Decimal(odd)
+
+    if set(odds) != {"OVER", "UNDER"}:
+        return None
+
+    return odds
+
+
 class ApiFootballCollector(OddsCollector):
     """Collector for https://www.api-football.com (api-sports.io)
-    pre-match 1X2 ("Match Winner") odds.
+    pre-match odds: 1X2 ("Match Winner") and the 2.5 line of Goals
+    Over/Under (see parse_api_football_response for both).
 
     Requires an API key: pass api_key= explicitly, or set the
     API_FOOTBALL_KEY environment variable. Never hardcode a real key in

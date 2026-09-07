@@ -7,7 +7,7 @@ from anomaly_detection_engine.analysis.best_odds import find_best_odds
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy, validate_freshness
 from anomaly_detection_engine.analysis.outlier_detector import detect_outliers
 from anomaly_detection_engine.models.event import Event
-from anomaly_detection_engine.models.market import MarketIdentity
+from anomaly_detection_engine.models.market import MarketIdentity, required_outcomes
 from anomaly_detection_engine.models.signal import SignalIdentity
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 
@@ -21,8 +21,10 @@ class SurebetLeg:
 
 @dataclass(frozen=True)
 class SurebetCandidate:
-    """One arbitrage: a single opportunity with three legs, not three
-    separate ones -- this is the structural difference from OpportunityRow
+    """One arbitrage: a single opportunity with one leg per required
+    outcome of the market (see models.market.required_outcomes -- three
+    for THREE_WAY, two for TOTALS), not that many separate opportunities
+    -- this is the structural difference from OpportunityRow
     (reporting/opportunity_report.py), which flattens each leg into its
     own display row. Identity for persistence purposes is (event, market)
     -- *not* which bookmakers/odds make up the legs, since those can
@@ -57,15 +59,17 @@ class SurebetDetectionSweep:
     """candidates plus which (event, market) combinations were actually
     evaluated this sweep -- distinguishing "evaluated, genuinely no
     surebet" from "not evaluated at all" (missing/stale data, or missing
-    one of the three outcomes) matters to a caller like
+    one of the market's required outcomes -- see
+    models.market.required_outcomes) matters to a caller like
     SignalRepository.reconcile(): resolving an ACTIVE signal is only
     correct in the first case. An event skipped for missing snapshots,
-    failed freshness, or fewer than all three outcomes currently quoted
-    is absent from both candidates *and* evaluated_keys, so it must not
-    be resolved just because it didn't produce a candidate this time --
-    a previously-ACTIVE surebet whose third leg simply isn't being
-    quoted this poll is not the same as that arbitrage having closed.
-    outcome is always None here -- see SignalIdentity.
+    failed freshness, or fewer than all of the market's required
+    outcomes currently quoted is absent from both candidates *and*
+    evaluated_keys, so it must not be resolved just because it didn't
+    produce a candidate this time -- a previously-ACTIVE surebet whose
+    last leg simply isn't being quoted this poll is not the same as that
+    arbitrage having closed. outcome is always None here -- see
+    SignalIdentity.
     """
 
     candidates: list[SurebetCandidate]
@@ -122,11 +126,17 @@ def detect_surebet_candidates(
     Returns both the candidates and which (event, market) combinations
     were actually evaluated (see SurebetDetectionSweep) -- an event with
     no snapshots yet, whose snapshots failed freshness, or for which
-    fewer than all three outcomes are currently quoted is absent from
-    evaluated_keys as well as candidates, so a caller reconciling
-    persisted signals can tell "genuinely no surebet here" apart from
-    "couldn't tell this sweep".
+    fewer than all of required_outcomes(market.market_type) are
+    currently quoted is absent from evaluated_keys as well as
+    candidates, so a caller reconciling persisted signals can tell
+    "genuinely no surebet here" apart from "couldn't tell this sweep".
+    Which outcomes must all be present, and how many-way the arbitrage
+    math is, both come from the market's own type (see
+    models.market.required_outcomes) -- not hardcoded to three-way 1X2.
     """
+    needed = required_outcomes(market.market_type)
+    needed_set = frozenset(needed)
+
     candidates: list[SurebetCandidate] = []
     evaluated_keys: set[SignalIdentity] = set()
 
@@ -147,14 +157,15 @@ def detect_surebet_candidates(
             continue
 
         best = find_best_odds(snapshots, event_id=event.id, market=market)
-        if len(best) != 3:
+        if set(best) != needed_set:
             # Missing an outcome entirely (e.g. no bookmaker currently
-            # quotes "X") is the same "couldn't tell" case freshness
-            # failing already is -- not "evaluated, no surebet". If a
-            # previously-ACTIVE surebet's third leg simply stopped being
-            # quoted this poll, that must not be resolvable: nothing here
-            # confirms the arbitrage is actually gone, only that this
-            # sweep can't see all three legs to check.
+            # quotes "X", or "UNDER" for a TOTALS market) is the same
+            # "couldn't tell" case freshness failing already is -- not
+            # "evaluated, no surebet". If a previously-ACTIVE surebet's
+            # last leg simply stopped being quoted this poll, that must
+            # not be resolvable: nothing here confirms the arbitrage is
+            # actually gone, only that this sweep can't see every leg to
+            # check.
             continue
 
         # From here on the event's data was good enough to draw a real
@@ -163,7 +174,7 @@ def detect_surebet_candidates(
         # per-outcome identity (see SignalIdentity).
         evaluated_keys.add(SignalIdentity(event_id=event.id, market=market, outcome=None))
 
-        arbitrage = calculate_arbitrage(best)
+        arbitrage = calculate_arbitrage(best, required_outcomes=needed)
         if not arbitrage.is_surebet:
             continue
 

@@ -518,6 +518,19 @@ declares which phase it produces explicitly (`DEFAULT_MARKET` for
 pre-match sources; `MozzartFileCollector`'s `/live/matches` data uses
 `LIVE_MARKET` instead).
 
+`TOTALS + FULL_TIME + PRE_MATCH + 2.5` above is a real constant
+(`TOTALS_2_5_MARKET`), not just an example -- `ApiFootballCollector`
+produces it alongside `DEFAULT_MARKET`, the second market type this
+project actually detects. `models.market.required_outcomes(market_type)`
+is what a market type's outcome set actually *is* (`("1", "X", "2")` for
+THREE_WAY, `("OVER", "UNDER")` for TOTALS) -- `analysis.
+opportunity_detection.detect_surebet_candidates` uses it (checking
+`set(best) == set(required_outcomes)`, not a hardcoded outcome count)
+instead of assuming three outcomes, and feeds it to `analysis.
+arbitrage.calculate_arbitrage`'s own `required_outcomes` parameter,
+which already summed a generic margin over however many outcomes it was
+given.
+
 `line`/`rules`/`specifier` are canonicalized in `__post_init__`, not by
 every caller: `line` goes through `canonical_decimal()`
 (`Decimal(format(value.normalize(), "f"))`), which strips formatting
@@ -1102,6 +1115,23 @@ genuinely different real provider (not another fixture), this exercised
 matching, UTC normalization, raw payload retention, bookmaker identity,
 and freshness all at once, rather than any one of them in isolation.
 Verified against a real captured response before writing test fixtures.
+
+**Resolved:** a ninth round, the second half of the same "prove it"
+push -- a second market type, TOTALS 2.5 (see MarketIdentity above),
+produced end-to-end by `ApiFootballCollector` from a real `"Goals
+Over/Under"` bet. This immediately surfaced the exact gap the previous
+round's own review had already flagged in passing:
+`detect_surebet_candidates` checked `len(best) != 3`, hardcoding
+THREE_WAY's outcome count into what should have been a market-agnostic
+check -- fixed with `required_outcomes(market_type)` (see MarketIdentity
+above). `find_best_odds` and `detect_outliers`/VALUE_GAP needed no
+changes at all -- both already group by whatever `outcome` string is
+present, with no THREE_WAY-specific assumption baked in to begin with.
+Deliberately not wired into `run_detection`'s core sweep (still
+`market=DEFAULT_MARKET` only) -- the same boundary `LIVE_MARKET` drew
+before it: proving the detection layer generalizes is a different
+question from deciding `run_detection` should sweep multiple markets,
+left open rather than decided implicitly here.
 
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)

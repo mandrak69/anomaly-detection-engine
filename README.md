@@ -233,6 +233,14 @@ value -- every collector must explicitly say which phase it produces
 `PRE_MATCH`; `MozzartFileCollector` reads mozzartbet.com's `/live/matches`
 endpoint, genuinely live data, and uses `LIVE_MARKET` instead).
 
+`TOTALS + FULL_TIME + PRE_MATCH + 2.5` above isn't just an illustrative
+example -- `models.market.TOTALS_2_5_MARKET` is a real constant
+`ApiFootballCollector` produces (alongside `DEFAULT_MARKET`, from the
+same real response's "Goals Over/Under" bet), the second market type
+this project actually detects. Adding it is what surfaced (and fixed)
+`detect_surebet_candidates` hardcoding `len(best) == 3` -- see Surebet
+Detection below for `required_outcomes`.
+
 `line`/`rules`/`specifier` are canonicalized on construction
 (`__post_init__`), not by every caller remembering to: `line` goes
 through `canonical_decimal()`, which strips formatting differences
@@ -402,7 +410,7 @@ brand-new, unrelated bookmaker. Collectors with no such stable identifier
 derived-from-name behavior.
 
 `ApiFootballCollector` talks to https://www.api-football.com (api-sports.io)
-pre-match 1X2 odds -- a genuinely different real provider from
+pre-match odds -- a genuinely different real provider from
 the-odds-api.com, added specifically to prove cross-provider matching
 against real (not fixture) data: different team-name spellings, a
 different league-naming convention, a different bookmaker set. It is a
@@ -430,13 +438,20 @@ two calls, joined locally             /odds identifies each entry only
                                        skipped, not an error
 ```
 
-Odds come from the `"Match Winner"` bet (values `"Home"`/`"Draw"`/`"Away"`,
-mapped onto `"1"`/`"X"`/`"2"`); a bookmaker's own stable `bookmakers[].id`
-becomes `RawEventOdds.source_id`, the same role the-odds-api's `"key"`
-plays. Auth is a request header (`x-apisports-key`), not a URL query
-param -- pass `api_key=` or set the `API_FOOTBALL_KEY` environment
-variable (never hardcode a real key in source or commit it). The free
-plan (100 requests/day, no credit card, register directly at
+This collector produces two `MarketIdentity`s per bookmaker, each only
+if that bookmaker actually has a complete line: 1X2 from the `"Match
+Winner"` bet (`"Home"`/`"Draw"`/`"Away"` mapped onto `"1"`/`"X"`/`"2"`,
+`DEFAULT_MARKET`) and TOTALS 2.5 from the `"Goals Over/Under"` bet
+(`TOTALS_2_5_MARKET`) -- api-football.com bundles every line that bet
+covers (0.5, 1.5, 2.5, 3.5, ...) into one `values` list shaped `"Over
+2.5"`/`"Under 2.5"`, so only the `"... 2.5"` entries are extracted, not
+every line offered (see MarketIdentity above for why only 2.5, for now).
+A bookmaker's own stable `bookmakers[].id` becomes `RawEventOdds.
+source_id`, the same role the-odds-api's `"key"` plays. Auth is a
+request header (`x-apisports-key`), not a URL query param -- pass
+`api_key=` or set the `API_FOOTBALL_KEY` environment variable (never
+hardcode a real key in source or commit it). The free plan (100
+requests/day, no credit card, register directly at
 `dashboard.api-football.com` -- not every RapidAPI-listed free tier
 skips the card) is enough to exercise this end to end.
 
@@ -871,14 +886,23 @@ BEST       2.10   3.75   3.60
 
 ## Surebet Detection
 
-For a three-way market:
+The margin formula generalizes to however many outcomes a market's
+`required_outcomes` (`models.market.required_outcomes`) says it needs
+all priced -- three for THREE_WAY, two for TOTALS:
 
 ```text
-margin =
-    1 / best_1
-  + 1 / best_X
-  + 1 / best_2
+margin = sum(1 / best_odds[outcome] for outcome in required_outcomes)
 ```
+
+For a three-way market that's `1/best_1 + 1/best_X + 1/best_2`; for
+TOTALS it's `1/best_over + 1/best_under`. `calculate_arbitrage` itself
+has always taken `required_outcomes` as a parameter (default `("1",
+"X", "2")`, still correct for `reporting.console`'s still-THREE_WAY-only
+per-event breakdown); `detect_surebet_candidates` derives it from
+`market.market_type` and checks `set(best) == set(required_outcomes)`
+(not `len(best) == 3`) before treating an event as evaluated -- an event
+missing any one of a TOTALS market's two legs is exactly as much
+"couldn't tell this sweep" as a THREE_WAY market missing its draw price.
 
 If:
 
@@ -1485,6 +1509,7 @@ rate limiting
 [x] serialize_raw_event_odds's docstring corrected -- it claimed no collector retains the original source payload, no longer true since CollectionResult (see Data Collection above)
 [x] ACTIVE/RESOLVED/EXPIRED extracted into SignalStatus(StrEnum) in models/signal.py, the same treatment SignalType already got -- SignalRecord.status is now SignalStatus, not a bare str
 [x] Second real pre-match source: ApiFootballCollector (api-football.com) -- a genuinely different provider (different team-name spellings, league naming, bookmaker set), wired in as an opt-in supplemental collector (API_FOOTBALL_KEY), proving cross-provider matching against real data instead of only fixtures
+[x] Second market type: TOTALS_2_5_MARKET (models/market.py), produced end-to-end by ApiFootballCollector from a real "Goals Over/Under" bet -- surfaced (and fixed) detect_surebet_candidates hardcoding len(best) == 3; required_outcomes(market_type) now drives both the "all outcomes present" check and calculate_arbitrage's margin formula
 ```
 
 ---
@@ -1836,6 +1861,37 @@ URL query param the way the-odds-api.com's is. Verified against a real
 captured response (13 real bookmakers -- 10Bet, Bet365, Pinnacle,
 Betfair, and others -- for a real Argentine league fixture) before
 writing the trimmed test fixtures.
+
+**Done:** a ninth round, the second half of the same "prove it, don't
+just improve it architecturally" push -- a second market type, TOTALS
+2.5 (`models.market.TOTALS_2_5_MARKET`), produced end-to-end by
+`ApiFootballCollector` from a real `"Goals Over/Under"` bet (the same
+real response the eighth round's `"Match Winner"` odds came from). This
+immediately surfaced the exact gap the previous round's own review had
+already flagged in passing: `detect_surebet_candidates` checked
+`len(best) != 3`, hardcoding THREE_WAY's outcome count into what should
+have been a market-agnostic check. Fixed with
+`models.market.required_outcomes(market_type)` (`("1", "X", "2")` for
+THREE_WAY, `("OVER", "UNDER")` for TOTALS, `ValueError` for a market
+type with no known set yet -- HANDICAP's enum value exists but isn't
+wired in) -- `detect_surebet_candidates` now checks `set(best) ==
+set(required_outcomes)` instead of a hardcoded count, and
+`calculate_arbitrage` (which had *already* taken `required_outcomes` as
+a parameter, just never fed one derived from the market) receives it
+explicitly. `find_best_odds` and `detect_outliers`/VALUE_GAP needed no
+changes at all -- both group by whatever `outcome` strings are actually
+present, with no THREE_WAY-specific assumption baked in to begin with.
+`ApiFootballCollector.collect()` now produces up to two `RawEventOdds`
+per bookmaker (1X2 and TOTALS 2.5), each only when that bookmaker
+actually has a complete line for it; api-football.com bundles every
+totals line into one response, so extraction filters to just the 2.5
+line, the same narrow-MVP-first discipline `DEFAULT_MARKET`/
+`LIVE_MARKET` already followed for phase. Deliberately not wired into
+`run_detection`'s core sweep (still `market=DEFAULT_MARKET` only) --
+same boundary as `LIVE_MARKET` before it: proving the detection layer
+generalizes is a different question from deciding `run_detection` should
+sweep multiple markets, and that decision is left open rather than made
+implicitly by this round.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains
