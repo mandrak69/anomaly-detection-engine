@@ -18,7 +18,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "anomaly_detect
 # the second one wait instead of failing outright.
 DB_BUSY_TIMEOUT_SECONDS = 30
 
-_VALID_ODDS_SOURCES = ("demo", "the-odds-api")
+_VALID_ODDS_SOURCES = ("demo", "the-odds-api", "api-football")
 
 
 @dataclass(frozen=True)
@@ -56,9 +56,13 @@ class AppConfig:
     mozzart_mode: str
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
-    # None means "not configured" -- api-football.com is an opt-in
-    # supplemental source (see pipeline._supplemental_collectors), the
-    # same shape as mozzart_capture_dir above, not a required setting.
+    # None means "not configured". api-football.com can be either the
+    # opt-in supplemental source it started as (see
+    # pipeline._supplemental_collectors, same shape as
+    # mozzart_capture_dir above) or the primary one (ODDS_SOURCE=
+    # api-football, see pipeline.build_collectors) -- either way this
+    # field is where the key comes from; ApiFootballCollector itself
+    # raises if it ends up unset when actually needed.
     api_football_key: str | None
 
 

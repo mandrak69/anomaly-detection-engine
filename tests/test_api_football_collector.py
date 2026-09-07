@@ -311,6 +311,162 @@ def test_collect_never_logs_the_api_key(caplog):
     assert secret_key not in caplog.text
 
 
+TWO_FIXTURES_RESPONSE = {
+    "get": "fixtures",
+    "parameters": {"date": "2026-09-08"},
+    "errors": [],
+    "results": 2,
+    "paging": {"current": 1, "total": 1},
+    "response": [
+        {
+            "fixture": {"id": 2001, "date": "2026-09-08T00:15:00+00:00", "timezone": "UTC"},
+            "league": {"id": 128, "name": "League A", "country": "X", "season": 2026},
+            "teams": {
+                "home": {"id": 1, "name": "Team A1"},
+                "away": {"id": 2, "name": "Team A2"},
+            },
+        },
+        {
+            "fixture": {"id": 2002, "date": "2026-09-08T02:00:00+00:00", "timezone": "UTC"},
+            "league": {"id": 129, "name": "League B", "country": "Y", "season": 2026},
+            "teams": {
+                "home": {"id": 3, "name": "Team B1"},
+                "away": {"id": 4, "name": "Team B2"},
+            },
+        },
+    ],
+}
+
+
+def _match_winner_odds_response(fixture_id: int, *, current: int, total: int) -> dict:
+    return {
+        "get": "odds",
+        "parameters": {"date": "2026-09-08"},
+        "errors": [],
+        "results": 1,
+        "paging": {"current": current, "total": total},
+        "response": [
+            {
+                "league": {"id": 128, "name": "League A", "country": "X", "season": 2026},
+                "fixture": {
+                    "id": fixture_id,
+                    "timezone": "UTC",
+                    "date": "2026-09-08T00:15:00+00:00",
+                    "timestamp": 1788826500,
+                },
+                "update": "2026-09-07T12:01:17+00:00",
+                "bookmakers": [
+                    {
+                        "id": 8,
+                        "name": "Bet365",
+                        "bets": [
+                            {
+                                "id": 1,
+                                "name": "Match Winner",
+                                "values": [
+                                    {"value": "Home", "odd": "2.00"},
+                                    {"value": "Draw", "odd": "3.00"},
+                                    {"value": "Away", "odd": "4.00"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _paged_fetch_stub(fixtures_pages: dict[int, dict], odds_pages: dict[int, dict]):
+    """Like fetch_stub, but the response for each endpoint can differ by
+    the requested `page=` query param -- page 1 is requested with no
+    page param at all (see _fetch_all_pages), so it is looked up under
+    key 1 the same as every other page.
+    """
+    requested_urls: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested_urls.append(url)
+        page = int(url.rsplit("page=", 1)[1]) if "page=" in url else 1
+        pages = fixtures_pages if "/fixtures" in url else odds_pages
+        return json.dumps(pages[page]).encode("utf-8")
+
+    fetch.requested_urls = requested_urls
+    return fetch
+
+
+def test_collect_fetches_and_merges_every_page_of_a_paginated_odds_response():
+    odds_pages = {
+        1: _match_winner_odds_response(2001, current=1, total=2),
+        2: _match_winner_odds_response(2002, current=2, total=2),
+    }
+    fetch = _paged_fetch_stub({1: TWO_FIXTURES_RESPONSE}, odds_pages)
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    result = collector.collect().records
+
+    # One THREE_WAY record per fixture, one fixture per odds page --
+    # both pages must have been fetched and merged, not just page 1.
+    assert {r.home_team for r in result} == {"Team A1", "Team B1"}
+    assert any(url.endswith("&page=2") for url in fetch.requested_urls)
+
+
+def test_collect_merges_a_paginated_fixtures_response():
+    fixtures_pages = {
+        1: {**TWO_FIXTURES_RESPONSE, "paging": {"current": 1, "total": 2},
+            "response": [TWO_FIXTURES_RESPONSE["response"][0]]},
+        2: {**TWO_FIXTURES_RESPONSE, "paging": {"current": 2, "total": 2},
+            "response": [TWO_FIXTURES_RESPONSE["response"][1]]},
+    }
+    odds_pages = {
+        1: {
+            **_match_winner_odds_response(2001, current=1, total=1),
+            "response": [
+                _match_winner_odds_response(2001, current=1, total=1)["response"][0],
+                _match_winner_odds_response(2002, current=1, total=1)["response"][0],
+            ],
+        }
+    }
+    fetch = _paged_fetch_stub(fixtures_pages, odds_pages)
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    result = collector.collect().records
+
+    # Team A2/Team B2 only resolve if both fixtures pages' team names
+    # were actually merged before the odds/fixtures join happened.
+    assert {r.home_team for r in result} == {"Team A1", "Team B1"}
+
+
+def test_collect_source_payload_contains_every_fetched_page():
+    odds_pages = {
+        1: _match_winner_odds_response(2001, current=1, total=2),
+        2: _match_winner_odds_response(2002, current=2, total=2),
+    }
+    fetch = _paged_fetch_stub({1: TWO_FIXTURES_RESPONSE}, odds_pages)
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    collection = collector.collect()
+
+    payload = json.loads(collection.source_payload)
+    assert len(payload["odds"]["response"]) == 2
+
+
+def test_collect_raises_if_pagination_never_reports_completion():
+    # current never catches up to total -- must abort loudly rather than
+    # fetch pages forever inside an unattended poller.
+    def fetch(url: str) -> bytes:
+        if "/fixtures" in url:
+            return json.dumps(TWO_FIXTURES_RESPONSE).encode("utf-8")
+        return json.dumps(_match_winner_odds_response(2001, current=1, total=999)).encode(
+            "utf-8"
+        )
+
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    with pytest.raises(ApiFootballError, match="did not finish paginating"):
+        collector.collect()
+
+
 def test_parse_api_football_response_directly():
     result = parse_api_football_response(
         json.dumps(SAMPLE_FIXTURES_RESPONSE),

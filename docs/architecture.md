@@ -1236,6 +1236,69 @@ response's `paging.total > 1`, so a paginated day is visible instead of
 silently incomplete; actually looping `collect()` over every page is
 deferred until continuous/production polling needs it.
 
+**Resolved:** a twelfth round, pivoting deliberately from "correctness/
+architecture proof of concept" to "operational MVP" -- a system that
+runs unattended over real providers for hours/days and builds up real
+historical odds, rather than another market type or abstraction.
+
+First, `ODDS_SOURCE=api-football`: `build_collectors()` gained a branch
+building `ApiFootballCollector` directly as the *primary* collector
+(config.py's `_VALID_ODDS_SOURCES` gained the value), so a deployment
+with only an `API_FOOTBALL_KEY` no longer has to also pull in the JSON
+demo's synthetic primary collectors just to run. `_supplemental_
+collectors()` now skips building a second `ApiFootballCollector` when
+api-football is already the primary source, so it is never polled twice
+in one cycle. `run_detection`'s `analysis_time` branch, previously
+`odds_source == "the-odds-api"`, is now `odds_source != "demo"` -- every
+real source needs real wall-clock time, and this generalizes
+automatically to any future real source instead of needing the check
+updated by hand each time one is added.
+
+Second, `poller.py` -- the first actual continuous odds-monitoring
+process (`app.py`'s single-shot `main()` is unchanged, still useful for
+a cron/systemd-timer-driven single poll). `run_forever()` repeats
+`run_cycle()` (the same `run_ingestion` -> `run_detection` sequence)
+every `POLL_INTERVAL_SECONDS`, catching and logging any exception a
+cycle raises rather than ending the process -- the outer safety net on
+top of `OddsIngestionService.run()`'s existing per-collector failure
+isolation. `main()` handles `SIGINT`/`SIGTERM` via a `threading.Event`
+checked between cycles, so an in-progress cycle always finishes cleanly.
+`run_ingestion()`'s two `print()` calls became `logger.info(...)` as
+part of this -- the same gap `run_detection`'s own `print()` removal
+closed for detection several rounds ago, just never revisited for
+ingestion until a days-long process made it matter.
+
+Third, real API-Football pagination, replacing the previous round's
+warning-only handling: `ApiFootballCollector.collect()` now fetches and
+merges every page of a paginated response (`_fetch_all_pages`) before
+parsing. `parse_api_football_response` was split into itself (unchanged
+public signature) and `_parse_envelopes(fixtures_data, odds_data,
+observed_at)` operating on already-loaded dicts, so `collect()` can hand
+it merged, multi-page envelopes directly -- each page is parsed twice
+from the same fetched bytes (once with `parse_float=Decimal` for
+extraction, once as plain JSON for `source_payload`, since a
+Decimal-parsed dict cannot be re-serialized by plain `json.dumps()`). A
+bounded `_MAX_PAGES` guard raises `ApiFootballError` if `paging.current`
+never catches up to `paging.total`, protecting an unattended poller from
+an infinite fetch loop.
+
+Fourth, `scripts/inspect_data.py` -- data-sanity tooling, deliberately
+not a report: `summary`, `events`/`event <id>` (one event's full odds
+history), and `cross-provider` (events whose teams were independently
+resolved by 2+ distinct providers via `source_team_mappings`). That last
+command works around `odds_snapshots` having no `provider_id`/
+`collector_run_id` column of its own -- there is no direct way to say
+"this specific snapshot came from provider X", only "this canonical
+bookmaker/team has been seen from provider X at some point" -- so
+team-mapping provider diversity is the closest already-existing signal
+for a genuine cross-provider match, without adding new provenance
+columns.
+
+What real, unattended operation over these four pieces still needs to
+prove -- a 24-48h soak run, and a genuine cross-provider match verified
+via `inspect_data.py cross-provider` -- is explicitly operational, not
+something further code changes alone can complete.
+
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
 remains deliberately deferred -- the right boundary to draw before this

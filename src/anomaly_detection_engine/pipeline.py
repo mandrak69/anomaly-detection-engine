@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +35,8 @@ from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.signal_repository import SignalCandidate, SignalRepository
+
+logger = logging.getLogger(__name__)
 
 # Known variant spellings fed to every FixtureCatalog instance below --
 # harmless where irrelevant (e.g. for Mozzart's own Serbian team names),
@@ -124,6 +127,11 @@ def _api_football_collector(config: AppConfig) -> OddsCollector | None:
     """Builds the api-football.com supplemental collector, if
     API_FOOTBALL_KEY is set. Opt-in the same way Mozzart is -- absence of
     the key means this source is simply not configured, not an error.
+
+    Only used when api-football is *not* already the primary source (see
+    build_collectors/_supplemental_collectors) -- ODDS_SOURCE=api-football
+    builds its own primary ApiFootballCollector directly, and adding one
+    here too would poll the exact same endpoint twice every cycle.
     """
     if not config.api_football_key:
         return None
@@ -149,9 +157,10 @@ def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
     if mozzart is not None:
         collectors.append(mozzart)
 
-    api_football = _api_football_collector(config)
-    if api_football is not None:
-        collectors.append(api_football)
+    if config.odds_source != "api-football":
+        api_football = _api_football_collector(config)
+        if api_football is not None:
+            collectors.append(api_football)
 
     return collectors
 
@@ -162,9 +171,20 @@ def build_collectors(config: AppConfig) -> list[OddsCollector]:
     The JSON demo path runs two polls against two fixed sample files (a
     second one with moved odds) so the movement report has something to
     compare on a single script run, instead of only being demonstrable
-    across separate invocations. The live path stays single-poll: a
-    second real API call a few seconds later would double credit usage
-    without a real market having necessarily moved in that time.
+    across separate invocations. The live paths (the-odds-api,
+    api-football) stay single-poll: a second real API call a few seconds
+    later would double credit usage without a real market having
+    necessarily moved in that time.
+
+    ODDS_SOURCE=api-football exists for exactly one reason: to let
+    api-football.com be used *without* also pulling in the JSON demo's
+    synthetic data, for anyone who only has an API_FOOTBALL_KEY (no
+    the-odds-api key) and wants a dataset made entirely of real
+    observations -- mixing demo and real data into the same persistent
+    database would otherwise be the only option. ApiFootballCollector
+    itself still raises if API_FOOTBALL_KEY ends up unset, the same
+    "fail loudly at the collector, not silently in load_config()"
+    pattern _the_odds_api_collector already follows for ODDS_API_KEY.
 
     Unlike the old build_collectors_and_events(), no discovery pass or
     replay wrapping is needed here: FixtureCatalog resolves events on the
@@ -174,6 +194,8 @@ def build_collectors(config: AppConfig) -> list[OddsCollector]:
     """
     if config.odds_source == "the-odds-api":
         primary_collectors: list[OddsCollector] = [_the_odds_api_collector(config)]
+    elif config.odds_source == "api-football":
+        primary_collectors = [ApiFootballCollector(api_key=config.api_football_key)]
     else:
         samples_dir = Path(__file__).resolve().parents[2] / "data" / "samples"
         primary_collectors = [
@@ -200,10 +222,19 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
     reports only the events its own poll actually resolved a record
     against; the union across every poll this cycle is this function's
     return value.
+
+    Logs via the standard logging module, not print() -- matters now
+    that poller.run_forever() calls this every cycle of a
+    long-running process: a plain print() would bypass whatever log
+    handlers/files an operator has configured for that process, the
+    same reasoning run_detection's own print()s were removed for
+    earlier (see that function's docstring).
     """
     collectors = build_collectors(config)
     sources = ", ".join(collector.source for collector in collectors)
-    print(f"Sources: {sources} ({len(collectors)} poll(s))")
+    logger.info(
+        "ingestion.cycle.started", extra={"sources": sources, "poll_count": len(collectors)}
+    )
 
     touched: dict[str, Event] = {}
 
@@ -234,9 +265,16 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
             metrics=runtime.metrics,
         )
         run = service.run()
-        print(
-            f"Poll {poll_number}/{len(collectors)} - collector run {run.id}: "
-            f"{run.status.value} ({run.records_accepted}/{run.records_received} accepted)"
+        logger.info(
+            "ingestion.cycle.poll_completed",
+            extra={
+                "poll_number": poll_number,
+                "poll_count": len(collectors),
+                "run_id": run.id,
+                "status": run.status.value,
+                "records_accepted": run.records_accepted,
+                "records_received": run.records_received,
+            },
         )
         for event in service.touched_events:
             touched[event.id] = event
@@ -439,9 +477,16 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     instant, a signal genuinely re-confirmed this exact cycle could be
     immediately re-expired by the very next line.
     """
+    # Every non-demo source polls in real time, so real wall-clock "now"
+    # is the correct analysis_time for any of them -- checked as "not
+    # demo" rather than naming each real source (originally just
+    # "the-odds-api") so a new real source (api-football, and whatever
+    # comes after it) gets this right automatically instead of needing
+    # this condition remembered and updated by hand every time one is
+    # added.
     analysis_time = (
         datetime.now(UTC)
-        if config.odds_source == "the-odds-api"
+        if config.odds_source != "demo"
         else demo_analysis_time(events, runtime.odds_repository)
     )
     now = datetime.now(UTC)

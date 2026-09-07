@@ -7,7 +7,10 @@ import pytest
 import anomaly_detection_engine.config as config
 import anomaly_detection_engine.pipeline as pipeline
 from anomaly_detection_engine.analysis.freshness import FreshnessPolicy
-from anomaly_detection_engine.collectors.api_football_collector import ApiFootballCollector
+from anomaly_detection_engine.collectors.api_football_collector import (
+    ApiFootballCollector,
+    ApiFootballError,
+)
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
@@ -173,6 +176,75 @@ def test_mozzart_and_api_football_can_both_be_active_at_once(monkeypatch, tmp_pa
     assert len(collectors) == 4
     assert isinstance(collectors[2], MozzartFileCollector)
     assert isinstance(collectors[3], ApiFootballCollector)
+
+
+def test_api_football_source_used_as_primary_when_configured(monkeypatch):
+    # ODDS_SOURCE=api-football exists so a deployment with only an
+    # API_FOOTBALL_KEY (no the-odds-api key) can build a dataset made
+    # entirely of real observations, without the JSON demo's synthetic
+    # primary collectors also landing in the same database.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 1
+    assert isinstance(collectors[0], ApiFootballCollector)
+    assert collectors[0].provider_id == "api-football"
+
+
+def test_api_football_source_without_key_raises(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+
+    with pytest.raises(ApiFootballError):
+        pipeline.build_collectors(config.load_config())
+
+
+def test_api_football_primary_is_not_also_added_as_supplemental(monkeypatch, tmp_path):
+    # Without the odds_source != "api-football" guard in
+    # _supplemental_collectors, this would build two ApiFootballCollector
+    # instances and poll the same endpoint twice every cycle.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+    monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(tmp_path))
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 2
+    assert isinstance(collectors[0], ApiFootballCollector)
+    assert isinstance(collectors[1], MozzartFileCollector)
+
+
+def test_run_detection_uses_wall_clock_time_for_any_non_demo_source(monkeypatch):
+    # analysis_time must be real wall-clock "now" for every real source,
+    # not just the-odds-api -- checked as odds_source != "demo" (see
+    # run_detection) so api-football (and any future real source) gets
+    # this right automatically instead of needing this condition
+    # remembered by hand. Proven with an old observed_at: under
+    # demo_analysis_time an old snapshot looks "fresh" (analysis_time is
+    # computed from the newest observation in the batch); under real
+    # wall-clock time the same snapshot is correctly rejected as stale,
+    # so no surebet is created at all.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    ancient_start = datetime.fromisoformat("2000-01-01T00:00:00+00:00")
+    match = FixtureCatalog(runtime.connection, provider_id="test").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=ancient_start,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=ancient_start)
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 0
 
 
 def test_run_ingestion_returns_only_events_touched_this_cycle(monkeypatch):

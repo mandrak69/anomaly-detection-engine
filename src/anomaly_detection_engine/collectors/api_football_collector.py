@@ -25,6 +25,12 @@ _OVER_UNDER_BET_NAME = "Goals Over/Under"
 _TOTALS_2_5_LINE = "2.5"
 _HANDICAP_RESULT_BET_NAME = "Handicap Result"
 _HANDICAP_MINUS_1_LINE = "-1"
+# Generous but bounded -- a real day's fixtures should never come close
+# to this many pages. Exists so a bug (an API that never reports
+# current catching up to total) turns into a loud, immediate
+# ApiFootballError instead of an infinite fetch loop inside an
+# unattended, long-running poller (see poller.py).
+_MAX_PAGES = 50
 
 
 class ApiFootballError(RuntimeError):
@@ -68,21 +74,29 @@ def parse_api_football_response(
     fixtures response (team names unknown) is skipped -- there is no
     home_team/away_team to build a RawEventOdds from, and skipping one
     fixture must not abort every other one in the same day's response.
+
+    Takes one already-complete response per endpoint -- collect() is
+    responsible for fetching every page of a paginated day and merging
+    them into one such response first (see _fetch_all_pages), so this
+    function never needs to know pagination happened at all.
     """
     fixtures_data = _load_envelope(fixtures_raw, what="fixtures")
     odds_data = _load_envelope(odds_raw, what="odds")
+    return _parse_envelopes(fixtures_data, odds_data, observed_at)
 
-    # collect() never sends a page= param and never requests page 2+ --
-    # fine while a day's results fit on one page (true for every response
-    # seen so far), but a real response that ever grows past api-football
-    # .com's per-page limit would otherwise be silently truncated with no
-    # sign anything was missed. Logged, not raised: full pagination
-    # (looping collect() over every page) is real work deferred until it
-    # is actually needed for continuous/production polling -- this is
-    # only the "fail loud instead of silently incomplete" floor until then.
-    _warn_if_paginated(fixtures_data, what="fixtures")
-    _warn_if_paginated(odds_data, what="odds")
 
+def _parse_envelopes(
+    fixtures_data: dict, odds_data: dict, observed_at: datetime
+) -> list[RawEventOdds]:
+    """The actual per-fixture/per-bookmaker extraction behind
+    parse_api_football_response, operating on already-loaded (and, for
+    collect()'s own use, already page-merged) envelope dicts rather than
+    raw JSON text -- split out so collect() can hand it merged,
+    multi-page envelopes directly instead of re-serializing them back to
+    JSON text first (which would also have to smuggle _load_envelope's
+    Decimal-parsed odds back through a plain json.dumps, which cannot
+    serialize Decimal at all).
+    """
     team_names = _team_names_by_fixture_id(fixtures_data)
 
     result: list[RawEventOdds] = []
@@ -166,25 +180,67 @@ def _load_envelope(raw: str | bytes, *, what: str) -> dict:
     return data
 
 
-def _warn_if_paginated(data: dict, *, what: str) -> None:
-    """api-football.com's envelope carries paging.current/paging.total;
-    collect() only ever fetches page 1 (no page= param sent at all), so
-    a total > 1 means this response's dataset is incomplete -- see this
-    function's call site for why that is only logged, not raised, for
-    now.
+def _fetch_all_pages(
+    fetch: Callable[[str], bytes], url_base: str, *, what: str
+) -> tuple[dict, dict]:
+    """Fetches every page of one api-football.com list endpoint
+    (paging.current/paging.total), merging each page's "response" array
+    into one envelope dict shaped like a single, complete response --
+    every caller (parse_api_football_response's business logic,
+    collect()'s source_payload) sees one complete envelope and never
+    needs to know more than one HTTP call was involved.
+
+    Returns (decimal_envelope, plain_envelope): the same bytes parsed
+    twice, once with parse_float=Decimal (via _load_envelope, for exact
+    odds precision feeding the actual extraction) and once as plain
+    JSON (for source_payload -- a faithful record of what was actually
+    received, not run back through the Decimal-parsed structure, which
+    plain json.dumps cannot serialize at all).
+
+    url_base must not already include a `page` query param; `&page=N`
+    is appended for every page after the first (page 1 is requested
+    exactly as api-football.com's own default, with no page param at
+    all). Raises ApiFootballError (via the same _MAX_PAGES guard as
+    everything else that must fail loud rather than loop silently) if a
+    response never reports paging.current catching up to paging.total
+    within a sane number of pages -- protects an unattended,
+    long-running poller (see poller.py) from an infinite fetch loop
+    should the API ever misbehave.
     """
-    paging = data.get("paging") or {}
-    total = paging.get("total")
-    if isinstance(total, int) and total > 1:
-        logger.warning(
-            "api_football.response_paginated",
-            extra={
-                "what": what,
-                "current_page": paging.get("current"),
-                "total_pages": total,
-                "date": data.get("parameters", {}).get("date"),
-            },
-        )
+    page = 1
+    merged_decimal: dict | None = None
+    merged_plain: dict | None = None
+
+    while True:
+        if page > _MAX_PAGES:
+            raise ApiFootballError(
+                f"api-football.com {what} response did not finish paginating "
+                f"within {_MAX_PAGES} pages -- aborting rather than fetching "
+                f"forever."
+            )
+
+        url = url_base if page == 1 else f"{url_base}&page={page}"
+        raw = fetch(url)
+        decimal_data = _load_envelope(raw, what=what)
+        plain_data = json.loads(raw)
+
+        if merged_decimal is None:
+            merged_decimal, merged_plain = decimal_data, plain_data
+        else:
+            merged_decimal["response"].extend(decimal_data["response"])
+            merged_plain["response"].extend(plain_data["response"])
+
+        paging = decimal_data.get("paging") or {}
+        total = paging.get("total") or 1
+        current = paging.get("current") or 1
+        if current >= total:
+            break
+        page += 1
+
+    if page > 1:
+        logger.info("api_football.paginated", extra={"what": what, "pages_fetched": page})
+
+    return merged_decimal, merged_plain
 
 
 def _team_names_by_fixture_id(fixtures_data: dict) -> dict[int, tuple[str, str]]:
@@ -313,9 +369,11 @@ class ApiFootballCollector(OddsCollector):
 
     `fetch` is injectable (a callable taking a request URL and returning
     the raw response body as bytes) so tests can supply canned responses
-    instead of making real network calls -- collect() calls it twice,
-    once for /fixtures and once for /odds, both for the same date. It
-    defaults to a real HTTP GET via urllib.
+    instead of making real network calls -- collect() calls it at least
+    twice, once each for /fixtures and /odds for the same date, and once
+    more per additional page if either response is paginated (see
+    _fetch_all_pages: every page is fetched and merged before parsing,
+    not just page 1). It defaults to a real HTTP GET via urllib.
 
     date defaults to today's UTC date, recomputed on every collect()
     call, so each poll cycle naturally fetches that day's fixtures --
@@ -359,26 +417,28 @@ class ApiFootballCollector(OddsCollector):
 
         logger.info("api_football.request", extra={"date": date_str})
 
-        fixtures_raw = self._fetch(f"{self._base_url}/fixtures?date={date_str}")
-        odds_raw = self._fetch(f"{self._base_url}/odds?date={date_str}")
+        fixtures_decimal, fixtures_plain = _fetch_all_pages(
+            self._fetch, f"{self._base_url}/fixtures?date={date_str}", what="fixtures"
+        )
+        odds_decimal, odds_plain = _fetch_all_pages(
+            self._fetch, f"{self._base_url}/odds?date={date_str}", what="odds"
+        )
 
         observed_at = datetime.now(UTC)
-        result = parse_api_football_response(fixtures_raw, odds_raw, observed_at)
+        result = _parse_envelopes(fixtures_decimal, odds_decimal, observed_at)
 
         logger.info(
             "api_football.response",
             extra={"date": date_str, "raw_records_produced": len(result)},
         )
 
-        # Both raw responses, not just the odds one -- a parser bug fixed
-        # later needs the fixtures response too to reprocess (team names
-        # aren't recoverable from the odds response alone).
-        source_payload = json.dumps(
-            {
-                "fixtures": json.loads(fixtures_raw),
-                "odds": json.loads(odds_raw),
-            }
-        )
+        # Both merged responses, not just the odds one -- a parser bug
+        # fixed later needs the fixtures response too to reprocess (team
+        # names aren't recoverable from the odds response alone). Built
+        # from the plain (non-Decimal) parse of every page already
+        # fetched above -- not re-fetched, and not the Decimal-parsed
+        # dicts, which plain json.dumps cannot serialize.
+        source_payload = json.dumps({"fixtures": fixtures_plain, "odds": odds_plain})
         return CollectionResult(source_payload=source_payload, records=result)
 
     def _http_get(self, url: str) -> bytes:

@@ -157,9 +157,11 @@ anomaly-detection-engine/
 │       ├── app.py
 │       ├── config.py
 │       ├── pipeline.py
+│       ├── poller.py
 │       └── runtime.py
 ├── tests/
 ├── scripts/
+│   ├── inspect_data.py
 │   └── watch_capture.py
 ├── pyproject.toml
 ├── requirements.txt
@@ -470,12 +472,20 @@ skips the card) is enough to exercise this end to end.
 
 Which primary source `pipeline.build_collectors()` uses is chosen by
 `ODDS_SOURCE`, resolved once in `config.load_config()` and validated
-eagerly: `"demo"` (the default) or `"the-odds-api"`, anything else raises
-`ValueError` immediately at startup. A typo here
+eagerly: `"demo"` (the default), `"the-odds-api"`, or `"api-football"`,
+anything else raises `ValueError` immediately at startup. A typo here
 (`ODDS_SOURCE=the-odds-ap1`) must not silently fall back to demo data --
 that is exactly the kind of misconfiguration that would go unnoticed
 once this runs unattended, the same reasoning `ODDS_API_MODE`/
-`MOZZART_MODE` below already followed.
+`MOZZART_MODE` below already followed. `ODDS_SOURCE=api-football` exists
+specifically so a deployment with only an `API_FOOTBALL_KEY` (no
+the-odds-api key) can build a dataset made entirely of real observations
+-- otherwise api-football.com could only ever be layered as a
+*supplemental* collector on top of the JSON demo's synthetic primary
+data (see below), which is exactly the mixing a real dataset doesn't
+want. `_supplemental_collectors()` skips adding a second
+`ApiFootballCollector` whenever api-football is already the primary
+source, so it is never polled twice in one cycle.
 
 `AppConfig` (`config.py`, built by `load_config()`) is every
 environment-variable decision this app makes, resolved exactly once at
@@ -563,11 +573,21 @@ ODDS_SOURCE=the-odds-api ODDS_API_KEY=<key> python -m anomaly_detection_engine.a
 ODDS_SOURCE=the-odds-api ODDS_API_MODE=manual ODDS_API_CAPTURE_DIR=./odds-api-capture \
     python -m anomaly_detection_engine.app
 
+# api-football.com as the primary (and only) real source -- a dataset made
+# entirely of real observations, no JSON demo data mixed in
+ODDS_SOURCE=api-football API_FOOTBALL_KEY=<key> python -m anomaly_detection_engine.app
+
 # Mozzart as a supplemental source alongside whichever primary is active
 MOZZART_CAPTURE_DIR=./mozzart python -m anomaly_detection_engine.app
 
 # api-football.com as a supplemental source alongside whichever primary is active
 API_FOOTBALL_KEY=<key> python -m anomaly_detection_engine.app
+
+# Continuous polling instead of a single one-shot cycle (poller.py) --
+# any of the above env var combinations apply the same way, plus an
+# optional POLL_INTERVAL_SECONDS (default 300)
+ODDS_SOURCE=api-football API_FOOTBALL_KEY=<key> POLL_INTERVAL_SECONDS=120 \
+    python -m anomaly_detection_engine.poller
 ```
 
 Mozzart, `ApiFootballCollector`, and `TheOddsApiManualCollector` (in
@@ -1533,6 +1553,10 @@ rate limiting
 [x] ApiFootballCollector now reads each fixture's "update" field into RawEventOdds.source_timestamp -- same freshness-timestamp gap already fixed for the-odds-api's last_update, previously left quote_time silently falling back to observed_at (when *we* polled, not when the quote was actually current)
 [x] Canonical bookmaker registry (BookmakerCatalog + bookmakers/source_bookmaker_mappings), deliberately conservative (exact/normalized-name matching only, no fuzzy auto-merge) -- the same real bookmaker reported by two providers under two different provider-specific ids (the-odds-api's "bet365" vs api-football's "8") now resolves to one canonical Bookmaker.id instead of being treated as two unrelated bookmakers
 [x] ApiFootballCollector.collect() logs a warning if a response's paging.total > 1 (page 1 is all it ever fetches) -- non-blocking for now, but no longer silently incomplete
+[x] ODDS_SOURCE=api-football: api-football.com can now be the primary source, not just an opt-in supplemental one -- a deployment with only an API_FOOTBALL_KEY (no the-odds-api key) no longer has to also pull in the JSON demo's synthetic data to run at all
+[x] poller.py: a continuous ingest+detect runner (run_forever, one process, configurable POLL_INTERVAL_SECONDS) alongside app.py's existing single-shot entrypoint -- the first actual odds-monitoring process, not just a poll cycle that exits; isolates a whole cycle's own failure (logs and keeps going) on top of OddsIngestionService's existing per-collector isolation, and handles SIGINT/SIGTERM for a clean stop between cycles
+[x] ApiFootballCollector.collect() now fetches and merges every page of a paginated response instead of only warning about page 1 -- replaces the previous round's warning-only handling, with a bounded page-count safety cap so a misbehaving response can't loop an unattended poller forever
+[x] scripts/inspect_data.py: data-sanity CLI (summary/events/event/cross-provider commands), deliberately not a report -- quick, direct answers to "is the dataset actually good" (counts per table, one event's full odds history, which events have been independently resolved by 2+ distinct providers) while running a real continuous ingest
 ```
 
 ---
@@ -2015,6 +2039,99 @@ practice. `parse_api_football_response` now logs a warning when a
 response's `paging.total > 1`, so a paginated day is visible instead of
 silently incomplete; looping `collect()` over every page is deferred
 until continuous/production polling actually needs it.
+
+**Done:** a twelfth round, pivoting deliberately from "correctness/
+architecture proof of concept" to "operational MVP" -- the goal from here
+is a system that runs unattended over real providers for hours/days,
+builds up real historical odds, and produces signals any future
+report/dashboard can read, rather than adding another market type or
+abstraction. Four pieces, in the order they were done:
+
+First, `ODDS_SOURCE=api-football` -- `_VALID_ODDS_SOURCES` (config.py)
+gained a third value, and `build_collectors()` gained a branch building
+`ApiFootballCollector` directly as the *primary* collector (raising the
+same `ApiFootballError` it always has if `API_FOOTBALL_KEY` ends up
+unset, mirroring `_the_odds_api_collector`'s "fail loudly at the
+collector, not silently in `load_config()`" pattern for
+`ODDS_API_KEY`). Before this, api-football.com could only ever be layered
+on top of either the JSON demo or the-odds-api as a *supplemental*
+collector -- a deployment with only an `API_FOOTBALL_KEY` had no way to
+build a dataset made entirely of real observations without the demo's
+synthetic primary collectors landing in the same persistent database
+too. `_supplemental_collectors()` now skips building a second
+`ApiFootballCollector` whenever api-football is already the primary
+source, so it is never polled twice in the same cycle. `run_detection`'s
+`analysis_time` branch, which previously named `the-odds-api` explicitly,
+is now `odds_source != "demo"` -- every real source needs real wall-clock
+time, and this way a future real source gets that right automatically
+instead of the condition needing to be remembered and updated by hand
+each time one is added.
+
+Second, `poller.py` -- the first actual continuous odds-monitoring
+process, not just a poll cycle that runs once and exits (`app.py`'s
+`main()` is kept exactly as-is for a cron/systemd-timer-driven single
+poll, or a one-off manual run). `run_forever()` repeats `run_cycle()`
+(the same `run_ingestion` -> `run_detection` sequence `app.py` already
+did once) every `POLL_INTERVAL_SECONDS`, catching and logging any
+exception a cycle raises instead of letting it end the whole process --
+`OddsIngestionService.run()` already isolates a single collector's own
+failure into a `FAILED` `CollectorRun` without raising, so this is the
+outer safety net for whatever escapes that (a `FixtureCatalog`/
+`BookmakerCatalog`/database error, an unexpected bug in detection). A run
+meant to keep going for days should not end because of one bad cycle.
+`main()` registers `SIGINT`/`SIGTERM` handlers that set a
+`threading.Event`, checked between cycles (not inside one) so an
+in-progress cycle always finishes cleanly rather than being interrupted
+mid-write. As part of this, `run_ingestion()`'s two `print()` calls were
+converted to `logger.info(...)` -- a plain `print()` bypassing whatever
+log handlers/files an operator configures for a days-long process is
+exactly the gap `run_detection`'s own `print()` removal closed for
+detection several rounds ago; ingestion had simply never been revisited
+since.
+
+Third, real API-Football pagination, replacing the previous round's
+warning-only handling. `ApiFootballCollector.collect()` now fetches every
+page of a paginated `/fixtures` or `/odds` response and merges them
+before parsing (`_fetch_all_pages`), instead of only fetching page 1 and
+logging that more existed. Each page is parsed twice from the same fetch
+-- once with `parse_float=Decimal` (via the existing `_load_envelope`)
+for the actual extraction, once as plain JSON for `source_payload` --
+since a Decimal-parsed dict can't be re-serialized by a plain
+`json.dumps()` the way `source_payload` needs. `parse_api_football_
+response` was split into itself (unchanged public signature, still takes
+raw JSON text, used directly by its own existing test) and a new
+`_parse_envelopes(fixtures_data, odds_data, observed_at)` operating on
+already-loaded dicts, so `collect()` can hand it merged, multi-page
+envelopes without a raw-text round trip. A bounded `_MAX_PAGES` guard
+raises `ApiFootballError` if a response's `paging.current` never catches
+up to `paging.total` within a sane number of pages -- protects an
+unattended, long-running poller from an infinite fetch loop should the
+API ever misbehave.
+
+Fourth, `scripts/inspect_data.py` -- development/admin data-sanity
+tooling, deliberately not a report or dashboard (out of scope for this
+round): `summary` (counts across every table, collector runs and signals
+grouped by provider/status), `events`/`event <id>` (list recent events;
+show one event's full odds history across every bookmaker/market with
+observed_at/source_timestamp), and `cross-provider` (events whose home
+or away team was independently resolved by 2+ distinct providers via
+`source_team_mappings`). That last command is deliberately *not* traced
+through `odds_snapshots` itself -- that table has no `provider_id`/
+`collector_run_id` column, so there is no way to say "this specific
+snapshot came from provider X" directly, only "this canonical bookmaker/
+team has been seen from provider X at some point"; team-mapping provider
+diversity is the closest direct, already-existing signal for "this event
+is a genuine cross-provider match" without adding new provenance columns.
+
+What real, unattended operation over these four pieces still needs to
+prove -- a 24-48h soak run against real providers (does polling survive,
+does the same event stay the same canonical event, does bookmaker mapping
+stay stable, does `ACTIVE -> RESOLVED/EXPIRED` behave correctly over real
+time, does the database grow as expected) and a genuine cross-provider
+match found and verified via `inspect_data.py cross-provider` -- is
+explicitly operational, not something this round's code changes can
+themselves complete; it is the next step once a real deployment is
+actually running.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains
