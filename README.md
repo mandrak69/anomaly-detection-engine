@@ -1564,6 +1564,12 @@ rate limiting
 [x] ApiFootballCollector keeps whatever pages it fetched successfully when a real response has more pages than the free plan allows to fetch (logged, not raised) -- previously the whole day's fetch aborted the moment the plan rejected one page, discarding pages that had already succeeded
 [x] load_dotenv() treats a blank "KEY=" line in .env as unset rather than os.environ[KEY] = "" -- caught live: a blank DB_PATH= line was silently opening a throwaway private temp database instead of the persistent default
 [x] ODDS_API_KEY now flows through AppConfig (odds_api_key) like API_FOOTBALL_KEY already did, instead of TheOddsApiCollector reading os.environ directly -- completes the .env/environment -> load_config() -> AppConfig -> collectors boundary for every real credential, not just some of them
+[x] Real-source freshness: run_detection() used to pass the hardcoded 5-minute DEMO_FRESHNESS_POLICY to every source; AppConfig.max_quote_age/max_observation_spread (MAX_QUOTE_AGE_MINUTES/MAX_QUOTE_SPREAD_MINUTES) now drive a real production policy for anything but demo (pipeline.resolve_freshness_policy)
+[x] validate_freshness() filters stale/future-skewed snapshots individually instead of invalidating the whole event on one bad bookmaker -- FreshnessResult.fresh_snapshots is what detect_surebet_candidates/detect_value_gap_candidates/reporting.console now actually evaluate
+[x] Fixed calculate_arbitrage's theoretical_profit_percent: was (1 - margin) * 100, not the actual guaranteed ROI on staked money -- now (1/margin - 1) * 100 (margin=0.95 is really ~5.263%, not 5.0%)
+[x] ArbitrageResult.stake_percent: proportional stake allocation per outcome so every result pays out identically, computed alongside margin/profit (a future report applies it to whatever total stake it likes)
+[x] BestOddsResult/OutlierResult/SurebetLeg/ValueGapCandidate now carry bookmaker_id/quote_time/collector_run_id through from the winning OddsSnapshot -- a persisted signal's details can be traced back to exactly which run/provider/original payload it came from
+[x] CollectionResult.complete: False when a collector knows its own dataset is incomplete (ApiFootballCollector hitting the plan's page-fetch cap) even though every fetched record is genuine -- OddsIngestionService.run() now reports PARTIAL, not SUCCESS, for a capped poll
 ```
 
 ---
@@ -2236,6 +2242,69 @@ odds_api_key` (`_the_odds_api_collector` passes it to
 `API_FOOTBALL_KEY`/`api_football_key` already did, instead of
 `TheOddsApiCollector` being the only collector left reading
 `os.environ` directly for its credential.
+
+**Done:** a fourteenth round, found by external review of the running
+soak test and confirmed against its own real data -- the biggest
+correctness batch since the engine started collecting real observations.
+Four fixes, in the order they were made and verified.
+
+First, real-source freshness. `run_detection()` computed a real
+`analysis_time` for non-demo sources but still passed every source the
+same hardcoded `DEMO_FRESHNESS_POLICY` (5-minute max age) -- a real
+API-Football quote 40 minutes old (their own `update` timestamp, which
+this project already maps correctly) would fail freshness every time,
+so nothing ever got evaluated. `AppConfig.max_quote_age`/
+`max_observation_spread` (`MAX_QUOTE_AGE_MINUTES`/
+`MAX_QUOTE_SPREAD_MINUTES`, defaults 60/30) now drive a real policy for
+any non-demo source via `pipeline.resolve_freshness_policy()`, used by
+both `run_detection` and `reporting.console.print_reports` so the two
+can't silently disagree on what "fresh" means. Worse than the fixed
+threshold: `validate_freshness()` invalidated an entire event the
+moment *any one* snapshot was stale -- four bookmakers, one lagging by
+45 minutes, and the whole event (including three genuinely fresh,
+evaluable bookmakers) was thrown out. `validate_freshness()` now
+filters stale (and future-skewed) snapshots individually;
+`FreshnessResult.fresh_snapshots` is the survivor cohort
+`detect_surebet_candidates`/`detect_value_gap_candidates`/
+`reporting.console` actually run best-odds/outlier detection over, with
+`stale_sources` kept for visibility rather than as a reason to give up.
+Confirmed against real soak-test data: `active_value_gaps` went from
+zero (every real cycle before this fix) to genuine detected signals the
+very next run.
+
+Second, `calculate_arbitrage`'s `theoretical_profit_percent` was
+`(1 - margin) * 100`, which is not the actual guaranteed ROI on staked
+money. Proportional staking (`stake_i = T * (1/odds_i) / margin`) makes
+every outcome's payout equal `T/margin` regardless of which one wins,
+so guaranteed profit is `T * (1/margin - 1)` -- `margin=0.95` is really
+~5.263% ROI, not the 5.0% the old formula reported. Fixed to
+`(1/margin - 1) * 100`; `ArbitrageResult` also gained `stake_percent`
+(per outcome, computed alongside `margin`/profit) so a future report can
+show *how much* of total stake goes on each leg without this layer ever
+needing to know a concrete currency amount.
+
+Third, signal provenance. `BestOddsResult`/`OutlierResult` (and, through
+them, `SurebetLeg`/`ValueGapCandidate`) now carry `bookmaker_id`/
+`quote_time`/`collector_run_id` from the winning `OddsSnapshot` -- all
+already available from earlier rounds' provenance work, just never
+threaded through the analysis layer's own result types before. A
+persisted signal's `details` (`pipeline.from_surebet`/`from_value_gap`)
+now include this per leg, so a signal can be traced back to exactly
+which run/provider/original payload it came from, instead of guessing
+from timing after the fact. Verified against a real signal from the
+soak test: `collector_run_id` in a persisted `VALUE_GAP`'s details
+joined straight to a real `collector_runs` row.
+
+Fourth, `CollectionResult.complete` (default `True`): `False` when a
+collector knows its own dataset is incomplete despite otherwise
+succeeding -- `ApiFootballCollector` sets it when a real response hits
+the free plan's page-fetch cap (see the thirteenth round's pagination
+work). Every fetched record is still genuine and still gets ingested,
+but `OddsIngestionService.run()` now reports `PARTIAL`, not `SUCCESS`,
+for that cycle -- "SUCCESS" means "as complete as this collector can
+tell," not just "nothing it fetched was rejected." Confirmed live: the
+same real capped-pagination cycle that used to report `SUCCESS` now
+correctly reports `PARTIAL`.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

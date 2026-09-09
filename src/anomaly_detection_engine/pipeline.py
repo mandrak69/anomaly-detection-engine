@@ -56,10 +56,32 @@ ALIASES = {
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
 # freshness is evaluated relative to the newest observation in the batch
 # (not wall-clock "now", which would drift stale as real time passes).
+# Deliberately fixed, not config-driven: this is a fact about the demo
+# data's own tight timestamp clustering, not a per-deployment policy
+# decision the way max_quote_age/max_observation_spread (AppConfig,
+# used for every real source -- see resolve_freshness_policy) are.
 DEMO_FRESHNESS_POLICY = FreshnessPolicy(
     max_snapshot_age=timedelta(minutes=5),
     max_observation_spread=timedelta(minutes=5),
 )
+
+
+def resolve_freshness_policy(config: AppConfig) -> FreshnessPolicy:
+    """The FreshnessPolicy any given run should actually use: the fixed
+    DEMO_FRESHNESS_POLICY for the JSON demo (see its own comment for
+    why), or a policy built from AppConfig.max_quote_age/
+    max_observation_spread for every real source -- both run_detection
+    and reporting.console.print_reports call this rather than each
+    picking a policy on their own, so the two can never silently drift
+    apart on what "fresh" means for the same config.
+    """
+    if config.odds_source == "demo":
+        return DEMO_FRESHNESS_POLICY
+
+    return FreshnessPolicy(
+        max_snapshot_age=config.max_quote_age,
+        max_observation_spread=config.max_observation_spread,
+    )
 
 # Every market run_detection actually analyzes. A market's collector(s)
 # ingesting it (see ApiFootballCollector) is necessary but not
@@ -324,7 +346,15 @@ def from_surebet(candidate: SurebetCandidate) -> SignalCandidate:
         edge_percent=candidate.profit_percent,
         details={
             "legs": [
-                {"outcome": leg.outcome, "bookmaker": leg.bookmaker, "odds": str(leg.odds)}
+                {
+                    "outcome": leg.outcome,
+                    "bookmaker": leg.bookmaker,
+                    "bookmaker_id": leg.bookmaker_id,
+                    "odds": str(leg.odds),
+                    "quote_time": leg.quote_time.isoformat() if leg.quote_time else None,
+                    "collector_run_id": leg.collector_run_id,
+                    "stake_percent": str(leg.stake_percent),
+                }
                 for leg in candidate.legs
             ]
         },
@@ -339,7 +369,13 @@ def from_value_gap(candidate: ValueGapCandidate) -> SignalCandidate:
         market=candidate.market,
         outcome=candidate.outcome,
         edge_percent=candidate.deviation_percent,
-        details={"bookmaker": candidate.bookmaker, "odds": str(candidate.odds)},
+        details={
+            "bookmaker": candidate.bookmaker,
+            "bookmaker_id": candidate.bookmaker_id,
+            "odds": str(candidate.odds),
+            "quote_time": candidate.quote_time.isoformat() if candidate.quote_time else None,
+            "collector_run_id": candidate.collector_run_id,
+        },
     )
 
 
@@ -490,6 +526,7 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
         else demo_analysis_time(events, runtime.odds_repository)
     )
     now = datetime.now(UTC)
+    freshness_policy = resolve_freshness_policy(config)
 
     movements_recorded = 0
     for market in DETECTED_MARKETS:
@@ -499,7 +536,7 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
             runtime.signal_repository,
             runtime.movement_repository,
             market=market,
-            freshness_policy=DEMO_FRESHNESS_POLICY,
+            freshness_policy=freshness_policy,
             analysis_time=analysis_time,
             min_value_gap_percent=config.min_value_gap_percent,
             observed_at=now,

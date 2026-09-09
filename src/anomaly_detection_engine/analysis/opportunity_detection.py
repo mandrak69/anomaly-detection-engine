@@ -17,6 +17,16 @@ class SurebetLeg:
     outcome: str
     bookmaker: str
     odds: Decimal
+    # Exact quote provenance (see OddsSnapshot.collector_run_id/
+    # quote_time) -- lets any future report trace a persisted leg back
+    # to precisely which run/provider/original payload it came from,
+    # instead of trying to reconstruct it later from timing alone.
+    bookmaker_id: str | None
+    quote_time: datetime | None
+    collector_run_id: str | None
+    # What fraction of total stake this leg gets so every outcome pays
+    # out identically -- see arbitrage.ArbitrageResult.stake_percent.
+    stake_percent: Decimal
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,10 @@ class ValueGapCandidate:
     bookmaker: str
     odds: Decimal
     deviation_percent: Decimal
+    # Exact quote provenance -- see SurebetLeg's own fields for why.
+    bookmaker_id: str | None
+    quote_time: datetime | None
+    collector_run_id: str | None
 
 
 @dataclass(frozen=True)
@@ -155,6 +169,7 @@ def detect_surebet_candidates(
         )
         if not freshness.valid:
             continue
+        snapshots = freshness.fresh_snapshots
 
         best = find_best_odds(snapshots, event_id=event.id, market=market)
         if set(best) != needed_set:
@@ -179,7 +194,15 @@ def detect_surebet_candidates(
             continue
 
         legs = tuple(
-            SurebetLeg(outcome=outcome, bookmaker=item.bookmaker_name, odds=item.odds)
+            SurebetLeg(
+                outcome=outcome,
+                bookmaker=item.bookmaker_name,
+                odds=item.odds,
+                bookmaker_id=item.bookmaker_id,
+                quote_time=item.quote_time,
+                collector_run_id=item.collector_run_id,
+                stake_percent=arbitrage.stake_percent[outcome],
+            )
             for outcome, item in best.items()
         )
         candidates.append(
@@ -244,6 +267,7 @@ def detect_value_gap_candidates(
         )
         if not freshness.valid:
             continue
+        snapshots = freshness.fresh_snapshots
 
         outcome_counts: dict[str, int] = {}
         for snapshot in snapshots:
@@ -272,6 +296,9 @@ def detect_value_gap_candidates(
                     bookmaker=outlier.bookmaker_name,
                     odds=outlier.odds,
                     deviation_percent=outlier.deviation_percent,
+                    bookmaker_id=outlier.bookmaker_id,
+                    quote_time=outlier.quote_time,
+                    collector_run_id=outlier.collector_run_id,
                 )
             )
 

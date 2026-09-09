@@ -54,15 +54,29 @@ def make_repository() -> SignalRepository:
     return SignalRepository(connection)
 
 
+def surebet_leg(
+    outcome: str, bookmaker: str, odds: str, stake_percent: str = "33.33"
+) -> SurebetLeg:
+    return SurebetLeg(
+        outcome=outcome,
+        bookmaker=bookmaker,
+        odds=Decimal(odds),
+        bookmaker_id=bookmaker.lower(),
+        quote_time=T0,
+        collector_run_id="run-1",
+        stake_percent=Decimal(stake_percent),
+    )
+
+
 def surebet_candidate(profit="10.0", bookmaker1="Bet1", market=MARKET) -> SurebetCandidate:
     return SurebetCandidate(
         event=EVENT,
         market=market,
         profit_percent=Decimal(profit),
         legs=(
-            SurebetLeg("1", bookmaker1, Decimal("2.50")),
-            SurebetLeg("X", "Bet2", Decimal("4.00")),
-            SurebetLeg("2", "Bet3", Decimal("4.00")),
+            surebet_leg("1", bookmaker1, "2.50"),
+            surebet_leg("X", "Bet2", "4.00"),
+            surebet_leg("2", "Bet3", "4.00"),
         ),
     )
 
@@ -75,6 +89,9 @@ def value_gap_candidate(outcome="1", deviation="20.0", market=MARKET) -> ValueGa
         bookmaker="BigPrice",
         odds=Decimal("3.00"),
         deviation_percent=Decimal(deviation),
+        bookmaker_id="bigprice",
+        quote_time=T0,
+        collector_run_id="run-1",
     )
 
 
@@ -346,7 +363,31 @@ def test_from_value_gap_maps_fields_into_a_signal_candidate():
     assert candidate.event_id == "e1"
     assert candidate.outcome == "2"
     assert candidate.edge_percent == Decimal("33.3")
-    assert candidate.details == {"bookmaker": "BigPrice", "odds": "3.00"}
+    assert candidate.details == {
+        "bookmaker": "BigPrice",
+        "bookmaker_id": "bigprice",
+        "odds": "3.00",
+        "quote_time": "2026-08-27T10:00:00+00:00",
+        "collector_run_id": "run-1",
+    }
+
+
+def test_from_surebet_maps_quote_provenance_and_stake_into_each_leg():
+    candidate = from_surebet(surebet_candidate())
+
+    assert candidate.signal_type == SUREBET
+    legs = candidate.details["legs"]
+    assert len(legs) == 3
+    leg_one = next(leg for leg in legs if leg["outcome"] == "1")
+    assert leg_one == {
+        "outcome": "1",
+        "bookmaker": "Bet1",
+        "bookmaker_id": "bet1",
+        "odds": "2.50",
+        "quote_time": "2026-08-27T10:00:00+00:00",
+        "collector_run_id": "run-1",
+        "stake_percent": "33.33",
+    }
 
 
 def insert_event_row(connection, event_id: str, start_time: datetime) -> None:

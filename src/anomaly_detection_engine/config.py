@@ -50,6 +50,18 @@ class AppConfig:
     takes an already-computed cutoff datetime (see run_detection), so a
     future per-sport or per-MarketPhase policy can replace how this one
     field is computed without changing the repository's API at all.
+
+    max_quote_age/max_observation_spread are the production
+    FreshnessPolicy thresholds (see pipeline.resolve_freshness_policy) --
+    used for every non-demo odds_source. The demo JSON path keeps its
+    own fixed, tight DEMO_FRESHNESS_POLICY (pipeline.py) regardless of
+    these fields, since it replays static timestamps rather than real
+    wall-clock polling. There is no one correct default for real
+    sources: it depends on how far apart a deployment's actual
+    POLL_INTERVAL_SECONDS is and how stale a given provider's own
+    "update" timestamp tends to be by the time it's fetched -- these
+    exist to be tuned per deployment, not treated as universal
+    constants.
     """
 
     db_path: str
@@ -61,6 +73,8 @@ class AppConfig:
     mozzart_mode: str
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
+    max_quote_age: timedelta
+    max_observation_spread: timedelta
     # None means "not configured" -- TheOddsApiCollector itself raises
     # if it ends up unset when actually needed. Kept here (not just read
     # by the collector directly) so the-odds-api's key comes through the
@@ -176,6 +190,10 @@ def load_config() -> AppConfig:
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
         signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
+        max_quote_age=timedelta(minutes=float(os.environ.get("MAX_QUOTE_AGE_MINUTES", "60"))),
+        max_observation_spread=timedelta(
+            minutes=float(os.environ.get("MAX_QUOTE_SPREAD_MINUTES", "30"))
+        ),
         odds_api_key=os.environ.get("ODDS_API_KEY"),
         api_football_key=os.environ.get("API_FOOTBALL_KEY"),
     )

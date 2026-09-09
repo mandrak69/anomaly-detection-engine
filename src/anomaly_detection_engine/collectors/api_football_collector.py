@@ -182,7 +182,7 @@ def _load_envelope(raw: str | bytes, *, what: str) -> dict:
 
 def _fetch_all_pages(
     fetch: Callable[[str], bytes], url_base: str, *, what: str
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, bool]:
     """Fetches every page of one api-football.com list endpoint
     (paging.current/paging.total), merging each page's "response" array
     into one envelope dict shaped like a single, complete response --
@@ -190,12 +190,14 @@ def _fetch_all_pages(
     collect()'s source_payload) sees one complete envelope and never
     needs to know more than one HTTP call was involved.
 
-    Returns (decimal_envelope, plain_envelope): the same bytes parsed
-    twice, once with parse_float=Decimal (via _load_envelope, for exact
-    odds precision feeding the actual extraction) and once as plain
-    JSON (for source_payload -- a faithful record of what was actually
-    received, not run back through the Decimal-parsed structure, which
-    plain json.dumps cannot serialize at all).
+    Returns (decimal_envelope, plain_envelope, capped): the same bytes
+    parsed twice, once with parse_float=Decimal (via _load_envelope, for
+    exact odds precision feeding the actual extraction) and once as
+    plain JSON (for source_payload -- a faithful record of what was
+    actually received, not run back through the Decimal-parsed
+    structure, which plain json.dumps cannot serialize at all). capped
+    is True when the plan's page limit cut this fetch short (see below)
+    -- collect() uses it to mark the whole CollectionResult incomplete.
 
     url_base must not already include a `page` query param; `&page=N`
     is appended for every page after the first (page 1 is requested
@@ -223,6 +225,7 @@ def _fetch_all_pages(
     """
     page = 1
     pages_merged = 0
+    capped = False
     merged_decimal: dict | None = None
     merged_plain: dict | None = None
 
@@ -239,6 +242,7 @@ def _fetch_all_pages(
         plain_data = json.loads(raw)
 
         if page > 1 and _is_plan_page_limit_error(plain_data.get("errors")):
+            capped = True
             logger.warning(
                 "api_football.pagination_capped_by_plan",
                 extra={
@@ -270,7 +274,7 @@ def _fetch_all_pages(
             "api_football.paginated", extra={"what": what, "pages_fetched": pages_merged}
         )
 
-    return merged_decimal, merged_plain
+    return merged_decimal, merged_plain, capped
 
 
 def _is_plan_page_limit_error(errors: object) -> bool:
@@ -463,10 +467,10 @@ class ApiFootballCollector(OddsCollector):
 
         logger.info("api_football.request", extra={"date": date_str})
 
-        fixtures_decimal, fixtures_plain = _fetch_all_pages(
+        fixtures_decimal, fixtures_plain, fixtures_capped = _fetch_all_pages(
             self._fetch, f"{self._base_url}/fixtures?date={date_str}", what="fixtures"
         )
-        odds_decimal, odds_plain = _fetch_all_pages(
+        odds_decimal, odds_plain, odds_capped = _fetch_all_pages(
             self._fetch, f"{self._base_url}/odds?date={date_str}", what="odds"
         )
 
@@ -485,7 +489,11 @@ class ApiFootballCollector(OddsCollector):
         # fetched above -- not re-fetched, and not the Decimal-parsed
         # dicts, which plain json.dumps cannot serialize.
         source_payload = json.dumps({"fixtures": fixtures_plain, "odds": odds_plain})
-        return CollectionResult(source_payload=source_payload, records=result)
+        return CollectionResult(
+            source_payload=source_payload,
+            records=result,
+            complete=not (fixtures_capped or odds_capped),
+        )
 
     def _http_get(self, url: str) -> bytes:
         request = urllib.request.Request(

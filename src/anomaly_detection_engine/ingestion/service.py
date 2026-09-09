@@ -184,7 +184,14 @@ class OddsIngestionService:
             )
         elif records_accepted == 0 and records_rejected > 0:
             status = CollectorRunStatus.FAILED
-        elif records_rejected > 0 or audit_failures > 0:
+        elif records_rejected > 0 or audit_failures > 0 or not collection.complete:
+            # collection.complete=False (see CollectionResult) means the
+            # collector itself knows this cycle's dataset is incomplete
+            # (e.g. ApiFootballCollector hit its plan's page-fetch cap)
+            # even though every record it did fetch was individually
+            # accepted -- SUCCESS must mean "as complete as this
+            # collector can tell", not just "nothing it fetched was
+            # rejected".
             status = CollectorRunStatus.PARTIAL
         else:
             status = CollectorRunStatus.SUCCESS

@@ -45,6 +45,8 @@ def build_config() -> AppConfig:
         mozzart_mode="manual",
         min_value_gap_percent=Decimal("15.0"),
         signal_ttl=timedelta(hours=3),
+        max_quote_age=timedelta(hours=1),
+        max_observation_spread=timedelta(minutes=30),
         odds_api_key=None,
         api_football_key=None,
     )

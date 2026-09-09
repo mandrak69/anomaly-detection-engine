@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -272,6 +272,54 @@ def test_run_detection_uses_wall_clock_time_for_any_non_demo_source(monkeypatch)
     summary = pipeline.run_detection(runtime, [event], cfg)
 
     assert summary["active_surebets"] == 0
+
+
+def test_resolve_freshness_policy_uses_demo_policy_for_demo_source(monkeypatch):
+    _clear_source_env(monkeypatch)
+    cfg = config.load_config()
+
+    assert pipeline.resolve_freshness_policy(cfg) is pipeline.DEMO_FRESHNESS_POLICY
+
+
+def test_resolve_freshness_policy_uses_configured_thresholds_for_a_real_source(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+    monkeypatch.setenv("MAX_QUOTE_AGE_MINUTES", "90")
+    monkeypatch.setenv("MAX_QUOTE_SPREAD_MINUTES", "45")
+    cfg = config.load_config()
+
+    policy = pipeline.resolve_freshness_policy(cfg)
+
+    assert policy.max_snapshot_age == timedelta(minutes=90)
+    assert policy.max_observation_spread == timedelta(minutes=45)
+
+
+def test_run_detection_uses_the_configured_production_freshness_window(monkeypatch):
+    # A quote 40 minutes old would have failed the old hardcoded 5-minute
+    # DEMO_FRESHNESS_POLICY every real source used to be evaluated
+    # against -- with MAX_QUOTE_AGE_MINUTES configured wide enough, the
+    # same real-source surebet must now actually be detected.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    monkeypatch.setenv("ODDS_SOURCE", "api-football")
+    monkeypatch.setenv("API_FOOTBALL_KEY", "test-key")
+    monkeypatch.setenv("MAX_QUOTE_AGE_MINUTES", "60")
+    monkeypatch.setenv("MAX_QUOTE_SPREAD_MINUTES", "30")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    match = FixtureCatalog(runtime.connection, provider_id="api-football").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=datetime.now(UTC) + timedelta(days=1),
+    )
+    event = match.event
+    quote_time = datetime.now(UTC) - timedelta(minutes=40)
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 1
 
 
 def test_run_ingestion_returns_only_events_touched_this_cycle(monkeypatch):

@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from statistics import median
 
@@ -14,6 +15,11 @@ class OutlierResult:
     odds: Decimal
     reference_median: Decimal
     deviation_percent: Decimal
+    # Provenance carried through from the outlier's own OddsSnapshot --
+    # see best_odds.BestOddsResult for the same fields/reasoning.
+    bookmaker_id: str | None = None
+    quote_time: datetime | None = None
+    collector_run_id: str | None = None
 
 
 def detect_outliers(
@@ -57,6 +63,9 @@ def detect_outliers(
                         odds=snapshot.odds,
                         reference_median=reference_median,
                         deviation_percent=deviation_percent,
+                        bookmaker_id=snapshot.bookmaker.id,
+                        quote_time=snapshot.quote_time,
+                        collector_run_id=snapshot.collector_run_id,
                     )
                 )
 

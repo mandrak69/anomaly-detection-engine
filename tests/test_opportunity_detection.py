@@ -87,7 +87,10 @@ def test_detect_surebet_candidates_groups_all_three_legs_into_one_candidate():
     assert len(sweep.candidates) == 1
     candidate = sweep.candidates[0]
     assert candidate.event.id == "e1"
-    assert candidate.profit_percent == Decimal("10")
+    # margin = 1/2.50 + 1/4.00 + 1/4.00 = 0.9; guaranteed ROI is
+    # (1/margin - 1) * 100 = 100/9 =~ 11.11%, not (1 - margin) * 100 = 10%
+    # -- see arbitrage.calculate_arbitrage's own comment for why.
+    assert round(candidate.profit_percent, 2) == Decimal("11.11")
     assert len(candidate.legs) == 3
     assert {leg.outcome for leg in candidate.legs} == {"1", "X", "2"}
     # SUREBET has no per-outcome identity -- outcome=None (see SignalIdentity).
@@ -135,6 +138,40 @@ def test_detect_surebet_candidates_respects_freshness():
     # a caller reconciling persisted signals must not treat this the same
     # as "evaluated, genuinely no surebet".
     assert sweep.evaluated_keys == frozenset()
+
+
+def test_one_stale_bookmaker_does_not_block_a_real_surebet_among_the_fresh_ones():
+    # The exact real-world scenario this round's freshness fix targets:
+    # Bet365/Pinnacle/Unibet are all fresh and together form a real
+    # surebet; a fourth, slower-updating bookmaker (also quoting "1",
+    # redundantly) is stale. The stale bookmaker must be filtered out
+    # individually, not treated as a reason to give up on the whole
+    # event -- the surebet among the fresh three must still be found.
+    repository = make_repository()
+    event = make_event("e1", "A", "B")
+
+    strict_policy = FreshnessPolicy(
+        max_snapshot_age=timedelta(minutes=5), max_observation_spread=timedelta(minutes=5)
+    )
+
+    save(repository, "e1", "Bet365", "1", "2.50", observed_at=NOW)
+    save(repository, "e1", "Pinnacle", "X", "4.00", observed_at=NOW)
+    save(repository, "e1", "Unibet", "2", "4.00", observed_at=NOW)
+    # Redundant, much staler quote for the same outcome "1" -- must be
+    # filtered out, leaving Bet365's fresh "1" quote still usable.
+    save(
+        repository, "e1", "BookmakerX", "1", "2.30",
+        observed_at=NOW - timedelta(minutes=45),
+    )
+
+    sweep = detect_surebet_candidates(
+        [event], repository, MARKET, freshness_policy=strict_policy, analysis_time=NOW
+    )
+
+    assert len(sweep.candidates) == 1
+    candidate = sweep.candidates[0]
+    assert {leg.bookmaker for leg in candidate.legs} == {"Bet365", "Pinnacle", "Unibet"}
+    assert sweep.evaluated_keys == frozenset({SignalIdentity("e1", MARKET, None)})
 
 
 def test_detect_surebet_candidates_flags_a_uniformly_old_batch_as_stale():

@@ -23,6 +23,18 @@ class CollectionResult:
 
     source_payload: str | None
     records: list[RawEventOdds]
+    # False when the collector knows this cycle's dataset is incomplete
+    # despite otherwise succeeding -- e.g. ApiFootballCollector hitting
+    # its plan's page-fetch cap partway through a paginated response
+    # (see _fetch_all_pages): every record actually fetched is still
+    # real and still gets ingested, but the day's true dataset had more
+    # pages this run never saw. OddsIngestionService.run() reflects this
+    # as CollectorRunStatus.PARTIAL even when every record it did fetch
+    # was individually accepted -- "SUCCESS" must mean "as complete as
+    # this collector can tell", not just "nothing it did fetch was
+    # rejected". True (the default) for every collector that has no
+    # notion of a dataset that could be partial in the first place.
+    complete: bool = True
 
 
 class OddsCollector(ABC):

@@ -47,7 +47,12 @@ def test_valid_when_fresh_and_coherent():
     assert result.stale_sources == ()
 
 
-def test_invalid_when_one_snapshot_is_stale():
+def test_stale_snapshot_is_filtered_but_fresh_ones_still_valid():
+    # A real cross-provider event can easily have most bookmakers fresh
+    # and one slower-updating bookmaker stale -- the stale one must not
+    # invalidate the fresh ones too; it's filtered out of
+    # fresh_snapshots and reported (for visibility) in stale_sources,
+    # not treated as a reason to give up on the whole event.
     snapshots = [
         snapshot("A", NOW - timedelta(seconds=30)),
         snapshot("B", NOW - timedelta(minutes=10)),
@@ -55,9 +60,24 @@ def test_invalid_when_one_snapshot_is_stale():
 
     result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
 
-    assert result.valid is False
-    assert result.reason == "stale-snapshots"
+    assert result.valid is True
+    assert result.reason is None
     assert result.stale_sources == ("b",)
+    assert [s.bookmaker.id for s in result.fresh_snapshots] == ["a"]
+
+
+def test_invalid_when_every_snapshot_is_stale():
+    snapshots = [
+        snapshot("A", NOW - timedelta(minutes=10)),
+        snapshot("B", NOW - timedelta(minutes=20)),
+    ]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
+
+    assert result.valid is False
+    assert result.reason == "no-fresh-snapshots"
+    assert result.fresh_snapshots == []
+    assert result.stale_sources == ("a", "b")
 
 
 def test_invalid_when_observation_spread_too_large():
@@ -72,13 +92,30 @@ def test_invalid_when_observation_spread_too_large():
     assert result.reason == "observation-spread-too-large"
 
 
-def test_invalid_when_snapshot_is_from_the_future():
+def test_invalid_when_the_only_snapshot_is_from_the_future():
     snapshots = [snapshot("A", NOW + timedelta(minutes=1))]
 
     result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
 
     assert result.valid is False
-    assert result.reason == "snapshot-from-future"
+    assert result.reason == "no-fresh-snapshots"
+    assert result.stale_sources == ("a",)
+
+
+def test_a_future_skewed_snapshot_is_filtered_but_a_genuinely_fresh_one_still_valid():
+    # Same "filter individually" principle as ordinary staleness -- one
+    # bookmaker with a skewed clock shouldn't block everyone else's
+    # otherwise-fresh data either.
+    snapshots = [
+        snapshot("A", NOW + timedelta(minutes=1)),
+        snapshot("B", NOW - timedelta(seconds=30)),
+    ]
+
+    result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
+
+    assert result.valid is True
+    assert result.stale_sources == ("a",)
+    assert [s.bookmaker.id for s in result.fresh_snapshots] == ["b"]
 
 
 def test_small_clock_skew_ahead_of_analysis_time_is_tolerated():
@@ -105,7 +142,7 @@ def test_skew_larger_than_the_configured_tolerance_still_rejected():
     result = validate_freshness(snapshots, analysis_time=NOW, policy=lenient_policy)
 
     assert result.valid is False
-    assert result.reason == "snapshot-from-future"
+    assert result.reason == "no-fresh-snapshots"
 
 
 def test_invalid_when_no_snapshots():
@@ -119,7 +156,8 @@ def test_stale_source_timestamp_is_caught_even_with_a_fresh_observed_at():
     # The bug this guards against: a bookmaker's own last_update was
     # hours ago, but our poll (observed_at) happened moments ago -- age
     # must be measured against the quote's own timestamp, not merely
-    # when we happened to fetch it.
+    # when we happened to fetch it. A's stale quote is filtered out
+    # individually; B's genuinely fresh one still passes.
     snapshots = [
         snapshot(
             "A",
@@ -131,9 +169,9 @@ def test_stale_source_timestamp_is_caught_even_with_a_fresh_observed_at():
 
     result = validate_freshness(snapshots, analysis_time=NOW, policy=POLICY)
 
-    assert result.valid is False
-    assert result.reason == "stale-snapshots"
+    assert result.valid is True
     assert result.stale_sources == ("a",)
+    assert [s.bookmaker.id for s in result.fresh_snapshots] == ["b"]
 
 
 def test_fresh_source_timestamp_passes_even_if_far_from_observed_at():

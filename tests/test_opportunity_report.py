@@ -84,7 +84,10 @@ def test_report_surfaces_a_real_surebet():
     surebet_rows = [r for r in rows if r.signal == SUREBET]
     assert len(surebet_rows) == 3
     assert {r.outcome for r in surebet_rows} == {"1", "X", "2"}
-    assert all(r.edge_percent == Decimal("10") for r in surebet_rows)
+    # margin = 0.9; guaranteed ROI is (1/margin - 1) * 100 = 100/9 =~
+    # 11.11%, not (1 - margin) * 100 = 10% -- see
+    # arbitrage.calculate_arbitrage's own comment for why.
+    assert all(round(r.edge_percent, 2) == Decimal("11.11") for r in surebet_rows)
     # All three bookmakers quote identical odds here (to avoid an
     # incidental VALUE_GAP flag) so find_best_odds' tie-break keeps
     # whichever was inserted first for every outcome.

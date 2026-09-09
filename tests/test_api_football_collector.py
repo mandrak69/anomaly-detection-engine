@@ -507,15 +507,20 @@ def test_collect_keeps_earlier_pages_when_the_plan_caps_the_page_parameter(caplo
     collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
 
     with caplog.at_level("WARNING"):
-        result = collector.collect().records
+        collection = collector.collect()
 
     # Pages 1-3 succeeded and must still be kept -- not discarded just
     # because page 4 was rejected by the plan.
-    assert {r.home_team for r in result} == {"Team A1", "Team B1", "Team C1"}
+    assert {r.home_team for r in collection.records} == {"Team A1", "Team B1", "Team C1"}
     assert any("pagination_capped_by_plan" in message for message in caplog.messages)
     # Never even tried page 5 -- stopped right where the plan first
     # rejected a page.
     assert not any(url.endswith("&page=5") for url in fetch.requested_urls)
+    # The dataset really is incomplete (a real page's worth of data was
+    # never fetched) even though every record that was fetched is
+    # genuine -- OddsIngestionService must not report this run as a
+    # plain, fully-successful SUCCESS.
+    assert collection.complete is False
 
 
 def test_a_genuine_error_on_a_later_page_still_raises():

@@ -27,9 +27,10 @@ MARKET = MarketIdentity(
 
 
 class StubCollector(OddsCollector):
-    def __init__(self, raw_events=None, error: Exception | None = None):
+    def __init__(self, raw_events=None, error: Exception | None = None, complete: bool = True):
         self._raw_events = raw_events or []
         self._error = error
+        self._complete = complete
 
     @property
     def source(self) -> str:
@@ -46,7 +47,9 @@ class StubCollector(OddsCollector):
     def collect(self) -> CollectionResult:
         if self._error is not None:
             raise self._error
-        return CollectionResult(source_payload="stub-payload", records=self._raw_events)
+        return CollectionResult(
+            source_payload="stub-payload", records=self._raw_events, complete=self._complete
+        )
 
 
 def build_raw_event(**overrides) -> RawEventOdds:
@@ -288,6 +291,24 @@ def test_touched_events_is_empty_before_run_and_when_nothing_matches():
     service.run()
 
     assert service.touched_events == []
+
+
+def test_an_incomplete_collection_is_partial_even_with_every_record_accepted():
+    # CollectionResult.complete=False (e.g. ApiFootballCollector hitting
+    # its plan's page-fetch cap) means the collector itself knows this
+    # cycle's dataset is incomplete, even though every record it did
+    # fetch is genuine and gets accepted -- SUCCESS must mean "as
+    # complete as this collector can tell", not just "nothing fetched
+    # was rejected".
+    collector = StubCollector(raw_events=[build_raw_event()], complete=False)
+    service, odds_repository, _, _ = build_service(collector)
+
+    run = service.run()
+
+    assert run.status == CollectorRunStatus.PARTIAL
+    assert run.records_accepted == 1
+    assert run.records_rejected == 0
+    assert len(odds_repository.find_by_event("event-001")) == 3
 
 
 def test_all_records_rejected_returns_failed_status():
