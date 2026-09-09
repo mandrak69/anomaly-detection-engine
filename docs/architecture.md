@@ -1313,6 +1313,44 @@ does not strip a leading BOM, and PowerShell's own `Set-Content
 -Encoding utf8` writes one, silently corrupting the first line's key --
 fixed by reading with `encoding="utf-8-sig"` instead.
 
+**Resolved:** a thirteenth round, found by external review of the
+running system and confirmed against the first real soak run's own
+data. `odds_snapshots.collector_run_id` (migration 8) closes the last
+gap in the provenance chain -- `collector_runs` already had
+`provider_id`/`parser_version`/`source_payload`, but no snapshot pointed
+back to which run produced it. No SQL foreign key: `OddsIngestionService
+.run()` saves snapshots against its `run_id` before the matching
+`collector_runs` row exists (written only at the end, by
+`_record_run()`), which a real FK under this project's `PRAGMA
+foreign_keys = ON` would reject.
+
+This surfaced a real ordering bug: `find_latest`/`find_last_two`/
+`find_latest_for_market` ordered by `observed_at` alone, so a
+later-polled but genuinely stale quote from one provider could shadow
+an earlier-polled but fresher quote from another reporting the same
+canonical bookmaker. All three now order by `quote_time`
+(`COALESCE(source_timestamp, observed_at)`), the same concept
+`FreshnessPolicy` already used, just never applied to "latest"
+selection. Consequently, movement detection could also compare two
+readings of the same canonical bookmaker from two *different*
+providers as one continuous stream, reporting a "movement" that was
+really just two feeds disagreeing -- `OddsRepository.
+find_last_two_same_provider()` now requires both compared readings to
+share a provider (via `collector_run_id` -> `provider_id`), falling
+back to the old cross-provider-tolerant behavior when either reading's
+provenance is unknown, so pre-migration-8 data and provenance-free
+tests keep behaving exactly as before.
+
+Two smaller fixes from actually running the soak test:
+`ApiFootballCollector` now keeps pages already fetched successfully
+when a real response has more pages than the free plan allows to fetch
+(observed live), logged rather than raised; `load_dotenv()` now treats
+a blank `KEY=` line as unset, since `os.environ[key] = ""` was silently
+discarding `DB_PATH`'s real default and opening a throwaway temp
+database instead. Also, `ODDS_API_KEY` now flows through `AppConfig.
+odds_api_key` the same way `API_FOOTBALL_KEY` already did, closing the
+config-boundary inconsistency noted a few rounds back.
+
 Decoupling the Analysis Layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain snapshot data)
 remains deliberately deferred -- the right boundary to draw before this

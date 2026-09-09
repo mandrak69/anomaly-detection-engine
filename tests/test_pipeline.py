@@ -54,8 +54,9 @@ def test_the_odds_api_source_used_when_configured(monkeypatch):
     monkeypatch.setenv("ODDS_SPORT_KEY", "soccer_epl")
 
     class FakeLiveCollector:
-        def __init__(self, sport_key):
+        def __init__(self, sport_key, api_key=None):
             self._sport_key = sport_key
+            self._api_key = api_key
 
         @property
         def source(self):
@@ -66,6 +67,32 @@ def test_the_odds_api_source_used_when_configured(monkeypatch):
     collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 1
+    assert collectors[0].source == "the-odds-api:soccer_epl"
+
+
+def test_odds_api_key_from_app_config_is_passed_to_the_collector(monkeypatch):
+    # ODDS_API_KEY flows through AppConfig -> _the_odds_api_collector,
+    # the same config-boundary shape api_football_key already has --
+    # not read directly from os.environ by pipeline.py itself.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "the-odds-api")
+    monkeypatch.setenv("ODDS_SPORT_KEY", "soccer_epl")
+    monkeypatch.setenv("ODDS_API_KEY", "test-odds-api-key")
+
+    class FakeLiveCollector:
+        def __init__(self, sport_key, api_key=None):
+            self._sport_key = sport_key
+            self.api_key = api_key
+
+        @property
+        def source(self):
+            return f"the-odds-api:{self._sport_key}"
+
+    monkeypatch.setattr(pipeline, "TheOddsApiCollector", FakeLiveCollector)
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert collectors[0].api_key == "test-odds-api-key"
     assert collectors[0].source == "the-odds-api:soccer_epl"
 
 

@@ -1558,6 +1558,12 @@ rate limiting
 [x] ApiFootballCollector.collect() now fetches and merges every page of a paginated response instead of only warning about page 1 -- replaces the previous round's warning-only handling, with a bounded page-count safety cap so a misbehaving response can't loop an unattended poller forever
 [x] scripts/inspect_data.py: data-sanity CLI (summary/events/event/cross-provider commands), deliberately not a report -- quick, direct answers to "is the dataset actually good" (counts per table, one event's full odds history, which events have been independently resolved by 2+ distinct providers) while running a real continuous ingest
 [x] config.load_dotenv(): optional .env file support (app.py/poller.py/inspect_data.py all call it before load_config()) so scaling to many real providers' API keys doesn't mean retyping `$env:` exports into every new terminal -- a real env var always wins over the file; .env is already gitignored, .env.example is the committed, secret-free template
+[x] odds_snapshots.collector_run_id (migration 8): which CollectorRun produced each snapshot -- traceable back to provider_id/parser_version/source_payload, the last gap in the provenance chain. No SQL foreign key (OddsIngestionService.run() saves snapshots against its run_id before the matching collector_runs row exists)
+[x] find_latest/find_last_two/find_latest_for_market now order by quote_time (COALESCE(source_timestamp, observed_at)) instead of observed_at alone -- a later-polled but staler quote from one provider could otherwise shadow an earlier-polled but genuinely fresher quote from another
+[x] OddsRepository.find_last_two_same_provider(): movement detection now requires both compared readings to share a provider (via collector_run_id), falling back to the old cross-provider-tolerant behavior when provenance is unknown -- comparing "Bet365 via the-odds-api" against "Bet365 via api-football" as one stream could report a "movement" that is really just two feeds disagreeing
+[x] ApiFootballCollector keeps whatever pages it fetched successfully when a real response has more pages than the free plan allows to fetch (logged, not raised) -- previously the whole day's fetch aborted the moment the plan rejected one page, discarding pages that had already succeeded
+[x] load_dotenv() treats a blank "KEY=" line in .env as unset rather than os.environ[KEY] = "" -- caught live: a blank DB_PATH= line was silently opening a throwaway private temp database instead of the persistent default
+[x] ODDS_API_KEY now flows through AppConfig (odds_api_key) like API_FOOTBALL_KEY already did, instead of TheOddsApiCollector reading os.environ directly -- completes the .env/environment -> load_config() -> AppConfig -> collectors boundary for every real credential, not just some of them
 ```
 
 ---
@@ -2156,6 +2162,80 @@ so `API_FOOTBALL_KEY` silently became a key nothing else could ever
 match. Fixed by reading with `encoding="utf-8-sig"` instead, which
 strips a BOM if present and behaves identically to plain UTF-8 for a
 file that has none.
+
+**Done:** a thirteenth round, found by an external review of the running
+system and confirmed against the first real soak run's own data. Three
+correctness fixes, in the order they were made, plus two smaller ones
+caught live along the way.
+
+First, `odds_snapshots.collector_run_id` (migration 8): `collector_runs`
+already recorded `provider_id`/`parser_version`/`source_payload` per
+run, but nothing on a snapshot pointed back to which run produced it --
+"this Bet365 quote of 2.15 came from which poll" was unanswerable
+without guessing from timing. No SQL foreign key, deliberately:
+`OddsIngestionService.run()` generates its own `run_id` and starts
+saving snapshots against it *before* the matching `collector_runs` row
+is written (only at the very end, in `_record_run()`), and with this
+project's connections running `PRAGMA foreign_keys = ON`, a real FK
+would reject every insert since the parent row doesn't exist yet at
+that point -- `odds_snapshots.event_id`/`bookmaker_id` already follow
+this same plain-TEXT-no-`REFERENCES` shape, for an unrelated reason
+(see `_migration_1_initial_schema`); this column follows it for its own,
+ordering-specific one.
+
+Second, this surfaced a real bug: `find_latest`/`find_last_two`/
+`find_latest_for_market` all ordered by `observed_at` alone, not
+`quote_time`. Two providers polled at different times can report the
+same canonical bookmaker (see `BookmakerCatalog`) -- the-odds-api's
+quote fetched at 12:06 for a price actually current at 12:05, versus
+api-football's quote fetched later at 12:07 but actually current at
+11:30. Ordering by `observed_at` picks api-football's row (fetched
+last, but describing a genuinely stale price), silently shadowing the
+fresher the-odds-api quote. All three now order by
+`COALESCE(source_timestamp, observed_at) DESC, observed_at DESC, id
+DESC` -- the same `quote_time` concept `FreshnessPolicy` already uses,
+just never applied to "latest" selection itself before.
+
+Third, and a consequence of being able to ask "which provider" at all
+now: movement detection could compare two readings of the same
+canonical bookmaker from two *different* providers as if they were one
+continuous quote stream, and report a "movement" that is really just
+two feeds disagreeing or polling on different schedules -- not the
+bookmaker's actual price changing. `OddsRepository.
+find_last_two_same_provider()` requires both compared readings to share
+a provider (via `collector_run_id` -> `collector_runs.provider_id`),
+looking at the most recent 10 combined readings to find an earlier
+same-provider one, and returning just the latest single reading if none
+exists yet -- "not enough same-provider history" is a legitimate,
+common state, not an error. A reading with unknown provenance (no
+`collector_run_id` -- pre-migration-8 data, or a snapshot saved
+directly rather than through `OddsIngestionService`) is treated as
+matching *another* unknown-provenance reading, the same fallback
+`find_last_two` itself always had, so existing data/tests without
+provenance keep behaving exactly as before rather than being silently
+excluded from movement detection.
+
+Two smaller fixes made while actually running the first real soak test
+against api-football.com: `ApiFootballCollector` now keeps whatever
+pages it fetched successfully when a real response has more pages than
+the free plan is allowed to fetch (`{"errors": {"plan": "Free plans are
+limited to a maximum value of 3 for the Page parameter"}}`, observed
+live) -- logged as a warning, not raised, so a capped day no longer
+discards pages that had already succeeded. And `load_dotenv()` now
+treats a blank `KEY=` line as unset rather than `os.environ[KEY] = ""`
+-- caught live, running the soak test: a blank `DB_PATH=` line (exactly
+what `.env.example` leaves it, having no natural non-secret default)
+was silently opening a throwaway private temp database
+(`sqlite3.connect("")`) instead of the persistent default file, so
+nothing was actually being saved.
+
+Also closes the last piece of the config-boundary inconsistency noted a
+few rounds back: `ODDS_API_KEY` now flows through `AppConfig.
+odds_api_key` (`_the_odds_api_collector` passes it to
+`TheOddsApiCollector(..., api_key=...)`) the same way
+`API_FOOTBALL_KEY`/`api_football_key` already did, instead of
+`TheOddsApiCollector` being the only collector left reading
+`os.environ` directly for its credential.
 
 Decoupling the analysis layer from `OddsRepository` (an `OddsReader`
 Protocol, or orchestration handing detectors plain data) remains

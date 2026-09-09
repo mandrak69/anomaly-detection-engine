@@ -87,7 +87,7 @@ def _the_odds_api_collector(config: AppConfig) -> OddsCollector:
     mode = config.odds_api_mode
 
     if mode == "auto":
-        return TheOddsApiCollector(config.sport_key)
+        return TheOddsApiCollector(config.sport_key, api_key=config.odds_api_key)
 
     if mode == "manual":
         if not config.odds_api_capture_dir:

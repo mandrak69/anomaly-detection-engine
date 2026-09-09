@@ -61,6 +61,14 @@ class AppConfig:
     mozzart_mode: str
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
+    # None means "not configured" -- TheOddsApiCollector itself raises
+    # if it ends up unset when actually needed. Kept here (not just read
+    # by the collector directly) so the-odds-api's key comes through the
+    # same config boundary api_football_key already does: .env/
+    # environment -> load_config() -> AppConfig -> collectors, one place
+    # to see every real credential this app can be given, not just some
+    # of them.
+    odds_api_key: str | None
     # None means "not configured". api-football.com can be either the
     # opt-in supplemental source it started as (see
     # pipeline._supplemental_collectors, same shape as
@@ -168,5 +176,6 @@ def load_config() -> AppConfig:
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
         signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
+        odds_api_key=os.environ.get("ODDS_API_KEY"),
         api_football_key=os.environ.get("API_FOOTBALL_KEY"),
     )
