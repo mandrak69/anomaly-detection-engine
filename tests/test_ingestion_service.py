@@ -135,6 +135,12 @@ def test_successful_run_persists_snapshots():
     assert snapshots[0].bookmaker.id.startswith("bookmaker-")
     assert snapshots[0].bookmaker.name == "Mozzart"
 
+    # Every snapshot this run produced is stamped with the CollectorRun
+    # that produced it -- see OddsSnapshot.collector_run_id -- so a
+    # specific quote can be traced back to the run/provider/original
+    # payload that reported it.
+    assert all(s.collector_run_id == run.id for s in snapshots)
+
 
 def test_successful_run_persists_provenance_metadata_on_the_collector_run():
     # provider_id/parser_version/source_payload let a future reprocessing

@@ -64,3 +64,21 @@ def test_load_dotenv_ignores_a_line_with_no_equals_sign(tmp_path, monkeypatch):
 def test_load_dotenv_does_nothing_when_the_file_is_missing(tmp_path):
     # Must not raise -- .env is entirely optional.
     load_dotenv(tmp_path / "does-not-exist.env")
+
+
+def test_load_dotenv_treats_a_blank_value_as_unset(tmp_path, monkeypatch):
+    # "DB_PATH=" (no value) is exactly what .env.example leaves every
+    # field with no natural non-secret default -- it must NOT become
+    # os.environ["DB_PATH"] == "", which would make
+    # os.environ.get("DB_PATH", DEFAULT_DB_PATH) return "" instead of
+    # falling through to the real default (sqlite3.connect("") opens a
+    # throwaway private temp db, not the persistent default file --
+    # caught live running a real soak-test setup).
+    monkeypatch.delenv("FAKE_TEST_KEY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("FAKE_TEST_KEY=\n", encoding="utf-8")
+
+    load_dotenv(env_file)
+
+    assert "FAKE_TEST_KEY" not in os.environ
+    assert os.environ.get("FAKE_TEST_KEY", "fallback") == "fallback"

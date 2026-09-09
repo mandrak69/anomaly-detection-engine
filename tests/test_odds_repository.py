@@ -3,6 +3,7 @@ import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
     MarketPeriod,
@@ -10,8 +11,26 @@ from anomaly_detection_engine.models.market import (
     MarketType,
 )
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
+from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
+
+
+def save_collector_run(connection, run_id: str, provider_id: str) -> None:
+    t0 = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
+    CollectorRunRepository(connection).save(
+        CollectorRun(
+            id=run_id,
+            source=provider_id,
+            started_at=t0,
+            finished_at=t0,
+            status=CollectorRunStatus.SUCCESS,
+            records_received=1,
+            records_accepted=1,
+            records_rejected=0,
+            provider_id=provider_id,
+        )
+    )
 
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY,
@@ -429,6 +448,108 @@ def test_find_last_two_returns_available_snapshots_when_only_one_exists():
     assert result[0].odds == Decimal("2.20")
 
 
+def test_find_last_two_same_provider_skips_a_different_provider_reading():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("bet365", "Bet365")
+    save_collector_run(connection, "run-a", "the-odds-api")
+    save_collector_run(connection, "run-b", "api-football")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+            collector_run_id="run-a",
+        )
+    )
+    # A different provider's reading in between -- must be skipped, not
+    # treated as the "previous" reading to compare against.
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.25"), observed_at=datetime.fromisoformat("2026-08-27T08:02:00+00:00"),
+            collector_run_id="run-b",
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("1.90"), observed_at=datetime.fromisoformat("2026-08-27T08:04:00+00:00"),
+            collector_run_id="run-a",
+        )
+    )
+
+    result = repository.find_last_two_same_provider(
+        event_id="event-001", bookmaker_id="bet365", market=MARKET, outcome="1",
+    )
+
+    assert len(result) == 2
+    assert result[0].odds == Decimal("2.20")
+    assert result[1].odds == Decimal("1.90")
+
+
+def test_find_last_two_same_provider_returns_only_latest_when_no_earlier_same_provider():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("bet365", "Bet365")
+    save_collector_run(connection, "run-a", "the-odds-api")
+    save_collector_run(connection, "run-b", "api-football")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+            collector_run_id="run-a",
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.25"), observed_at=datetime.fromisoformat("2026-08-27T08:02:00+00:00"),
+            collector_run_id="run-b",
+        )
+    )
+
+    result = repository.find_last_two_same_provider(
+        event_id="event-001", bookmaker_id="bet365", market=MARKET, outcome="1",
+    )
+
+    assert len(result) == 1
+    assert result[0].odds == Decimal("2.25")
+
+
+def test_find_last_two_same_provider_treats_unknown_provider_as_matching_unknown():
+    # Snapshots with no collector_run_id (pre-provenance data, or saved
+    # directly rather than through OddsIngestionService) must keep
+    # behaving exactly like find_last_two -- "unknown" provider matches
+    # "unknown" provider, so existing data/tests without provenance
+    # information aren't silently excluded from movement detection.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("1.90"), observed_at=datetime.fromisoformat("2026-08-27T08:04:00+00:00"),
+        )
+    )
+
+    result = repository.find_last_two_same_provider(
+        event_id="event-001", bookmaker_id="mozzart", market=MARKET, outcome="1",
+    )
+
+    assert len(result) == 2
+    assert result[0].odds == Decimal("2.20")
+    assert result[1].odds == Decimal("1.90")
+
+
 def test_finds_latest_snapshot_for_each_bookmaker_and_outcome():
     connection = create_test_connection()
     repository = OddsRepository(connection)
@@ -533,6 +654,50 @@ def test_finds_latest_for_market_when_an_older_snapshot_is_inserted_after_a_newe
 
     assert len(result) == 1
     assert result[0].odds == Decimal("2.20")
+
+
+def test_find_latest_for_market_prefers_quote_time_over_when_we_polled_it():
+    # Two providers report the same canonical bookmaker (see
+    # BookmakerCatalog) at different times. The-odds-api's row was
+    # fetched (observed_at) *earlier* than api-football's, but its
+    # actual quote (source_timestamp) is *fresher* -- api-football's row
+    # was merely polled later, its own quote is genuinely stale. "Latest"
+    # must mean the freshest real price (quote_time), not whichever row
+    # this process happened to fetch most recently, or the genuinely
+    # fresher quote would be shadowed by a staler one just because it
+    # was polled after it -- exactly the scenario that motivated this
+    # fix.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("bet365", "Bet365")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MARKET,
+            outcome="1",
+            odds=Decimal("2.05"),
+            observed_at=datetime.fromisoformat("2026-08-27T12:06:00+00:00"),
+            source_timestamp=datetime.fromisoformat("2026-08-27T12:05:00+00:00"),
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001",
+            bookmaker=bookmaker,
+            market=MARKET,
+            outcome="1",
+            odds=Decimal("2.10"),
+            observed_at=datetime.fromisoformat("2026-08-27T12:07:00+00:00"),
+            source_timestamp=datetime.fromisoformat("2026-08-27T11:30:00+00:00"),
+        )
+    )
+
+    result = repository.find_latest_for_market(event_id="event-001", market=MARKET)
+
+    assert len(result) == 1
+    assert result[0].odds == Decimal("2.05")
 
 
 def test_find_latest_for_market_does_not_mix_pre_match_and_live_snapshots():

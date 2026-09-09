@@ -130,6 +130,21 @@ def load_dotenv(path: Path = DEFAULT_DOTENV_PATH) -> None:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
 
+        if not value:
+            # A blank RHS ("DB_PATH=", left that way in .env.example for
+            # every field with no natural non-secret default) must mean
+            # "not set", the same as the line being absent entirely --
+            # not "set to the empty string". Without this,
+            # os.environ.get(key, default) in load_config() would return
+            # "" (the var IS present) instead of falling through to
+            # load_config()'s own default, silently discarding it. Hit
+            # exactly this way for db_path: "" is a valid sqlite3.connect()
+            # path (a private on-disk temp db, deleted on close), so a
+            # blank DB_PATH= line silently produced a throwaway database
+            # instead of the real persistent DEFAULT_DB_PATH -- caught
+            # live, running a real soak-test setup.
+            continue
+
         os.environ.setdefault(key, value)
 
 

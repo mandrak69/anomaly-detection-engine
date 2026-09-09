@@ -20,6 +20,17 @@ class OddsSnapshot:
     odds: Decimal
     observed_at: datetime
     source_timestamp: datetime | None = None
+    # Which CollectorRun produced this snapshot -- storage.collector_run_
+    # repository.CollectorRun.id, not enforced as a SQL foreign key (see
+    # migration 8: the row would need to exist before
+    # OddsIngestionService.run() even generates its run_id, since the
+    # CollectorRun itself is only persisted at the very end of the run).
+    # None for a snapshot saved directly rather than through
+    # OddsIngestionService (tests, historical pre-migration-8 data) --
+    # its provider is then "unknown", not "no provider"; see
+    # OddsRepository.find_last_two_same_provider for how that is
+    # handled.
+    collector_run_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.odds <= Decimal("1.0"):

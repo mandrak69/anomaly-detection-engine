@@ -114,7 +114,7 @@ class OddsIngestionService:
         try:
             for raw in raw_events:
                 records_received += 1
-                accepted, reason = self._ingest_one(raw)
+                accepted, reason = self._ingest_one(raw, run_id)
 
                 try:
                     self._save_raw_payload(
@@ -202,7 +202,7 @@ class OddsIngestionService:
             source_payload=collection.source_payload,
         )
 
-    def _ingest_one(self, raw: RawEventOdds) -> tuple[bool, str | None]:
+    def _ingest_one(self, raw: RawEventOdds, run_id: str) -> tuple[bool, str | None]:
         """Validates, matches, and persists one raw record.
 
         Catches everything (validator, matcher/FixtureCatalog, or
@@ -212,6 +212,15 @@ class OddsIngestionService:
         distinguishable reason, rather than letting it escape and abort
         the whole run -- see run()'s docstring/comments for why the run
         must always reach a final state.
+
+        run_id is stamped onto every OddsSnapshot this record produces
+        (see OddsSnapshot.collector_run_id) even though the matching
+        collector_runs row for it doesn't exist yet at this point in
+        run() -- it's only written at the very end, by _record_run().
+        That ordering is exactly why this column has no SQL foreign key
+        (see migration 8): the value is correct and stable (run_id is
+        generated once, up front, in run()), just not yet backed by a
+        parent row when these inserts happen.
         """
         try:
             validation = validate_raw_event_odds(raw)
@@ -252,6 +261,7 @@ class OddsIngestionService:
                     odds=odds,
                     observed_at=raw.observed_at,
                     source_timestamp=raw.source_timestamp,
+                    collector_run_id=run_id,
                 )
                 for outcome, odds in raw.odds.items()
             ]

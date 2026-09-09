@@ -551,6 +551,40 @@ def _migration_7_bookmaker_catalog(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_8_odds_snapshot_provenance(connection: sqlite3.Connection) -> None:
+    """Adds odds_snapshots.collector_run_id -- which CollectorRun
+    actually produced each snapshot -- closing the one remaining gap in
+    this project's provenance chain: collector_runs already records
+    provider_id/parser_version/source_payload per run (migration 6), but
+    nothing on odds_snapshots pointed back to which run any given row
+    came from, so "this Bet365 quote of 2.15 came from which
+    API-Football poll" was unanswerable without guessing from timing.
+
+    Deliberately NOT a SQL foreign key (unlike the REFERENCES columns
+    migration 3/7 added): OddsIngestionService.run() generates its own
+    run_id and starts saving odds_snapshots rows against it *before* the
+    matching collector_runs row is written (that only happens at the
+    very end, in _record_run()) -- a real FK constraint, with this
+    project's connections running with PRAGMA foreign_keys = ON, would
+    reject every snapshot insert since the parent row doesn't exist yet
+    at that point. odds_snapshots.event_id/bookmaker_id already follow
+    this same "plain TEXT, no REFERENCES" precedent for an unrelated
+    reason (see migration 1); this column follows it for its own,
+    ordering-specific reason.
+
+    Nullable and left unbackfilled for existing rows, the same reasoning
+    migration 6's own nullable columns used: no row written before this
+    migration recorded which run produced it, so there is nothing to
+    recover -- NULL here means "provenance unknown" (pre-migration data,
+    or a snapshot saved directly rather than through
+    OddsIngestionService), a legitimate, permanent state this project's
+    query logic (see OddsRepository.find_last_two_same_provider) already
+    has to handle, not a temporary gap this migration should try to
+    paper over.
+    """
+    _add_column_if_missing(connection, "odds_snapshots", "collector_run_id", "TEXT")
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -559,6 +593,7 @@ MIGRATIONS: list[Migration] = [
     _migration_5_event_competition_id,
     _migration_6_collector_run_provenance,
     _migration_7_bookmaker_catalog,
+    _migration_8_odds_snapshot_provenance,
 ]
 
 

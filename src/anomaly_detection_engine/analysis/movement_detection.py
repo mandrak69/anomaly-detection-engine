@@ -69,7 +69,13 @@ def detect_movements(
                 continue
             seen.add(key)
 
-            history = odds_repository.find_last_two(
+            # _same_provider, not find_last_two: comparing two readings
+            # of the same canonical bookmaker from two *different*
+            # providers could report a "movement" that is really just
+            # the providers disagreeing or polling on different
+            # schedules, not the bookmaker's actual price changing --
+            # see OddsRepository.find_last_two_same_provider.
+            history = odds_repository.find_last_two_same_provider(
                 event_id=event.id,
                 bookmaker_id=snapshot.bookmaker.id,
                 market=market,

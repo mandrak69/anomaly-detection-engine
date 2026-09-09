@@ -25,10 +25,29 @@ _INSERT_SQL = """
         outcome,
         odds,
         observed_at,
-        source_timestamp
+        source_timestamp,
+        collector_run_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+# The "latest"/"most current" ordering every selection query below
+# shares: quote_time (source_timestamp if the source provided one,
+# otherwise observed_at -- see OddsSnapshot.quote_time) is when the
+# price actually was/is current, not when *we* happened to poll it.
+# Ordering by observed_at alone (the old behavior) picks whichever row
+# this process fetched most recently, which is not the same claim --
+# two providers reporting the same canonical bookmaker can be polled at
+# different times, so the row fetched last is not necessarily the row
+# describing the freshest real price. observed_at DESC/id DESC stay as
+# tiebreakers for whenever quote_time is genuinely equal (e.g. neither
+# source reports a source_timestamp at all).
+def _latest_order_by(alias: str | None = None) -> str:
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"COALESCE({prefix}source_timestamp, {prefix}observed_at) DESC, "
+        f"{prefix}observed_at DESC, {prefix}id DESC"
+    )
 
 
 def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
@@ -46,6 +65,7 @@ def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
         str(snapshot.odds),
         to_utc_iso(snapshot.observed_at),
         to_utc_iso(snapshot.source_timestamp) if snapshot.source_timestamp else None,
+        snapshot.collector_run_id,
     )
 
 
@@ -133,7 +153,7 @@ class OddsRepository:
               AND bookmaker_id = ?
               AND {_market_identity_where()}
               AND outcome = ?
-            ORDER BY observed_at DESC, id DESC
+            ORDER BY {_latest_order_by()}
             LIMIT 1
             """,
             (
@@ -162,7 +182,7 @@ class OddsRepository:
               AND bookmaker_id = ?
               AND {_market_identity_where()}
               AND outcome = ?
-            ORDER BY observed_at DESC, id DESC
+            ORDER BY {_latest_order_by()}
             LIMIT 2
             """,
             (
@@ -176,6 +196,77 @@ class OddsRepository:
         snapshots = [self._map_row(row) for row in rows]
 
         return list(reversed(snapshots))
+
+    def find_last_two_same_provider(
+        self,
+        *,
+        event_id: str,
+        bookmaker_id: str,
+        market: MarketIdentity,
+        outcome: str,
+    ) -> list[OddsSnapshot]:
+        """Like find_last_two, but the two returned readings (if any) are
+        guaranteed to come from the same provider -- the latest reading's
+        own provider (via its collector_run_id -> collector_runs.
+        provider_id) is what every earlier candidate must match.
+
+        Comparing "Bet365 via the-odds-api" against "Bet365 via
+        api-football" as if they were one continuous quote stream could
+        report a "movement" that is really just two providers
+        disagreeing about the current price, or reporting on different
+        schedules, not the same bookmaker's price actually changing --
+        see analysis.movement_detection, the only caller.
+
+        A snapshot with no known collector_run_id (pre-migration-8
+        historical data, or one saved directly rather than through
+        OddsIngestionService) has an *unknown* provider, not "no
+        provider" -- two such unknown-provider readings are treated as a
+        match, the same fallback find_last_two itself always had, so
+        data/tests with no provenance information keep behaving exactly
+        as before rather than being silently excluded from movement
+        detection entirely.
+
+        Looks at only the most recent 10 readings (across every
+        provider combined), not the whole history -- correct as long as
+        a genuine same-provider reading, if one exists, is among the
+        last 10 combined readings, true for any realistic difference in
+        polling cadence between providers.
+        """
+        rows = self._connection.execute(
+            f"""
+            SELECT o.*, cr.provider_id AS run_provider_id
+            FROM odds_snapshots o
+            LEFT JOIN collector_runs cr ON cr.id = o.collector_run_id
+            WHERE o.event_id = ?
+              AND o.bookmaker_id = ?
+              AND {_market_identity_where("o")}
+              AND o.outcome = ?
+            ORDER BY {_latest_order_by("o")}
+            LIMIT 10
+            """,
+            (
+                event_id,
+                bookmaker_id,
+                *_market_identity_params(market),
+                outcome,
+            ),
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        latest_row = rows[0]
+        latest_provider = latest_row["run_provider_id"]
+
+        previous_row = next(
+            (row for row in rows[1:] if row["run_provider_id"] == latest_provider),
+            None,
+        )
+
+        if previous_row is None:
+            return [self._map_row(latest_row)]
+
+        return [self._map_row(previous_row), self._map_row(latest_row)]
 
     def find_latest_for_market(
         self,
@@ -193,6 +284,14 @@ class OddsRepository:
         already stored), so that join could silently miss the true latest
         row -- or return none at all -- for a given (bookmaker, outcome).
         ROW_NUMBER's ORDER BY picks one row's rn=1, always a real row.
+
+        "Latest" is by quote_time (see _latest_order_by), not observed_at
+        alone: the same canonical bookmaker reported by two providers can
+        be polled at different times, so the row *we* fetched most
+        recently is not necessarily the row describing the freshest real
+        price -- an older, later-polled quote could otherwise shadow a
+        genuinely fresher one just because it happened to be fetched
+        after it.
         """
         rows = self._connection.execute(
             f"""
@@ -202,7 +301,7 @@ class OddsRepository:
                     o.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY o.bookmaker_id, o.outcome
-                        ORDER BY o.observed_at DESC, o.id DESC
+                        ORDER BY {_latest_order_by("o")}
                     ) AS rn
                 FROM odds_snapshots o
                 WHERE o.event_id = ?
@@ -247,4 +346,5 @@ class OddsRepository:
                 if row["source_timestamp"]
                 else None
             ),
+            collector_run_id=row["collector_run_id"],
         )

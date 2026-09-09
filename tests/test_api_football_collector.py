@@ -467,6 +467,80 @@ def test_collect_raises_if_pagination_never_reports_completion():
         collector.collect()
 
 
+def _plan_page_limit_response() -> dict:
+    # Observed live, on a real free-tier account: paging.total on page 1
+    # can claim more pages exist than the free plan is actually allowed
+    # to *fetch* -- requesting page 4+ is rejected with this shape
+    # regardless of what paging.total said.
+    return {
+        "get": "odds",
+        "parameters": {"date": "2026-09-08"},
+        "errors": {"plan": "Free plans are limited to a maximum value of 3 for the Page parameter"},
+        "results": 0,
+        "paging": {"current": 1, "total": 1},
+        "response": [],
+    }
+
+
+def test_collect_keeps_earlier_pages_when_the_plan_caps_the_page_parameter(caplog):
+    three_fixtures = {
+        **TWO_FIXTURES_RESPONSE,
+        "response": [
+            *TWO_FIXTURES_RESPONSE["response"],
+            {
+                "fixture": {"id": 2003, "date": "2026-09-08T04:00:00+00:00", "timezone": "UTC"},
+                "league": {"id": 130, "name": "League C", "country": "Z", "season": 2026},
+                "teams": {
+                    "home": {"id": 5, "name": "Team C1"},
+                    "away": {"id": 6, "name": "Team C2"},
+                },
+            },
+        ],
+    }
+    odds_pages = {
+        1: _match_winner_odds_response(2001, current=1, total=5),
+        2: _match_winner_odds_response(2002, current=2, total=5),
+        3: _match_winner_odds_response(2003, current=3, total=5),
+        4: _plan_page_limit_response(),
+    }
+    fetch = _paged_fetch_stub({1: three_fixtures}, odds_pages)
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    with caplog.at_level("WARNING"):
+        result = collector.collect().records
+
+    # Pages 1-3 succeeded and must still be kept -- not discarded just
+    # because page 4 was rejected by the plan.
+    assert {r.home_team for r in result} == {"Team A1", "Team B1", "Team C1"}
+    assert any("pagination_capped_by_plan" in message for message in caplog.messages)
+    # Never even tried page 5 -- stopped right where the plan first
+    # rejected a page.
+    assert not any(url.endswith("&page=5") for url in fetch.requested_urls)
+
+
+def test_a_genuine_error_on_a_later_page_still_raises():
+    # Only the specific "plan caps the page parameter" shape is treated
+    # as "stop paginating" -- any other error on page 2+ (bad key
+    # suddenly revoked mid-run, rate limit, ...) must still abort loudly
+    # like every other unexpected error in this collector.
+    odds_pages = {
+        1: _match_winner_odds_response(2001, current=1, total=2),
+        2: {
+            "get": "odds",
+            "parameters": {"date": "2026-09-08"},
+            "errors": {"token": "Invalid API key"},
+            "results": 0,
+            "paging": {"current": 1, "total": 1},
+            "response": [],
+        },
+    }
+    fetch = _paged_fetch_stub({1: TWO_FIXTURES_RESPONSE}, odds_pages)
+    collector = ApiFootballCollector(api_key="test-key", date="2026-09-08", fetch=fetch)
+
+    with pytest.raises(ApiFootballError, match="Invalid API key"):
+        collector.collect()
+
+
 def test_parse_api_football_response_directly():
     result = parse_api_football_response(
         json.dumps(SAMPLE_FIXTURES_RESPONSE),

@@ -206,8 +206,23 @@ def _fetch_all_pages(
     within a sane number of pages -- protects an unattended,
     long-running poller (see poller.py) from an infinite fetch loop
     should the API ever misbehave.
+
+    One deliberate exception to "fail loud": api-football.com's free
+    plan hard-caps which page can actually be *fetched* (observed live:
+    {"errors": {"plan": "Free plans are limited to a maximum value of 3
+    for the Page parameter"}}) independently of what paging.total on
+    page 1 claims the real page count is -- so a real day whose data
+    genuinely spans more pages than the plan allows would otherwise
+    always abort this whole endpoint's fetch with nothing kept, even
+    though every earlier page fetched fine. When that specific error
+    shows up on page 2+ (see _is_plan_page_limit_error), pagination
+    stops there instead of raising, keeping every page merged so far --
+    logged as a warning (not silently swallowed) so a day capped this
+    way is still visible, just not treated as a hard failure the way a
+    genuine error (bad key, rate limit, ...) still is.
     """
     page = 1
+    pages_merged = 0
     merged_decimal: dict | None = None
     merged_plain: dict | None = None
 
@@ -221,8 +236,21 @@ def _fetch_all_pages(
 
         url = url_base if page == 1 else f"{url_base}&page={page}"
         raw = fetch(url)
-        decimal_data = _load_envelope(raw, what=what)
         plain_data = json.loads(raw)
+
+        if page > 1 and _is_plan_page_limit_error(plain_data.get("errors")):
+            logger.warning(
+                "api_football.pagination_capped_by_plan",
+                extra={
+                    "what": what,
+                    "pages_fetched": pages_merged,
+                    "plan_message": plain_data["errors"].get("plan"),
+                },
+            )
+            break
+
+        decimal_data = _load_envelope(raw, what=what)
+        pages_merged += 1
 
         if merged_decimal is None:
             merged_decimal, merged_plain = decimal_data, plain_data
@@ -237,10 +265,28 @@ def _fetch_all_pages(
             break
         page += 1
 
-    if page > 1:
-        logger.info("api_football.paginated", extra={"what": what, "pages_fetched": page})
+    if pages_merged > 1:
+        logger.info(
+            "api_football.paginated", extra={"what": what, "pages_fetched": pages_merged}
+        )
 
     return merged_decimal, merged_plain
+
+
+def _is_plan_page_limit_error(errors: object) -> bool:
+    """True for api-football.com's specific "the current plan cannot
+    fetch this page" error shape -- {"errors": {"plan": "..."}} where
+    the message mentions the page parameter -- as opposed to any other
+    kind of error (invalid key, rate limit, malformed request, ...),
+    which must still raise/abort loudly rather than being treated as
+    "just stop paginating". Matched loosely (substring "page" in the
+    message, not the exact wording) since the precise phrasing is
+    observed behavior, not a documented, guaranteed-stable contract.
+    """
+    if not isinstance(errors, dict):
+        return False
+    plan_message = errors.get("plan")
+    return isinstance(plan_message, str) and "page" in plan_message.lower()
 
 
 def _team_names_by_fixture_id(fixtures_data: dict) -> dict[int, tuple[str, str]]:
