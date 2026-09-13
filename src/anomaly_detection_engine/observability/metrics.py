@@ -19,8 +19,8 @@ class IngestionMetrics:
     total_received: int = 0
     total_accepted: int = 0
     total_rejected: int = 0
-    runs_by_status: Counter = field(default_factory=Counter)
-    rejections_by_reason: Counter = field(default_factory=Counter)
+    runs_by_status: Counter[str] = field(default_factory=Counter)
+    rejections_by_reason: Counter[str] = field(default_factory=Counter)
 
     def record_run(self, run: CollectorRun, rejection_reasons: list[str]) -> None:
         self.total_runs += 1
@@ -37,7 +37,7 @@ class IngestionMetrics:
             stage = reason.split(":", 1)[0]
             self.rejections_by_reason[stage] += 1
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, object]:
         return {
             "total_runs": self.total_runs,
             "total_received": self.total_received,

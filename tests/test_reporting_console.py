@@ -11,6 +11,7 @@ from anomaly_detection_engine.reporting.console import print_reports
 from anomaly_detection_engine.runtime import Runtime
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
+from anomaly_detection_engine.storage.event_status_repository import EventStatusRepository
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
@@ -30,6 +31,7 @@ def build_runtime_for_test() -> Runtime:
         raw_payload_repository=RawPayloadRepository(connection),
         signal_repository=SignalRepository(connection),
         movement_repository=MovementRepository(connection),
+        event_status_repository=EventStatusRepository(connection),
         metrics=IngestionMetrics(),
     )
 

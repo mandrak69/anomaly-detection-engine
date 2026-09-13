@@ -11,6 +11,7 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
 )
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import (
+    EventLifecycle,
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
@@ -502,3 +503,89 @@ def test_expire_active_signals_does_not_touch_an_already_resolved_signal():
     row = repo._connection.execute("SELECT * FROM signals").fetchone()
     assert row["status"] == RESOLVED
     assert row["resolved_at"] == t1.isoformat()
+
+
+def insert_event_status_row(connection, event_id: str, lifecycle: EventLifecycle) -> None:
+    connection.execute(
+        "INSERT INTO event_status (event_id, lifecycle, updated_at) VALUES (?, ?, ?)",
+        (event_id, lifecycle.value, to_utc_iso(T0)),
+    )
+    connection.commit()
+
+
+def test_expire_active_signals_expires_a_finished_event_regardless_of_ttl_cutoff():
+    # start_time is in the future relative to event_start_cutoff below --
+    # the TTL heuristic alone would NOT expire this signal (see
+    # test_expire_active_signals_leaves_a_not_yet_started_event_untouched)
+    # -- but a real FINISHED status is a fact, not a policy this method
+    # should wait a TTL out for once it already has the answer.
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0 + timedelta(days=1))
+    insert_event_status_row(repo._connection, "e1", EventLifecycle.FINISHED)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=T0 + timedelta(hours=4),
+    )
+
+    assert len(expired_ids) == 1
+    assert repo.find_active(SUREBET) == []
+
+
+def test_expire_active_signals_expires_a_postponed_or_canceled_event():
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0 + timedelta(days=1))
+    insert_event_status_row(repo._connection, "e1", EventLifecycle.POSTPONED_OR_CANCELED)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=T0 + timedelta(hours=4),
+    )
+
+    assert len(expired_ids) == 1
+
+
+def test_expire_active_signals_does_not_expire_a_scheduled_or_live_event_early():
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0 + timedelta(days=1))
+    insert_event_status_row(repo._connection, "e1", EventLifecycle.LIVE)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=T0 + timedelta(hours=1), expired_at=T0 + timedelta(hours=4),
+    )
+
+    assert expired_ids == []
+    assert len(repo.find_active(SUREBET)) == 1
+
+
+def test_expire_active_signals_protects_a_finished_events_signal_reconfirmed_this_cycle():
+    # Same last_seen_at guard as the TTL-only case (see
+    # test_expire_active_signals_protects_a_signal_reconfirmed_this_same_cycle)
+    # must also apply to the lifecycle-based condition -- a FINISHED
+    # status must not let this bypass the guard.
+    repo = make_repository()
+    insert_event_row(repo._connection, "e1", start_time=T0)
+    insert_event_status_row(repo._connection, "e1", EventLifecycle.FINISHED)
+    now = T0 + timedelta(days=2)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=now, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    expired_ids = repo.expire_active_signals(
+        event_start_cutoff=now - timedelta(hours=3), expired_at=now,
+    )
+
+    assert expired_ids == []
+    assert len(repo.find_active(SUREBET)) == 1

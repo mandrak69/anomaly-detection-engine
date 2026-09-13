@@ -15,7 +15,12 @@ from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.models.market import DEFAULT_MARKET, TOTALS_2_5_MARKET, MarketType
+from anomaly_detection_engine.models.market import (
+    DEFAULT_MARKET,
+    TOTALS_2_5_MARKET,
+    EventLifecycle,
+    MarketType,
+)
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.runtime import build_runtime
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
@@ -504,6 +509,57 @@ def test_run_detection_does_not_expire_a_signal_still_being_touched(monkeypatch)
 
     assert second["signals_expired"] == 0
     assert len(runtime.signal_repository.find_active("SUREBET")) == 1
+
+
+def test_run_detection_excludes_a_finished_event_from_detection(monkeypatch):
+    # A FINISHED event's pre-match odds are never a meaningful surebet
+    # candidate again, real status or not -- run_detection must filter
+    # it out before persist_detected_signals ever sees it, not merely
+    # expire an already-created signal after the fact.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="test").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+    runtime.event_status_repository.update(
+        event_id=event.id, lifecycle=EventLifecycle.FINISHED, updated_at=quote_time,
+    )
+
+    result = pipeline.run_detection(runtime, [event], cfg)
+
+    assert result["active_surebets"] == 0
+    assert runtime.signal_repository.find_active("SUREBET") == []
+
+
+def test_run_detection_still_detects_a_live_events_surebet(monkeypatch):
+    # LIVE is not a terminal status -- only FINISHED/POSTPONED_OR_CANCELED
+    # exclude an event from detection (see EventLifecycle's docstring).
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="test").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+    runtime.event_status_repository.update(
+        event_id=event.id, lifecycle=EventLifecycle.LIVE, updated_at=quote_time,
+    )
+
+    result = pipeline.run_detection(runtime, [event], cfg)
+
+    assert result["active_surebets"] == 1
 
 
 def _save_totals_surebet_snapshots(odds_repository, event_id, observed_at):

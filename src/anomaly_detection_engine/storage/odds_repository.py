@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from sqlite3 import Connection, Row
+from typing import Any
 
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
@@ -50,7 +51,7 @@ def _latest_order_by(alias: str | None = None) -> str:
     )
 
 
-def _snapshot_params(snapshot: OddsSnapshot) -> tuple:
+def _snapshot_params(snapshot: OddsSnapshot) -> tuple[Any, ...]:
     return (
         snapshot.event_id,
         snapshot.bookmaker.id,
@@ -89,7 +90,7 @@ def _market_identity_where(alias: str | None = None) -> str:
     )
 
 
-def _market_identity_params(market: MarketIdentity) -> tuple:
+def _market_identity_params(market: MarketIdentity) -> tuple[Any, ...]:
     return (
         market.market_type.value,
         market.period.value,

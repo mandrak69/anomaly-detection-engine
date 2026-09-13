@@ -15,6 +15,7 @@ dependencies = [
 dev = [
     "pytest>=8.0,<9.0",
     "ruff>=0.6,<1.0",
+    "mypy>=1.10,<2.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -31,3 +32,15 @@ src = ["src", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/anomaly_detection_engine"]
+# rapidfuzz has no bundled type stubs and no third-party stub package
+# published for it -- silencing missing-import errors only for this one
+# dependency (not project-wide) keeps strict mode meaningful everywhere
+# it can actually check something.
+[[tool.mypy.overrides]]
+module = "rapidfuzz.*"
+ignore_missing_imports = true

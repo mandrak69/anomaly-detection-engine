@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from sqlite3 import Connection, Row
+from typing import Any
 from uuid import uuid4
 
 from anomaly_detection_engine.models.market import (
+    EventLifecycle,
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
@@ -46,7 +48,7 @@ class SignalCandidate:
     market: MarketIdentity
     outcome: str | None
     edge_percent: Decimal
-    details: dict
+    details: dict[str, Any]
 
     @property
     def identity(self) -> SignalIdentity:
@@ -62,7 +64,7 @@ class SignalRecord:
     outcome: str | None
     status: SignalStatus
     edge_percent: Decimal
-    details: dict
+    details: dict[str, Any]
     first_seen_at: datetime
     last_seen_at: datetime
     # When status left ACTIVE -- set by both reconcile() (status=RESOLVED)
@@ -174,23 +176,29 @@ class SignalRepository:
     def expire_active_signals(
         self, *, event_start_cutoff: datetime, expired_at: datetime
     ) -> list[str]:
-        """Marks EXPIRED every ACTIVE signal whose event started before
-        event_start_cutoff -- a lifecycle boundary the *caller* computes
-        (see AppConfig.signal_ttl/pipeline.run_detection); this
-        repository has no opinion on what "too old" means, only how to
-        act once told, so a future per-sport or per-MarketPhase TTL
-        policy can change how that cutoff is computed without touching
-        this method's signature.
+        """Marks EXPIRED every ACTIVE signal whose event either started
+        before event_start_cutoff (a heuristic boundary the *caller*
+        computes -- see AppConfig.signal_ttl/pipeline.run_detection) or
+        is known -- via event_status, see storage.event_status_repository
+        -- to have actually finished, been postponed, or been canceled.
+        The two conditions are independent, not layered: the lifecycle
+        check fires regardless of event_start_cutoff whenever a real
+        status is known, since "the match is definitely over" is a fact,
+        not a policy this repository should wait out a TTL for once it
+        already has the answer. An event with no event_status row (most
+        of them -- only a status-reporting collector like
+        ApiFootballCollector writes one) simply falls back to the
+        cutoff-only check exactly as before this existed.
 
         Also requires last_seen_at < expired_at: without this, a signal
         reconcile() just reconfirmed as ACTIVE *this same* detection
         cycle would be immediately re-expired by this call running right
-        after it, since event_start_cutoff alone only looks at how long
-        ago the event started, not whether it is still actively being
-        observed. Pass the exact same "now" to both calls in one
-        run_detection() invocation (see persist_detected_signals's
-        observed_at parameter) so a signal touched this cycle has
-        last_seen_at == expired_at and is correctly excluded here.
+        after it, since neither condition above looks at whether the
+        signal is still actively being observed. Pass the exact same
+        "now" to both calls in one run_detection() invocation (see
+        persist_detected_signals's observed_at parameter) so a signal
+        touched this cycle has last_seen_at == expired_at and is
+        correctly excluded here.
 
         Deliberately separate from reconcile(): reconcile() reflects
         what *this sweep* positively found; this is lifecycle
@@ -203,11 +211,21 @@ class SignalRepository:
                 """
                 SELECT s.id FROM signals s
                 JOIN events e ON e.id = s.event_id
+                LEFT JOIN event_status es ON es.event_id = s.event_id
                 WHERE s.status = ?
-                  AND e.start_time < ?
                   AND s.last_seen_at < ?
+                  AND (
+                    e.start_time < ?
+                    OR es.lifecycle IN (?, ?)
+                  )
                 """,
-                (ACTIVE, to_utc_iso(event_start_cutoff), expired_at.isoformat()),
+                (
+                    ACTIVE,
+                    expired_at.isoformat(),
+                    to_utc_iso(event_start_cutoff),
+                    EventLifecycle.FINISHED.value,
+                    EventLifecycle.POSTPONED_OR_CANCELED.value,
+                ),
             ).fetchall()
             expired_ids = [row["id"] for row in rows]
 
@@ -226,7 +244,7 @@ class SignalRepository:
         return expired_ids
 
     def _find(self, candidate: SignalCandidate) -> Row | None:
-        return self._connection.execute(
+        row: Row | None = self._connection.execute(
             f"""
             SELECT * FROM signals
             WHERE signal_type = ?
@@ -241,6 +259,7 @@ class SignalRepository:
                 candidate.outcome,
             ),
         ).fetchone()
+        return row
 
     def _insert(self, candidate: SignalCandidate, observed_at: datetime) -> str:
         signal_id = f"signal-{uuid4().hex[:10]}"
@@ -372,7 +391,9 @@ def _market_where(alias: str | None = None) -> str:
     )
 
 
-def _market_params(market: MarketIdentity) -> tuple:
+def _market_params(
+    market: MarketIdentity,
+) -> tuple[str, str, str, str | None, str | None, str | None]:
     return (
         market.market_type.value,
         market.period.value,

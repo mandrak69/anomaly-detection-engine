@@ -52,6 +52,73 @@ def test_same_source_same_spelling_reuses_cached_mapping_and_event():
     assert teams == 2  # Partizan + Crvena Zvezda, not duplicated
 
 
+def test_source_event_id_is_cached_and_reused_on_a_later_sighting():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    first = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id="12345",
+    )
+    mappings = connection.execute(
+        "SELECT COUNT(*) AS n FROM source_event_mappings"
+    ).fetchone()["n"]
+    assert mappings == 1
+
+    # Even with different (wrong-on-purpose) team names/start_time, the
+    # cached source_event_id mapping wins outright -- this is exactly
+    # the fast path's point: a fixture already resolved once is trusted
+    # without re-running fuzzy team/competition resolution at all.
+    second = catalog.match(
+        sport="football", league="L", home_team_raw="Some Other Name",
+        away_team_raw="Yet Another Name", start_time=T0 + timedelta(days=30),
+        source_event_id="12345",
+    )
+
+    assert second.event.id == first.event.id
+    assert second.confidence == 100.0
+    # No new team rows created for "Some Other Name"/"Yet Another Name".
+    teams = connection.execute("SELECT COUNT(*) AS n FROM teams").fetchone()["n"]
+    assert teams == 2
+
+
+def test_different_providers_do_not_share_source_event_id_mappings():
+    connection = make_connection()
+    api_football = FixtureCatalog(connection, provider_id="api-football")
+    the_odds_api = FixtureCatalog(connection, provider_id="the-odds-api")
+
+    api_football.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id="12345",
+    )
+
+    # Same raw string "12345" from a different provider must not
+    # accidentally hit api-football's cached mapping -- it's just an
+    # unrelated string until this provider resolves it for itself.
+    result = the_odds_api.match(
+        sport="football", league="L", home_team_raw="Novi Tim",
+        away_team_raw="Drugi Tim", start_time=T0, source_event_id="12345",
+    )
+
+    assert result.event.home_team.canonical_name == "Novi Tim"
+
+
+def test_no_source_event_id_falls_back_to_normal_resolution():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="mozzart")
+
+    result = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id=None,
+    )
+
+    assert result.event is not None
+    mappings = connection.execute(
+        "SELECT COUNT(*) AS n FROM source_event_mappings"
+    ).fetchone()["n"]
+    assert mappings == 0
+
+
 def test_two_different_sources_same_exact_spelling_share_one_team_and_event():
     connection = make_connection()
     mozzart = FixtureCatalog(connection, provider_id="mozzart")

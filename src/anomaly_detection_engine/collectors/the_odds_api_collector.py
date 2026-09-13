@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
@@ -97,7 +98,7 @@ def parse_the_odds_api_response(
 
 
 def _extract_1x2_odds(
-    bookmaker: dict, home_team: str, away_team: str
+    bookmaker: dict[str, Any], home_team: str, away_team: str
 ) -> dict[str, Decimal] | None:
     h2h_market = next(
         (m for m in bookmaker.get("markets", []) if m.get("key") == "h2h"),
@@ -210,7 +211,8 @@ class TheOddsApiCollector(OddsCollector):
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
-                return response.read()
+                data: bytes = response.read()
+                return data
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise TheOddsApiError(

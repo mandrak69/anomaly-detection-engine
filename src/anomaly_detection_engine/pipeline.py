@@ -26,6 +26,7 @@ from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
     HANDICAP_MINUS_1_MARKET,
     TOTALS_2_5_MARKET,
+    EventLifecycle,
     MarketIdentity,
 )
 from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP
@@ -285,6 +286,7 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
             bookmaker_catalog=bookmaker_catalog,
             collector_version="0.1.0",
             metrics=runtime.metrics,
+            event_status_repository=runtime.event_status_repository,
         )
         run = service.run()
         logger.info(
@@ -390,7 +392,7 @@ def persist_detected_signals(
     analysis_time: datetime,
     min_value_gap_percent: Decimal = Decimal("15.0"),
     observed_at: datetime | None = None,
-) -> dict:
+) -> dict[str, int]:
     """Runs one detection sweep and persists the result -- the "where and
     how to keep derived information" half of the pipeline, deliberately
     separate from reporting (the OPPORTUNITIES/ODDS MOVEMENT sections
@@ -458,7 +460,7 @@ def persist_detected_signals(
     }
 
 
-def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict:
+def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict[str, int]:
     """Detects and persists signals/movements for every ingested event,
     across every market in DETECTED_MARKETS, then expires ACTIVE signals
     whose event's lifecycle has run out -- the last step of the *core*
@@ -527,6 +529,22 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
     )
     now = datetime.now(UTC)
     freshness_policy = resolve_freshness_policy(config)
+
+    # Events a collector has told us are FINISHED/POSTPONED_OR_CANCELED
+    # (see models.market.EventLifecycle) never reach detection at all --
+    # a pre-match price for a match that has already ended or won't be
+    # played is never a meaningful surebet/value-gap candidate, real
+    # status or not. An event with no known lifecycle (get_many() has no
+    # entry for it -- most events, since only ApiFootballCollector
+    # reports status at all) is never excluded here: absence means
+    # "unknown", not "over" -- see EventLifecycle's own docstring.
+    lifecycles = runtime.event_status_repository.get_many([event.id for event in events])
+    events = [
+        event
+        for event in events
+        if lifecycles.get(event.id)
+        not in (EventLifecycle.FINISHED, EventLifecycle.POSTPONED_OR_CANCELED)
+    ]
 
     movements_recorded = 0
     for market in DETECTED_MARKETS:

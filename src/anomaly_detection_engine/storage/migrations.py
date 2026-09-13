@@ -585,6 +585,69 @@ def _migration_8_odds_snapshot_provenance(connection: sqlite3.Connection) -> Non
     _add_column_if_missing(connection, "odds_snapshots", "collector_run_id", "TEXT")
 
 
+def _migration_9_event_status(connection: sqlite3.Connection) -> None:
+    """Adds event_status, a one-row-per-event table tracking the latest
+    known models.market.EventLifecycle for a canonical event -- see
+    storage.event_status_repository. Separate from the events table
+    itself (rather than a column on it) because lifecycle is observed,
+    mutable state that changes on every poll a status-reporting collector
+    (currently only ApiFootballCollector) touches, unlike every existing
+    events column, which is fixed identity decided once at creation --
+    keeping it in its own table means Event (models.event) stays a pure
+    identity value, and a provider that never reports status simply never
+    gets a row here rather than forcing every Event construction
+    elsewhere to carry a lifecycle field it cannot actually populate.
+
+    No FK to events(id): consistent with collector_run_id's ordering
+    reasoning (migration 8) is not the issue here (events always exist
+    before this is written, via FixtureCatalog.match() already having
+    run) -- plain TEXT is used instead simply to match every other
+    id-shaped column in this schema (event_id, bookmaker_id, ...), none
+    of which are FKs either except where a migration specifically needed
+    referential integrity for a resolve-or-create cache (source_team_
+    mappings, source_bookmaker_mappings).
+    """
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS event_status (
+            event_id TEXT PRIMARY KEY,
+            lifecycle TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+
+def _migration_10_source_event_mappings(connection: sqlite3.Connection) -> None:
+    """Adds source_event_mappings, the same resolve-once-cache-forever
+    pattern source_team_mappings/source_competition_mappings already use
+    (see storage.fixture_catalog), but keyed on a provider's own stable
+    event/fixture id (e.g. api-football's fixture.id -- see
+    RawEventOdds.source_event_id) instead of a raw name needing fuzzy
+    resolution. A provider with no such stable id (the JSON demo,
+    Mozzart, the-odds-api at time of writing) simply never gets a row
+    here; FixtureCatalog.match() falls back to its existing team/
+    competition/start_time resolution exactly as before whenever
+    source_event_id is absent or not yet mapped.
+
+    `source` (not `provider_id`) is the column name here for the same
+    internal-storage-detail reason FixtureCatalog's own docstring gives
+    for source_team_mappings/source_competition_mappings: every
+    Python-facing name is provider_id, but renaming the column would be
+    a migration with no external consumer benefiting from it.
+    """
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS source_event_mappings (
+            source TEXT NOT NULL,
+            source_event_id TEXT NOT NULL,
+            event_id TEXT NOT NULL REFERENCES events(id),
+            PRIMARY KEY (source, source_event_id)
+        );
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -594,6 +657,8 @@ MIGRATIONS: list[Migration] = [
     _migration_6_collector_run_provenance,
     _migration_7_bookmaker_catalog,
     _migration_8_odds_snapshot_provenance,
+    _migration_9_event_status,
+    _migration_10_source_event_mappings,
 ]
 
 

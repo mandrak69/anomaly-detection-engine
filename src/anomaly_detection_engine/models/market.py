@@ -66,6 +66,31 @@ class MarketPhase(StrEnum):
     LIVE = "live"
 
 
+class EventLifecycle(StrEnum):
+    """A canonical event's real-world progress, when some collector
+    actually reports it -- distinct from MarketPhase (PRE_MATCH/LIVE
+    above), which is about which of two structurally different markets
+    a quote belongs to, not whether the underlying match has actually
+    started/finished. None (not a member here) means "no collector has
+    reported a status for this event yet", the same "absence, not a
+    guessed value" pattern already used for OddsSnapshot.source_timestamp
+    -- see RawEventOdds.lifecycle and storage.event_status_repository.
+
+    Lets detection/expiry stop relying purely on signal_ttl's fixed
+    duration once a real status is known: a FINISHED or
+    POSTPONED_OR_CANCELED event's pre-match odds are never meaningful
+    again regardless of how long SIGNAL_TTL_HOURS says to wait, and a
+    SCHEDULED/LIVE status is not itself a reason to change any
+    freshness/detection behavior -- only the two terminal states are
+    currently acted on (see pipeline.run_detection).
+    """
+
+    SCHEDULED = "scheduled"
+    LIVE = "live"
+    FINISHED = "finished"
+    POSTPONED_OR_CANCELED = "postponed_or_canceled"
+
+
 def canonical_decimal(value: Decimal) -> Decimal:
     """Normalizes a Decimal to the exact form MarketIdentity stores and
     compares by, so that two numerically-equal but differently-formatted

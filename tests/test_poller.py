@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import anomaly_detection_engine.poller as poller
 
 
@@ -118,3 +120,69 @@ def test_run_forever_with_max_cycles_zero_never_calls_run_cycle(monkeypatch):
     )
 
     assert completed == 0
+
+
+def test_run_forever_uses_interval_provider_instead_of_static_interval(monkeypatch):
+    monkeypatch.setattr(poller, "run_cycle", lambda runtime, config: {})
+
+    sleep_calls = []
+    intervals = iter([111, 222, 333])
+
+    poller.run_forever(
+        runtime=object(),
+        config=object(),
+        interval_seconds=999,  # must be ignored once interval_provider is given
+        sleep=sleep_calls.append,
+        max_cycles=3,
+        interval_provider=lambda: next(intervals),
+    )
+
+    assert sleep_calls == [111, 222]
+
+
+def test_resolve_poll_interval_inside_burst_window_returns_burst_interval():
+    result = poller.resolve_poll_interval(
+        base_interval_seconds=5400,
+        burst_start_hour=18,
+        burst_end_hour=21,
+        burst_interval_seconds=1800,
+        now=datetime(2026, 9, 11, 19, 30),
+    )
+
+    assert result == 1800
+
+
+def test_resolve_poll_interval_outside_burst_window_returns_base_interval():
+    result = poller.resolve_poll_interval(
+        base_interval_seconds=5400,
+        burst_start_hour=18,
+        burst_end_hour=21,
+        burst_interval_seconds=1800,
+        now=datetime(2026, 9, 11, 21, 0),
+    )
+
+    assert result == 5400
+
+
+def test_resolve_poll_interval_start_hour_boundary_is_inclusive():
+    result = poller.resolve_poll_interval(
+        base_interval_seconds=5400,
+        burst_start_hour=18,
+        burst_end_hour=21,
+        burst_interval_seconds=1800,
+        now=datetime(2026, 9, 11, 18, 0),
+    )
+
+    assert result == 1800
+
+
+def test_resolve_poll_interval_end_hour_boundary_is_exclusive():
+    result = poller.resolve_poll_interval(
+        base_interval_seconds=5400,
+        burst_start_hour=18,
+        burst_end_hour=21,
+        burst_interval_seconds=1800,
+        now=datetime(2026, 9, 11, 20, 59, 59),
+    )
+
+    assert result == 1800

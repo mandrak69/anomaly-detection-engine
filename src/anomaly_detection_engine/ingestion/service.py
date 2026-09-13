@@ -11,6 +11,7 @@ from anomaly_detection_engine.models.raw_odds import RawEventOdds
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
+from anomaly_detection_engine.storage.event_status_repository import EventStatusRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import (
     RawPayloadRepository,
@@ -39,6 +40,7 @@ class OddsIngestionService:
         bookmaker_catalog: BookmakerCatalog,
         collector_version: str | None = None,
         metrics: IngestionMetrics | None = None,
+        event_status_repository: EventStatusRepository | None = None,
     ) -> None:
         self._collector = collector
         self._matcher = matcher
@@ -48,6 +50,7 @@ class OddsIngestionService:
         self._bookmaker_catalog = bookmaker_catalog
         self._collector_version = collector_version
         self._metrics = metrics
+        self._event_status_repository = event_status_repository
         self._touched_events: dict[str, Event] = {}
 
     @property
@@ -147,6 +150,12 @@ class OddsIngestionService:
                     records_accepted += 1
                 else:
                     records_rejected += 1
+                    # _ingest_one's contract: reason is None only when
+                    # accepted is True (see its own return statements) --
+                    # this assert makes that invariant visible to the
+                    # type checker, which cannot otherwise infer it from
+                    # `accepted` alone.
+                    assert reason is not None
                     rejection_reasons.append(reason)
                     logger.warning(
                         "ingestion.record.rejected",
@@ -241,11 +250,23 @@ class OddsIngestionService:
                 home_team_raw=raw.home_team,
                 away_team_raw=raw.away_team,
                 start_time=raw.start_time,
+                source_event_id=raw.source_event_id,
             )
             if match.event is None:
                 return False, f"identity: {match.reason}"
 
             self._touched_events[match.event.id] = match.event
+
+            # Only when this record's source actually reported one (see
+            # RawEventOdds.lifecycle) -- most collectors never do, and
+            # a repository-less service (tests, or a future caller with
+            # no use for lifecycle) simply skips this entirely.
+            if raw.lifecycle is not None and self._event_status_repository is not None:
+                self._event_status_repository.update(
+                    event_id=match.event.id,
+                    lifecycle=raw.lifecycle,
+                    updated_at=raw.observed_at,
+                )
 
             # Resolved through the canonical bookmaker registry, not
             # built directly from raw.source_id/raw.source -- the same

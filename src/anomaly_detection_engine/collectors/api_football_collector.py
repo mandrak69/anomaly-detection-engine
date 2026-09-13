@@ -6,12 +6,14 @@ import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
 from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
     HANDICAP_MINUS_1_MARKET,
     TOTALS_2_5_MARKET,
+    EventLifecycle,
 )
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
 
@@ -25,6 +27,29 @@ _OVER_UNDER_BET_NAME = "Goals Over/Under"
 _TOTALS_2_5_LINE = "2.5"
 _HANDICAP_RESULT_BET_NAME = "Handicap Result"
 _HANDICAP_MINUS_1_LINE = "-1"
+
+# api-football.com's own fixture.status.short vocabulary (documented,
+# stable set) mapped to this project's own EventLifecycle -- a status
+# code not in any of these sets (a new code api-football adds later, or
+# a typo in their response) deliberately maps to None via _STATUS_MAP.get()
+# below rather than guessing a bucket, the same "no silent default" rule
+# EventLifecycle's own docstring describes.
+_SCHEDULED_STATUSES = {"TBD", "NS"}
+_LIVE_STATUSES = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}
+_FINISHED_STATUSES = {"FT", "AET", "PEN"}
+_POSTPONED_OR_CANCELED_STATUSES = {"PST", "CANC", "ABD", "AWD", "WO"}
+_STATUS_MAP: dict[str, EventLifecycle] = {
+    **dict.fromkeys(_SCHEDULED_STATUSES, EventLifecycle.SCHEDULED),
+    **dict.fromkeys(_LIVE_STATUSES, EventLifecycle.LIVE),
+    **dict.fromkeys(_FINISHED_STATUSES, EventLifecycle.FINISHED),
+    **dict.fromkeys(_POSTPONED_OR_CANCELED_STATUSES, EventLifecycle.POSTPONED_OR_CANCELED),
+}
+
+
+def _map_fixture_status(status_short: str | None) -> EventLifecycle | None:
+    if status_short is None:
+        return None
+    return _STATUS_MAP.get(status_short)
 # Generous but bounded -- a real day's fixtures should never come close
 # to this many pages. Exists so a bug (an API that never reports
 # current catching up to total) turns into a loud, immediate
@@ -86,7 +111,7 @@ def parse_api_football_response(
 
 
 def _parse_envelopes(
-    fixtures_data: dict, odds_data: dict, observed_at: datetime
+    fixtures_data: dict[str, Any], odds_data: dict[str, Any], observed_at: datetime
 ) -> list[RawEventOdds]:
     """The actual per-fixture/per-bookmaker extraction behind
     parse_api_football_response, operating on already-loaded (and, for
@@ -98,6 +123,7 @@ def _parse_envelopes(
     serialize Decimal at all).
     """
     team_names = _team_names_by_fixture_id(fixtures_data)
+    lifecycles = _lifecycle_by_fixture_id(fixtures_data)
 
     result: list[RawEventOdds] = []
 
@@ -144,6 +170,10 @@ def _parse_envelopes(
                 # for "Bet365") -- see RawEventOdds.source_id for why this
                 # must not be derived from the display name.
                 "source_id": source_id,
+                # api-football.com's own stable fixture id -- see
+                # RawEventOdds.source_event_id.
+                "source_event_id": str(fixture_id) if fixture_id is not None else None,
+                "lifecycle": lifecycles.get(fixture_id),
             }
 
             match_winner_odds = _extract_match_winner_odds(bookmaker)
@@ -163,7 +193,7 @@ def _parse_envelopes(
     return result
 
 
-def _load_envelope(raw: str | bytes, *, what: str) -> dict:
+def _load_envelope(raw: str | bytes, *, what: str) -> dict[str, Any]:
     data = json.loads(raw, parse_float=Decimal)
 
     if not isinstance(data, dict) or "response" not in data:
@@ -182,7 +212,7 @@ def _load_envelope(raw: str | bytes, *, what: str) -> dict:
 
 def _fetch_all_pages(
     fetch: Callable[[str], bytes], url_base: str, *, what: str
-) -> tuple[dict, dict, bool]:
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Fetches every page of one api-football.com list endpoint
     (paging.current/paging.total), merging each page's "response" array
     into one envelope dict shaped like a single, complete response --
@@ -226,8 +256,8 @@ def _fetch_all_pages(
     page = 1
     pages_merged = 0
     capped = False
-    merged_decimal: dict | None = None
-    merged_plain: dict | None = None
+    merged_decimal: dict[str, Any] | None = None
+    merged_plain: dict[str, Any] | None = None
 
     while True:
         if page > _MAX_PAGES:
@@ -259,6 +289,12 @@ def _fetch_all_pages(
         if merged_decimal is None:
             merged_decimal, merged_plain = decimal_data, plain_data
         else:
+            # merged_plain is always set in the same branch that sets
+            # merged_decimal (see just above) -- this assert only makes
+            # that existing invariant visible to the type checker, which
+            # cannot otherwise infer it from the merged_decimal check
+            # alone since the two are separate variables.
+            assert merged_plain is not None
             merged_decimal["response"].extend(decimal_data["response"])
             merged_plain["response"].extend(plain_data["response"])
 
@@ -274,6 +310,13 @@ def _fetch_all_pages(
             "api_football.paginated", extra={"what": what, "pages_fetched": pages_merged}
         )
 
+    # Always set by this point: page 1 is always fetched and always
+    # either completes the loop body above (setting both) or raises --
+    # the plan-cap break can only happen on page 2+ (see
+    # _is_plan_page_limit_error's caller above), by which point page 1
+    # already ran the body once.
+    assert merged_decimal is not None
+    assert merged_plain is not None
     return merged_decimal, merged_plain, capped
 
 
@@ -293,7 +336,7 @@ def _is_plan_page_limit_error(errors: object) -> bool:
     return isinstance(plan_message, str) and "page" in plan_message.lower()
 
 
-def _team_names_by_fixture_id(fixtures_data: dict) -> dict[int, tuple[str, str]]:
+def _team_names_by_fixture_id(fixtures_data: dict[str, Any]) -> dict[int, tuple[str, str]]:
     result: dict[int, tuple[str, str]] = {}
     for item in fixtures_data["response"]:
         try:
@@ -306,7 +349,29 @@ def _team_names_by_fixture_id(fixtures_data: dict) -> dict[int, tuple[str, str]]
     return result
 
 
-def _extract_match_winner_odds(bookmaker: dict) -> dict[str, Decimal] | None:
+def _lifecycle_by_fixture_id(
+    fixtures_data: dict[str, Any],
+) -> dict[int, EventLifecycle | None]:
+    """fixture.status.short only exists on the /fixtures response (the
+    /odds response this project otherwise builds RawEventOdds from has
+    no such field at all) -- same join-by-fixture-id reasoning as
+    _team_names_by_fixture_id, kept as its own function rather than
+    folded into that one so a fixture with team names but an
+    unrecognized/missing status still resolves normally (a dict lookup
+    miss below just means "no lifecycle known", not "no teams known").
+    """
+    result: dict[int, EventLifecycle | None] = {}
+    for item in fixtures_data["response"]:
+        try:
+            fixture_id = item["fixture"]["id"]
+        except (KeyError, TypeError):
+            continue
+        status_short = item.get("fixture", {}).get("status", {}).get("short")
+        result[fixture_id] = _map_fixture_status(status_short)
+    return result
+
+
+def _extract_match_winner_odds(bookmaker: dict[str, Any]) -> dict[str, Decimal] | None:
     match_winner = next(
         (bet for bet in bookmaker.get("bets", []) if bet.get("name") == _MATCH_WINNER_BET_NAME),
         None,
@@ -331,7 +396,7 @@ def _extract_match_winner_odds(bookmaker: dict) -> dict[str, Decimal] | None:
     return odds
 
 
-def _extract_totals_2_5_odds(bookmaker: dict) -> dict[str, Decimal] | None:
+def _extract_totals_2_5_odds(bookmaker: dict[str, Any]) -> dict[str, Decimal] | None:
     """api-football.com's "Goals Over/Under" bet bundles every line the
     bookmaker offers (0.5, 1.5, 2.5, 3.5, ...) into one values list, each
     entry shaped "Over 2.5"/"Under 2.5" -- this project only extracts the
@@ -367,7 +432,7 @@ def _extract_totals_2_5_odds(bookmaker: dict) -> dict[str, Decimal] | None:
     return odds
 
 
-def _extract_handicap_minus_1_odds(bookmaker: dict) -> dict[str, Decimal] | None:
+def _extract_handicap_minus_1_odds(bookmaker: dict[str, Any]) -> dict[str, Decimal] | None:
     """api-football.com's "Handicap Result" bet bundles many handicap
     lines ("Home -1"/"Draw -1"/"Away -1", "Home -2"/..., "Home +1"/...)
     into one values list -- this project only extracts the -1 line (see
@@ -501,7 +566,8 @@ class ApiFootballCollector(OddsCollector):
         )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
-                return response.read()
+                data: bytes = response.read()
+                return data
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise ApiFootballError(

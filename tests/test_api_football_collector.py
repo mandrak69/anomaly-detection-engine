@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 from decimal import Decimal
@@ -10,7 +11,7 @@ from anomaly_detection_engine.collectors.api_football_collector import (
     ApiFootballError,
     parse_api_football_response,
 )
-from anomaly_detection_engine.models.market import MarketPhase, MarketType
+from anomaly_detection_engine.models.market import EventLifecycle, MarketPhase, MarketType
 
 # Trimmed but structurally real: taken from a genuine api-football.com
 # /odds?date=... response (round-trip verified against the full response
@@ -174,6 +175,69 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     assert three_way.observed_at.tzinfo is not None
     assert three_way.market.phase == MarketPhase.PRE_MATCH
     assert collection.source_payload is not None
+
+
+def test_raw_event_odds_carries_the_fixture_id_as_source_event_id():
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+    result = collector.collect().records
+    assert all(record.source_event_id == "1493120" for record in result)
+
+
+def test_missing_fixture_status_yields_no_lifecycle():
+    # SAMPLE_FIXTURES_RESPONSE has no fixture.status at all -- a real
+    # api-football.com response always has one, but this must not crash
+    # and must not guess a value that was never actually reported.
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+    result = collector.collect().records
+    assert all(record.lifecycle is None for record in result)
+
+
+@pytest.mark.parametrize(
+    "status_short,expected",
+    [
+        ("NS", EventLifecycle.SCHEDULED),
+        ("TBD", EventLifecycle.SCHEDULED),
+        ("1H", EventLifecycle.LIVE),
+        ("HT", EventLifecycle.LIVE),
+        ("SUSP", EventLifecycle.LIVE),
+        ("FT", EventLifecycle.FINISHED),
+        ("AET", EventLifecycle.FINISHED),
+        ("PST", EventLifecycle.POSTPONED_OR_CANCELED),
+        ("CANC", EventLifecycle.POSTPONED_OR_CANCELED),
+    ],
+)
+def test_maps_known_fixture_statuses_to_lifecycle(status_short, expected):
+    fixtures = copy.deepcopy(SAMPLE_FIXTURES_RESPONSE)
+    fixtures["response"][0]["fixture"]["status"] = {"short": status_short}
+
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(fixtures, SAMPLE_ODDS_RESPONSE),
+    )
+    result = collector.collect().records
+    assert all(record.lifecycle == expected for record in result)
+
+
+def test_unrecognized_fixture_status_yields_no_lifecycle_rather_than_guessing():
+    fixtures = copy.deepcopy(SAMPLE_FIXTURES_RESPONSE)
+    fixtures["response"][0]["fixture"]["status"] = {"short": "SOME_NEW_CODE"}
+
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(fixtures, SAMPLE_ODDS_RESPONSE),
+    )
+    result = collector.collect().records
+    assert all(record.lifecycle is None for record in result)
 
 
 def test_extracts_only_the_2_5_line_from_the_bundled_goals_over_under_bet():

@@ -6,6 +6,7 @@ from anomaly_detection_engine.config import DB_BUSY_TIMEOUT_SECONDS, AppConfig
 from anomaly_detection_engine.observability.metrics import IngestionMetrics
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import create_connection, initialize_database
+from anomaly_detection_engine.storage.event_status_repository import EventStatusRepository
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
@@ -23,6 +24,7 @@ class Runtime:
     raw_payload_repository: RawPayloadRepository
     signal_repository: SignalRepository
     movement_repository: MovementRepository
+    event_status_repository: EventStatusRepository
     metrics: IngestionMetrics
 
 
@@ -39,5 +41,6 @@ def build_runtime(config: AppConfig) -> Runtime:
         raw_payload_repository=RawPayloadRepository(connection),
         signal_repository=SignalRepository(connection),
         movement_repository=MovementRepository(connection),
+        event_status_repository=EventStatusRepository(connection),
         metrics=IngestionMetrics(),
     )

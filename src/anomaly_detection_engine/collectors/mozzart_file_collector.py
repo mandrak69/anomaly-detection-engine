@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from anomaly_detection_engine.collectors.manual_capture_collector import ManualCaptureCollector
 from anomaly_detection_engine.models.market import LIVE_MARKET
@@ -53,7 +54,9 @@ def parse_mozzart_response(
     ]
 
 
-def _map_match(match: dict, observed_at: datetime, source_name: str) -> RawEventOdds | None:
+def _map_match(
+    match: dict[str, Any], observed_at: datetime, source_name: str
+) -> RawEventOdds | None:
     sport = _SPORT_NAME_MAP.get(match.get("sport", {}).get("name", ""))
     if sport is None:
         return None

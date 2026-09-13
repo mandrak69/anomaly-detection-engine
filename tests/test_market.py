@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from anomaly_detection_engine.models.market import (
+    EventLifecycle,
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
@@ -93,3 +94,12 @@ def test_required_outcomes_raises_for_an_unmapped_market_type():
     # must fail loudly, not silently accept "any outcomes will do".
     with pytest.raises(ValueError, match="MONEYLINE|moneyline"):
         required_outcomes(MarketType.MONEYLINE)
+
+
+def test_event_lifecycle_has_exactly_the_four_states_this_project_acts_on():
+    assert {member.value for member in EventLifecycle} == {
+        "scheduled",
+        "live",
+        "finished",
+        "postponed_or_canceled",
+    }

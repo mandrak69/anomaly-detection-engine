@@ -10,7 +10,7 @@ from anomaly_detection_engine.models.raw_payload import RawPayloadRecord
 
 
 class _RawEventEncoder(json.JSONEncoder):
-    def default(self, obj):
+    def default(self, obj: object) -> object:
         if isinstance(obj, Decimal):
             return str(obj)
         if isinstance(obj, datetime):

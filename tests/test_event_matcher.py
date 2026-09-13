@@ -39,6 +39,26 @@ def test_match_event_using_aliases_and_time_tolerance():
     assert result.reason == "matched"
 
 
+def test_source_event_id_is_accepted_but_has_no_effect():
+    # EventMatcher has no mapping cache to consult (see FixtureCatalog
+    # for the implementation that actually uses this parameter) -- it
+    # must still accept it without raising, since both implement the
+    # same EventResolver Protocol.
+    matcher = build_matcher()
+
+    result = matcher.match(
+        sport="football",
+        league="premier-league",
+        home_team_raw="Man Utd",
+        away_team_raw="Liv",
+        start_time=datetime.fromisoformat("2026-08-27T08:15:00+00:00"),
+        source_event_id="some-id",
+    )
+
+    assert result.event is not None
+    assert result.event.id == "event-1"
+
+
 def test_does_not_match_wrong_league():
     matcher = build_matcher()
 

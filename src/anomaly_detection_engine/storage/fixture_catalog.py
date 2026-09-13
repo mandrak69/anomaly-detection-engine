@@ -42,10 +42,11 @@ class FixtureCatalog:
     silently building its own separate, redundant mapping cache for the
     same underlying data source.
 
-    (The `source_team_mappings`/`source_competition_mappings` columns
-    are still named `source` at the SQL level -- an internal storage
-    detail kept as-is to avoid a schema migration for a rename with no
-    external consumer; every Python-facing name here is provider_id.)
+    (The `source_team_mappings`/`source_competition_mappings`/
+    `source_event_mappings` columns are still named `source` at the SQL
+    level -- an internal storage detail kept as-is to avoid a schema
+    migration for a rename with no external consumer; every
+    Python-facing name here is provider_id.)
 
     Safe for multiple concurrent watch_capture.py-spawned processes to
     share one database file: match() wraps its whole read-then-maybe-
@@ -90,6 +91,7 @@ class FixtureCatalog:
         home_team_raw: str,
         away_team_raw: str,
         start_time: datetime,
+        source_event_id: str | None = None,
     ) -> EventMatchResult:
         home_raw = home_team_raw.strip()
         away_raw = away_team_raw.strip()
@@ -114,6 +116,18 @@ class FixtureCatalog:
         # own implicit transaction for the writes below.
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            # Fast path: a fixture already resolved once via this exact
+            # (provider, source_event_id) pairing skips team/competition
+            # fuzzy resolution entirely on every later sighting -- see
+            # source_event_mappings (migration 10). Absent or never-seen
+            # source_event_id falls through to the existing resolution
+            # below exactly as it always has.
+            if source_event_id is not None:
+                mapped_event = self._find_event_mapping(source_event_id)
+                if mapped_event is not None:
+                    self._connection.commit()
+                    return EventMatchResult(mapped_event, 100.0, "resolved")
+
             home, home_confidence = self._resolve_team(raw_name=home_raw, sport=sport)
             away, away_confidence = self._resolve_team(raw_name=away_raw, sport=sport)
             canonical_league, competition_id = self._resolve_competition(
@@ -128,6 +142,9 @@ class FixtureCatalog:
                 away=away,
                 start_time=start_time,
             )
+
+            if source_event_id is not None:
+                self._save_event_mapping(source_event_id, event.id)
         except BaseException:
             self._connection.rollback()
             raise
@@ -375,6 +392,26 @@ class FixtureCatalog:
             extra={"event_id": event.id, "display_name": event.display_name},
         )
         return event
+
+    def _find_event_mapping(self, source_event_id: str) -> Event | None:
+        row = self._connection.execute(
+            """
+            SELECT e.* FROM source_event_mappings m
+            JOIN events e ON e.id = m.event_id
+            WHERE m.source = ? AND m.source_event_id = ?
+            """,
+            (self._provider_id, source_event_id),
+        ).fetchone()
+        return self._map_event_row(row) if row else None
+
+    def _save_event_mapping(self, source_event_id: str, event_id: str) -> None:
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO source_event_mappings (source, source_event_id, event_id)
+            VALUES (?, ?, ?)
+            """,
+            (self._provider_id, source_event_id, event_id),
+        )
 
     def _find_event(
         self, *, competition_id: str, home_team_id: str, away_team_id: str, start_time: datetime

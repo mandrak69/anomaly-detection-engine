@@ -8,6 +8,7 @@ from anomaly_detection_engine.matching.event_matcher import EventMatcher
 from anomaly_detection_engine.models.collector_run import CollectorRunStatus
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import (
+    EventLifecycle,
     MarketIdentity,
     MarketPeriod,
     MarketPhase,
@@ -18,6 +19,7 @@ from anomaly_detection_engine.normalization.team_normalizer import TeamNormalize
 from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
+from anomaly_detection_engine.storage.event_status_repository import EventStatusRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
 from anomaly_detection_engine.storage.raw_payload_repository import RawPayloadRepository
 
@@ -532,3 +534,57 @@ def test_unexpected_abort_before_anything_succeeds_is_failed_with_error_details(
     assert run.records_accepted == 0
     assert run.error_type == "RuntimeError"
     assert run.error_message == "stream dropped before any item"
+
+
+def test_a_records_lifecycle_is_recorded_via_event_status_repository():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    event_status_repository = EventStatusRepository(connection)
+
+    raw = build_raw_event(lifecycle=EventLifecycle.LIVE)
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=[raw]),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
+        event_status_repository=event_status_repository,
+    )
+
+    service.run()
+
+    assert event_status_repository.get_many(["event-001"]) == {"event-001": EventLifecycle.LIVE}
+
+
+def test_no_lifecycle_on_the_record_writes_no_event_status_row():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    event_status_repository = EventStatusRepository(connection)
+
+    raw = build_raw_event()  # lifecycle defaults to None
+    service = OddsIngestionService(
+        collector=StubCollector(raw_events=[raw]),
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=CollectorRunRepository(connection),
+        raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="stub"),
+        event_status_repository=event_status_repository,
+    )
+
+    service.run()
+
+    assert event_status_repository.get_many(["event-001"]) == {}
+
+
+def test_no_event_status_repository_wired_is_fine_without_a_lifecycle_on_the_record():
+    # The most common real configuration today: no collector besides
+    # ApiFootballCollector ever sets raw.lifecycle, and OddsIngestionService's
+    # own default (event_status_repository=None) must not require every
+    # existing caller/test to start passing one.
+    service, *_ = build_service(StubCollector(raw_events=[build_raw_event()]))
+    run = service.run()
+    assert run.status == CollectorRunStatus.SUCCESS

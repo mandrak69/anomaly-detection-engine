@@ -5,14 +5,15 @@
     tier's 100 requests/day limit.
 
 .DESCRIPTION
-    Cadence math: each poll cycle costs 2 requests (one /fixtures, one
-    /odds -- see ApiFootballCollector.collect()), assuming neither
-    response actually paginates on a given day (true for every response
-    seen so far in this project). 1800s (30 min) intervals give
-    86400 / 1800 = 48 cycles/day * 2 requests = 96 requests/day, under
-    the 100/day limit with a small margin for the odd extra request.
-    Tighten this (a lower POLL_INTERVAL_SECONDS) only if the plan
-    actually allows more.
+    Cadence math: observed production behavior shows each poll cycle
+    costs ~5 requests (one /fixtures, plus /odds pagination -- the
+    free plan caps pagination at page 3, so odds alone can cost up to
+    3 requests -- see ApiFootballCollector.collect() and the
+    api_football.pagination_capped_by_plan log event). 5400s (90 min)
+    intervals give 86400 / 5400 = 16 cycles/day * 5 requests =
+    ~80 requests/day, under the 100/day limit with margin. Tighten
+    this (a lower POLL_INTERVAL_SECONDS) only if the plan actually
+    allows more, or if pagination cost drops.
 
     API_FOOTBALL_KEY is never set or hardcoded here -- provide it either
     as a real environment variable in this session, or in a .env file at
@@ -33,9 +34,9 @@
 #>
 
 $env:ODDS_SOURCE = "api-football"
-$env:POLL_INTERVAL_SECONDS = "1800"
+$env:POLL_INTERVAL_SECONDS = "5400"
 
-Write-Host "Starting poller: ODDS_SOURCE=api-football, POLL_INTERVAL_SECONDS=1800 (48 cycles/day)"
+Write-Host "Starting poller: ODDS_SOURCE=api-football, POLL_INTERVAL_SECONDS=5400 (16 cycles/day)"
 Write-Host "DB: data\anomaly_detection.db (default DB_PATH) -- logging to poller.log and this console"
 Write-Host "Stop with Ctrl+C (handled cleanly -- the current cycle finishes before exiting)."
 Write-Host ""
