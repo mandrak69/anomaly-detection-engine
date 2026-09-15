@@ -4,17 +4,18 @@
     this PowerShell session/terminal window.
 
 .DESCRIPTION
-    Uses pythonw.exe, not python.exe: a plain python.exe process still
-    gets a (normally hidden) console window that pumps Windows messages,
-    and a long-running background process that mostly just sleeps
-    between poll cycles has been observed -- twice, in this project's own
-    soak testing -- getting killed by Windows' AppHangXProcB1 detector,
-    which flags a console app as "not responding" purely because nothing
-    is servicing that message queue for an extended stretch. pythonw.exe
-    has no console at all, so there is no window for that watchdog to
-    judge unresponsive. stdout/stderr redirection to files still works
-    identically either way -- Python's sys.stdout/stderr are the same
-    standard handles regardless of whether a console is attached.
+    Uses pythonw.exe rather than python.exe purely to avoid an extra
+    always-visible console window -- NOT a fix for anything. This
+    project's soak testing has seen Windows' AppHangXProcB1 detector
+    kill both python.exe AND pythonw.exe background instances alike
+    after a long idle stretch between poll cycles, so switching
+    executables does not by itself solve unattended reliability -- see
+    -SkipIfRunning below and the project's own notes on Task Scheduler /
+    Windows "Efficiency Mode" background-app settings as the real fixes,
+    neither of which this script (a plain user-level process launch) can
+    provide on its own. stdout/stderr redirection to files works
+    identically regardless of which executable is used -- Python's
+    sys.stdout/stderr are the same standard handles either way.
 
     Same cadence math as run_soak_test.ps1 (see that script's own
     .DESCRIPTION for the ~5-requests/cycle, 100/day budget reasoning) --
@@ -23,19 +24,37 @@
     (interactive, Ctrl+C-able, console-visible) despite launching the
     exact same poller.py.
 
-    Does not survive a reboot or a manual Task Scheduler-based restart --
-    this is still a plain background process, just one no longer subject
-    to the specific AppHang failure mode above. Re-run this script by
-    hand after a reboot, or set up Task Scheduler yourself (Register-
-    ScheduledTask under a normal user account, "At log on"/"At startup"
-    triggers, no elevated rights needed) if unattended reboot-survival
-    matters more than the manual-restart cost.
+    Does not survive a reboot on its own -- pair this with a Startup
+    folder shortcut (see scripts/install_startup_shortcut.ps1) for
+    every-login recovery, or Task Scheduler (Register-ScheduledTask
+    under a normal user account, no elevated rights needed) for the
+    more complete fix that also survives mid-session kills.
+
+.PARAMETER SkipIfRunning
+    Does nothing (exits 0) if a pythonw.exe or python.exe process is
+    already running -- avoids stacking up a second poller (and doubling
+    the day's API request budget) if this script runs again while an
+    earlier instance is still alive. Always passed by the Startup folder
+    shortcut; off by default for a manual run, where a deliberate
+    restart is normally exactly the point.
 
 .EXAMPLE
     # API_FOOTBALL_KEY via .env (see .env.example) or already set in
     # this session's environment:
     .\scripts\start_background_poller.ps1
 #>
+
+param(
+    [switch]$SkipIfRunning
+)
+
+if ($SkipIfRunning) {
+    $existing = Get-Process -Name python, pythonw -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "Poller already running (PID $($existing.Id -join ', ')) -- not starting another."
+        exit 0
+    }
+}
 
 $env:ODDS_SOURCE = "api-football"
 $env:POLL_INTERVAL_SECONDS = "5400"
