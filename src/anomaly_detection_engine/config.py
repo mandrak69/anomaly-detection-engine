@@ -83,6 +83,19 @@ class AppConfig:
     # to see every real credential this app can be given, not just some
     # of them.
     odds_api_key: str | None
+    # Minimum wall-clock gap enforced between the-odds-api.com polls when
+    # it's used as a supplemental source alongside a different primary
+    # (see pipeline._the_odds_api_supplemental_collector) -- deliberately
+    # separate from POLL_INTERVAL_SECONDS: the-odds-api's free tier is
+    # ~500 requests/*month*, not api-football's 100/*day*, so it cannot
+    # simply ride the same per-cycle cadence as every other collector
+    # (which would burn through a month's budget in days once burst
+    # windows or a tighter POLL_INTERVAL_SECONDS are in play). Not
+    # consulted at all when odds_api_key is unset, or when the-odds-api
+    # is itself the primary source (ODDS_SOURCE=the-odds-api already
+    # polls it every cycle by design, same as api-football's own
+    # primary-vs-supplemental distinction).
+    odds_api_min_interval: timedelta
     # None means "not configured". api-football.com can be either the
     # opt-in supplemental source it started as (see
     # pipeline._supplemental_collectors, same shape as
@@ -195,5 +208,8 @@ def load_config() -> AppConfig:
             minutes=float(os.environ.get("MAX_QUOTE_SPREAD_MINUTES", "30"))
         ),
         odds_api_key=os.environ.get("ODDS_API_KEY"),
+        odds_api_min_interval=timedelta(
+            hours=float(os.environ.get("ODDS_API_MIN_INTERVAL_HOURS", "4"))
+        ),
         api_football_key=os.environ.get("API_FOOTBALL_KEY"),
     )

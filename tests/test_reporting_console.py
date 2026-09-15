@@ -50,6 +50,7 @@ def build_config() -> AppConfig:
         max_quote_age=timedelta(hours=1),
         max_observation_spread=timedelta(minutes=30),
         odds_api_key=None,
+        odds_api_min_interval=timedelta(hours=4),
         api_football_key=None,
     )
 

@@ -13,7 +13,11 @@ from anomaly_detection_engine.collectors.api_football_collector import (
 )
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
-from anomaly_detection_engine.collectors.the_odds_api_collector import TheOddsApiManualCollector
+from anomaly_detection_engine.collectors.the_odds_api_collector import (
+    TheOddsApiCollector,
+    TheOddsApiManualCollector,
+)
+from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
@@ -23,6 +27,7 @@ from anomaly_detection_engine.models.market import (
 )
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.runtime import build_runtime
+from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
@@ -38,6 +43,7 @@ def _clear_source_env(monkeypatch):
         "MOZZART_MODE",
         "MOZZART_CAPTURE_DIR",
         "API_FOOTBALL_KEY",
+        "ODDS_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -248,6 +254,136 @@ def test_api_football_primary_is_not_also_added_as_supplemental(monkeypatch, tmp
     assert len(collectors) == 2
     assert isinstance(collectors[0], ApiFootballCollector)
     assert isinstance(collectors[1], MozzartFileCollector)
+
+
+def _run_repository() -> CollectorRunRepository:
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    return CollectorRunRepository(connection)
+
+
+def test_no_collector_run_repository_means_no_the_odds_api_supplemental(monkeypatch):
+    # collector_run_repository defaults to None -- the-odds-api
+    # supplemental is skipped entirely regardless of ODDS_API_KEY, not
+    # just its rate-limit check, since there's nothing to check it
+    # against. Every real call site (run_ingestion) always supplies one.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert not any(isinstance(c, TheOddsApiCollector) for c in collectors)
+
+
+def test_odds_api_key_adds_a_supplemental_collector_on_first_ever_run(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config(), _run_repository())
+
+    odds_api = [c for c in collectors if isinstance(c, TheOddsApiCollector)]
+    assert len(odds_api) == 1
+    assert odds_api[0].source == "the-odds-api:soccer_epl"
+
+
+def test_no_odds_api_key_means_no_the_odds_api_supplemental(monkeypatch):
+    _clear_source_env(monkeypatch)
+
+    collectors = pipeline.build_collectors(config.load_config(), _run_repository())
+
+    assert not any(isinstance(c, TheOddsApiCollector) for c in collectors)
+
+
+def test_the_odds_api_primary_is_not_also_added_as_supplemental(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_SOURCE", "the-odds-api")
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    collectors = pipeline.build_collectors(config.load_config(), _run_repository())
+
+    assert len(collectors) == 1
+
+
+def test_the_odds_api_supplemental_is_skipped_within_the_min_interval(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("ODDS_API_MIN_INTERVAL_HOURS", "4")
+    repository = _run_repository()
+
+    now = datetime.fromisoformat("2026-09-15T12:00:00+00:00")
+    repository.save(
+        CollectorRun(
+            id="run-1",
+            source="the-odds-api:soccer_epl",
+            started_at=now - timedelta(hours=1),
+            finished_at=now - timedelta(hours=1),
+            status=CollectorRunStatus.SUCCESS,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            collector_version="0.1.0",
+        )
+    )
+
+    collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
+
+    assert not any(isinstance(c, TheOddsApiCollector) for c in collectors)
+
+
+def test_the_odds_api_supplemental_resumes_once_the_min_interval_has_passed(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("ODDS_API_MIN_INTERVAL_HOURS", "4")
+    repository = _run_repository()
+
+    now = datetime.fromisoformat("2026-09-15T12:00:00+00:00")
+    repository.save(
+        CollectorRun(
+            id="run-1",
+            source="the-odds-api:soccer_epl",
+            started_at=now - timedelta(hours=5),
+            finished_at=now - timedelta(hours=5),
+            status=CollectorRunStatus.SUCCESS,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            collector_version="0.1.0",
+        )
+    )
+
+    collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
+
+    assert any(isinstance(c, TheOddsApiCollector) for c in collectors)
+
+
+def test_the_odds_api_supplemental_counts_a_failed_run_against_the_interval_too(monkeypatch):
+    # The gate is about spacing out requests actually sent, not just
+    # successful ones -- a FAILED run still consumed part of the free
+    # tier's request budget.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("ODDS_API_MIN_INTERVAL_HOURS", "4")
+    repository = _run_repository()
+
+    now = datetime.fromisoformat("2026-09-15T12:00:00+00:00")
+    repository.save(
+        CollectorRun(
+            id="run-1",
+            source="the-odds-api:soccer_epl",
+            started_at=now - timedelta(hours=1),
+            finished_at=now - timedelta(hours=1),
+            status=CollectorRunStatus.FAILED,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            collector_version="0.1.0",
+        )
+    )
+
+    collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
+
+    assert not any(isinstance(c, TheOddsApiCollector) for c in collectors)
 
 
 def test_run_detection_uses_wall_clock_time_for_any_non_demo_source(monkeypatch):

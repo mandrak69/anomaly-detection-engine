@@ -32,6 +32,7 @@ from anomaly_detection_engine.models.market import (
 from anomaly_detection_engine.models.signal import SUREBET, VALUE_GAP
 from anomaly_detection_engine.runtime import Runtime
 from anomaly_detection_engine.storage.bookmaker_catalog import BookmakerCatalog
+from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.fixture_catalog import FixtureCatalog
 from anomaly_detection_engine.storage.movement_repository import MovementRepository
 from anomaly_detection_engine.storage.odds_repository import OddsRepository
@@ -162,13 +163,64 @@ def _api_football_collector(config: AppConfig) -> OddsCollector | None:
     return ApiFootballCollector(api_key=config.api_football_key)
 
 
-def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
+def _the_odds_api_supplemental_collector(
+    config: AppConfig,
+    collector_run_repository: CollectorRunRepository,
+    *,
+    now: datetime,
+) -> OddsCollector | None:
+    """Builds the-odds-api.com supplemental collector, if ODDS_API_KEY is
+    set -- opt-in the same way api-football/Mozzart are. Only used when
+    the-odds-api is *not* already the primary source (ODDS_SOURCE=
+    the-odds-api already polls it every cycle via _the_odds_api_collector,
+    same "don't poll the same endpoint twice" reasoning as
+    _api_football_collector).
+
+    Unlike every other supplemental collector, this one is also
+    rate-limited against real elapsed time (config.odds_api_min_interval),
+    not just included-or-not: the-odds-api's free tier is ~500 requests/
+    *month*, not api-football's 100/*day* -- simply riding the same
+    per-cycle cadence every other collector uses would burn a month's
+    budget in days once burst windows or a tight POLL_INTERVAL_SECONDS
+    are in play. Checks the real collector_runs history (via
+    find_latest_by_source, keyed on this exact collector's own `source`,
+    e.g. "the-odds-api:soccer_epl") rather than tracking state in memory,
+    so the gate survives a poller restart correctly instead of allowing
+    an extra request right after every restart.
+    """
+    if not config.odds_api_key or config.odds_source == "the-odds-api":
+        return None
+
+    collector = TheOddsApiCollector(config.sport_key, api_key=config.odds_api_key)
+    latest = collector_run_repository.find_latest_by_source(collector.source)
+    if latest is not None and now - latest.started_at < config.odds_api_min_interval:
+        return None
+
+    return collector
+
+
+def _supplemental_collectors(
+    config: AppConfig,
+    collector_run_repository: CollectorRunRepository | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[OddsCollector]:
     """Collectors layered on top of whichever primary source is active in
     build_collectors(), so they land in the same ingestion cycle and get
     matched against the same FixtureCatalog as everyone else instead of
     running in isolation. Each is opt-in via its own env var (a capture
     dir, an API key), so a run with none configured behaves exactly as
     before.
+
+    collector_run_repository defaults to None, which disables only
+    _the_odds_api_supplemental_collector's rate-limit *lookup* (it still
+    respects ODDS_API_KEY being unset or the-odds-api being primary) --
+    every real call site (run_ingestion) always supplies the real
+    repository; None only matters for callers (older tests, a future
+    one-off script) that have no CollectorRunRepository handy and don't
+    care about ODDS_API_KEY. now similarly defaults to real wall-clock
+    time via datetime.now(UTC) when not given, mirroring the demo-vs-real
+    "now" distinction already made elsewhere in this module.
 
     Adding another source later is the same shape: its own
     _xxx_collector() helper reading its own AppConfig fields, appended
@@ -185,10 +237,22 @@ def _supplemental_collectors(config: AppConfig) -> list[OddsCollector]:
         if api_football is not None:
             collectors.append(api_football)
 
+    if collector_run_repository is not None:
+        odds_api = _the_odds_api_supplemental_collector(
+            config, collector_run_repository, now=now if now is not None else datetime.now(UTC)
+        )
+        if odds_api is not None:
+            collectors.append(odds_api)
+
     return collectors
 
 
-def build_collectors(config: AppConfig) -> list[OddsCollector]:
+def build_collectors(
+    config: AppConfig,
+    collector_run_repository: CollectorRunRepository | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[OddsCollector]:
     """Returns the poll cycle(s) to run this invocation.
 
     The JSON demo path runs two polls against two fixed sample files (a
@@ -226,7 +290,10 @@ def build_collectors(config: AppConfig) -> list[OddsCollector]:
             JsonOddsCollector(samples_dir / "odds_sample_poll2.json"),
         ]
 
-    return [*primary_collectors, *_supplemental_collectors(config)]
+    return [
+        *primary_collectors,
+        *_supplemental_collectors(config, collector_run_repository, now=now),
+    ]
 
 
 def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
@@ -253,7 +320,7 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
     same reasoning run_detection's own print()s were removed for
     earlier (see that function's docstring).
     """
-    collectors = build_collectors(config)
+    collectors = build_collectors(config, runtime.collector_run_repository)
     sources = ", ".join(collector.source for collector in collectors)
     logger.info(
         "ingestion.cycle.started", extra={"sources": sources, "poll_count": len(collectors)}

@@ -56,6 +56,22 @@ class CollectorRunRepository:
 
         return self._map_row(row) if row else None
 
+    def find_latest_by_source(self, source: str) -> CollectorRun | None:
+        """Most recent CollectorRun for one exact `source` string (e.g.
+        "the-odds-api:soccer_epl"), regardless of its status -- used to
+        rate-limit a collector whose provider's request budget can't
+        simply ride the same per-cycle cadence every other collector
+        uses (see pipeline._the_odds_api_supplemental_collector). A
+        FAILED run still counts as "we tried recently" here: the point
+        is spacing out requests actually sent, not just successful ones.
+        """
+        row = self._connection.execute(
+            "SELECT * FROM collector_runs WHERE source = ? ORDER BY started_at DESC LIMIT 1",
+            (source,),
+        ).fetchone()
+
+        return self._map_row(row) if row else None
+
     @staticmethod
     def _map_row(row: Row) -> CollectorRun:
         return CollectorRun(
