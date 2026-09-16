@@ -14,6 +14,9 @@ from anomaly_detection_engine.analysis.opportunity_detection import (
 from anomaly_detection_engine.collectors.api_football_collector import ApiFootballCollector
 from anomaly_detection_engine.collectors.base import OddsCollector
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
+from anomaly_detection_engine.collectors.meridianbet_file_collector import (
+    MeridianbetFileCollector,
+)
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
@@ -147,6 +150,25 @@ def _mozzart_collector(config: AppConfig) -> OddsCollector | None:
     return MozzartFileCollector(Path(config.mozzart_capture_dir))
 
 
+def _meridianbet_collector(config: AppConfig) -> OddsCollector | None:
+    """Builds the Meridianbet supplemental collector, if
+    MERIDIANBET_CAPTURE_DIR is set. Same opt-in, manual-capture-only
+    shape as Mozzart -- MERIDIANBET_MODE exists for the same reason
+    MOZZART_MODE does (an explicit, visible flag rather than an inferred
+    one), even though "manual" is the only mode implemented so far.
+    """
+    if not config.meridianbet_capture_dir:
+        return None
+
+    if config.meridianbet_mode != "manual":
+        raise ValueError(
+            f"MERIDIANBET_MODE={config.meridianbet_mode!r} is not supported -- "
+            "Meridianbet has no automatic mode yet."
+        )
+
+    return MeridianbetFileCollector(Path(config.meridianbet_capture_dir))
+
+
 def _api_football_collector(config: AppConfig) -> OddsCollector | None:
     """Builds the api-football.com supplemental collector, if
     API_FOOTBALL_KEY is set. Opt-in the same way Mozzart is -- absence of
@@ -231,6 +253,10 @@ def _supplemental_collectors(
     mozzart = _mozzart_collector(config)
     if mozzart is not None:
         collectors.append(mozzart)
+
+    meridianbet = _meridianbet_collector(config)
+    if meridianbet is not None:
+        collectors.append(meridianbet)
 
     if config.odds_source != "api-football":
         api_football = _api_football_collector(config)

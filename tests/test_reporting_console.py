@@ -45,6 +45,8 @@ def build_config() -> AppConfig:
         odds_api_capture_dir=None,
         mozzart_capture_dir=None,
         mozzart_mode="manual",
+        meridianbet_capture_dir=None,
+        meridianbet_mode="manual",
         min_value_gap_percent=Decimal("15.0"),
         signal_ttl=timedelta(hours=3),
         max_quote_age=timedelta(hours=1),

@@ -71,6 +71,10 @@ class AppConfig:
     odds_api_capture_dir: str | None
     mozzart_capture_dir: str | None
     mozzart_mode: str
+    # Same manual-capture shape as mozzart_capture_dir/mozzart_mode above
+    # -- see pipeline._meridianbet_collector.
+    meridianbet_capture_dir: str | None
+    meridianbet_mode: str
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
     max_quote_age: timedelta
@@ -201,6 +205,8 @@ def load_config() -> AppConfig:
         odds_api_capture_dir=os.environ.get("ODDS_API_CAPTURE_DIR"),
         mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
+        meridianbet_capture_dir=os.environ.get("MERIDIANBET_CAPTURE_DIR"),
+        meridianbet_mode=os.environ.get("MERIDIANBET_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
         signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
         max_quote_age=timedelta(minutes=float(os.environ.get("MAX_QUOTE_AGE_MINUTES", "60"))),

@@ -12,6 +12,9 @@ from anomaly_detection_engine.collectors.api_football_collector import (
     ApiFootballError,
 )
 from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
+from anomaly_detection_engine.collectors.meridianbet_file_collector import (
+    MeridianbetFileCollector,
+)
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
@@ -42,6 +45,8 @@ def _clear_source_env(monkeypatch):
         "ODDS_API_CAPTURE_DIR",
         "MOZZART_MODE",
         "MOZZART_CAPTURE_DIR",
+        "MERIDIANBET_MODE",
+        "MERIDIANBET_CAPTURE_DIR",
         "API_FOOTBALL_KEY",
         "ODDS_API_KEY",
     ):
@@ -183,6 +188,58 @@ def test_no_mozzart_capture_dir_means_no_supplemental_collector(monkeypatch):
     collectors = pipeline.build_collectors(config.load_config())
 
     assert len(collectors) == 2
+
+
+def test_meridianbet_capture_dir_adds_a_supplemental_collector(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_CAPTURE_DIR", str(tmp_path))
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 3
+    assert isinstance(collectors[2], MeridianbetFileCollector)
+    assert collectors[2].capture_dir == tmp_path
+
+
+def test_meridianbet_mode_defaults_to_manual_explicitly(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("MERIDIANBET_MODE", "manual")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert isinstance(collectors[2], MeridianbetFileCollector)
+
+
+def test_meridianbet_mode_auto_is_rejected(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("MERIDIANBET_MODE", "auto")
+
+    with pytest.raises(ValueError, match="MERIDIANBET_MODE"):
+        pipeline.build_collectors(config.load_config())
+
+
+def test_no_meridianbet_capture_dir_means_no_supplemental_collector(monkeypatch):
+    _clear_source_env(monkeypatch)
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert not any(isinstance(c, MeridianbetFileCollector) for c in collectors)
+
+
+def test_mozzart_and_meridianbet_can_both_be_active_at_once(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    mozzart_dir = tmp_path / "mozzart"
+    meridianbet_dir = tmp_path / "meridianbet"
+    monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(mozzart_dir))
+    monkeypatch.setenv("MERIDIANBET_CAPTURE_DIR", str(meridianbet_dir))
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 4
+    assert isinstance(collectors[2], MozzartFileCollector)
+    assert isinstance(collectors[3], MeridianbetFileCollector)
 
 
 def test_api_football_key_adds_a_supplemental_collector(monkeypatch):
