@@ -17,16 +17,30 @@ class TeamNormalizer:
         self,
         canonical_names: Iterable[str],
         aliases: dict[str, str] | None = None,
+        token_aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 80.0,
         ambiguity_margin: float = 5.0,
     ) -> None:
         self._canonical_names = list(canonical_names)
         self._aliases = aliases or {}
+        self._token_aliases = token_aliases or {}
         self._fuzzy_threshold = fuzzy_threshold
         self._ambiguity_margin = ambiguity_margin
 
     def normalize(self, raw_name: str) -> NormalizationResult:
-        candidate = raw_name.strip()
+        # Word-level, not whole-string like `aliases` below: an acronym
+        # like "UAE" only ever appears as one word inside a longer raw
+        # name ("UAE M23", "UAE U23", ...), never as the entire raw
+        # string, so a whole-string alias table can never match it -- no
+        # fuzzy scorer bridges "UAE" and "United Arab Emirates" either,
+        # since they share almost no characters. Applied before anything
+        # else (exact/alias/fuzzy all then see the expanded form), and
+        # NormalizationResult.raw_name carries the *expanded* string
+        # onward -- FixtureCatalog uses it (not the original raw_name
+        # argument) when creating a brand-new team, so the canonical name
+        # is consistent regardless of which provider's spelling is seen
+        # first.
+        candidate = self._expand_tokens(raw_name.strip())
 
         if candidate in self._canonical_names:
             return NormalizationResult(candidate, candidate, 100.0, "exact")
@@ -76,3 +90,7 @@ class TeamNormalizer:
                 return NormalizationResult(candidate, None, float(best_score), "ambiguous")
 
         return NormalizationResult(candidate, best_name, float(best_score), "fuzzy")
+
+    def _expand_tokens(self, name: str) -> str:
+        words = name.split(" ")
+        return " ".join(self._token_aliases.get(word, word) for word in words)

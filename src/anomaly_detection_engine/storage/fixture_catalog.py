@@ -70,6 +70,7 @@ class FixtureCatalog:
         *,
         provider_id: str,
         aliases: dict[str, str] | None = None,
+        token_aliases: dict[str, str] | None = None,
         league_aliases: dict[str, str] | None = None,
         fuzzy_threshold: float = 85.0,
         fuzzy_ambiguity_margin: float = 5.0,
@@ -78,6 +79,7 @@ class FixtureCatalog:
         self._connection = connection
         self._provider_id = provider_id
         self._aliases = aliases or {}
+        self._token_aliases = token_aliases or {}
         self._league_aliases = league_aliases or {}
         self._fuzzy_threshold = fuzzy_threshold
         self._fuzzy_ambiguity_margin = fuzzy_ambiguity_margin
@@ -173,6 +175,7 @@ class FixtureCatalog:
         normalizer = TeamNormalizer(
             existing.keys(),
             aliases=self._aliases,
+            token_aliases=self._token_aliases,
             fuzzy_threshold=self._fuzzy_threshold,
             ambiguity_margin=self._fuzzy_ambiguity_margin,
         )
@@ -181,15 +184,16 @@ class FixtureCatalog:
         if result.method == "ambiguous":
             # Two existing teams scored too close together to safely pick
             # one (see TeamNormalizer) -- the conservative choice is the
-            # same as "unknown": a new team under the raw name, not a
-            # guessed merge into either candidate. Logged distinctly since
-            # this is exactly the kind of borderline call worth a human
-            # noticing, unlike a routine first-sighting.
+            # same as "unknown": a new team under the (token-expanded --
+            # see TeamNormalizer.normalize) raw name, not a guessed merge
+            # into either candidate. Logged distinctly since this is
+            # exactly the kind of borderline call worth a human noticing,
+            # unlike a routine first-sighting.
             logger.warning(
                 "fixture_catalog.team.ambiguous_fuzzy_match",
                 extra={"raw_name": raw_name, "sport": sport, "score": result.confidence},
             )
-            team = self._create_team(canonical_name=raw_name, sport=sport)
+            team = self._create_team(canonical_name=result.raw_name, sport=sport)
             confidence = result.confidence
         elif result.canonical_name is not None:
             # The alias/fuzzy target may not exist as a team row yet (e.g.
@@ -202,7 +206,15 @@ class FixtureCatalog:
             )
             confidence = result.confidence
         else:
-            team = self._create_team(canonical_name=raw_name, sport=sport)
+            # result.raw_name, not the raw_name argument: token expansion
+            # (see TeamNormalizer.normalize) must still apply to a
+            # brand-new team's canonical name, or a *later* sighting under
+            # a different provider's spelling of the same acronym (e.g.
+            # "United Arab Emirates M23") would compare against this row's
+            # literal, unexpanded name ("UAE M23") and fail to fuzzy-match
+            # it -- the same gap this mechanism exists to close, just
+            # hitting whichever provider is seen second instead of first.
+            team = self._create_team(canonical_name=result.raw_name, sport=sport)
             confidence = 100.0
 
         self._save_mapping(raw_name, sport, team.id)

@@ -159,6 +159,26 @@ def test_alias_merges_a_never_before_seen_spelling_into_its_canonical_target():
     assert row["canonical_name"] == "Manchester United"
 
 
+def test_token_alias_expands_a_brand_new_teams_canonical_name():
+    # The expansion must apply even on a team's very first sighting (no
+    # existing candidate to fuzzy-match against yet) -- otherwise a
+    # *second* provider spelling the same acronym out in full ("United
+    # Arab Emirates M23") would compare against this row's literal,
+    # unexpanded name ("UAE M23") and fail to match it, just moving the
+    # same gap to whichever provider is seen second instead of first.
+    connection = make_connection()
+    catalog = FixtureCatalog(
+        connection, provider_id="src-a", token_aliases={"UAE": "United Arab Emirates"},
+    )
+
+    result = catalog.match(
+        sport="football", league="L", home_team_raw="UAE M23",
+        away_team_raw="Iran M23", start_time=T0,
+    )
+
+    assert result.event.home_team.canonical_name == "United Arab Emirates M23"
+
+
 def test_fuzzy_match_merges_similar_spelling_into_existing_team():
     connection = make_connection()
     catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)

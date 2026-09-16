@@ -53,6 +53,59 @@ def _clear_source_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+def test_national_team_acronym_alias_unifies_two_providers_same_match():
+    # Regression test for a real cross-provider matching gap: Mozzart
+    # reports "UAE M23", Meridianbet reports "United Arab Emirates U23",
+    # for the exact same real Asian Games U23 team -- they resolved to
+    # two separate canonical teams until pipeline.TOKEN_ALIASES carried
+    # "UAE" -> "United Arab Emirates". Fuzzy matching alone (token_sort_
+    # ratio) can never bridge an acronym (the two strings share almost no
+    # characters), and pipeline.ALIASES can't either, since it only ever
+    # matches a raw name that is *entirely* one of its keys -- "UAE" as a
+    # key there never matches within the longer string "UAE M23". Two
+    # separate FixtureCatalog instances sharing one connection, mirroring
+    # exactly how run_ingestion wires one per collector.
+    #
+    # League deliberately identical here ("Azijske Igre U23" both sides)
+    # to isolate the team-alias fix under test: the two real captures'
+    # actual league spellings ("Azijske igre M23" vs "Azijske Igre U23")
+    # differ enough on their own (case + M23/U23) to also fall below the
+    # fuzzy_threshold, a separate, not-yet-addressed gap in competition-
+    # name matching that would otherwise mask what this test is checking.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-09-16T10:00:00+00:00")
+
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+    )
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+    )
+
+    mozzart_result = mozzart_catalog.match(
+        sport="football", league="Azijske Igre U23",
+        home_team_raw="UAE M23", away_team_raw="Iran M23",
+        start_time=start_time,
+    )
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Azijske Igre U23",
+        home_team_raw="United Arab Emirates U23", away_team_raw="Iran U23",
+        start_time=start_time,
+    )
+
+    assert mozzart_result.event is not None
+    assert meridianbet_result.event is not None
+    assert mozzart_result.event.id == meridianbet_result.event.id
+
+
 def test_default_source_uses_two_json_collector_polls(monkeypatch):
     _clear_source_env(monkeypatch)
 

@@ -58,6 +58,24 @@ ALIASES = {
     "Real Madrid CF": "Real Madrid",
 }
 
+# Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
+# that is *entirely* one of its keys, so "UAE" as a key there could never
+# match within "UAE M23" -- these are substituted one word at a time
+# instead (see TeamNormalizer._expand_tokens), before ALIASES/fuzzy
+# matching even runs. An acronym like "UAE" also shares essentially no
+# characters with "United Arab Emirates", so no fuzzy scorer could ever
+# bridge that gap either way. Confirmed live: Mozzart and Meridianbet
+# reporting the exact same real Asian Games U23 match as "UAE M23" vs
+# "United Arab Emirates U23" resolved to two separate canonical events
+# until this was added. Only essentially unambiguous 3-letter codes are
+# included -- unlike a club nickname, "UAE"/"USA" have no other plausible
+# meaning in a football context, so this carries none of the false-merge
+# risk a guessed club alias would.
+TOKEN_ALIASES = {
+    "UAE": "United Arab Emirates",
+    "USA": "United States",
+}
+
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
 # freshness is evaluated relative to the newest observation in the batch
 # (not wall-clock "now", which would drift stale as real time passes).
@@ -362,7 +380,10 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
         # same connection/tables -- so a team or event resolved by one
         # collector is immediately visible to the next.
         catalog = FixtureCatalog(
-            runtime.connection, provider_id=collector.provider_id, aliases=ALIASES
+            runtime.connection,
+            provider_id=collector.provider_id,
+            aliases=ALIASES,
+            token_aliases=TOKEN_ALIASES,
         )
         # Same per-provider scoping FixtureCatalog uses (see its own
         # docstring): two collectors for the same real provider (auto vs.

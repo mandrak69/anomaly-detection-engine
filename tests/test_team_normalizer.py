@@ -102,6 +102,48 @@ def test_word_reordering_still_matches():
     assert result.method == "fuzzy"
 
 
+def test_token_alias_expands_an_acronym_word_within_a_longer_raw_name():
+    # ALIASES-style whole-string aliases can never match "UAE" as a key
+    # against the raw name "UAE M23" (the whole string isn't "UAE") --
+    # token_aliases substitutes it one word at a time instead, then lets
+    # ordinary fuzzy matching handle the rest ("M23" vs "U23").
+    normalizer = TeamNormalizer(
+        ["United Arab Emirates U23"],
+        token_aliases={"UAE": "United Arab Emirates"},
+        fuzzy_threshold=85,
+    )
+
+    result = normalizer.normalize("UAE M23")
+
+    assert result.canonical_name == "United Arab Emirates U23"
+    assert result.method == "fuzzy"
+
+
+def test_token_alias_expansion_is_reflected_in_result_raw_name():
+    # FixtureCatalog creates a brand-new team under result.raw_name (not
+    # the original argument) specifically so the expansion is consistent
+    # regardless of which provider's spelling is seen first -- this is
+    # what makes that possible.
+    normalizer = TeamNormalizer([], token_aliases={"UAE": "United Arab Emirates"})
+
+    result = normalizer.normalize("UAE M23")
+
+    assert result.raw_name == "United Arab Emirates M23"
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_token_alias_only_matches_whole_words():
+    # "UAEFC" must not become "United Arab EmiratesFC" -- word-boundary
+    # (whitespace-split) matching only, never a substring replacement
+    # inside a longer word.
+    normalizer = TeamNormalizer([], token_aliases={"UAE": "United Arab Emirates"})
+
+    result = normalizer.normalize("UAEFC")
+
+    assert result.raw_name == "UAEFC"
+
+
 def test_clear_winner_is_not_treated_as_ambiguous():
     # Sanity check for the ambiguity margin itself: a huge gap between
     # best and second-best (unlike the tied case above) must still
