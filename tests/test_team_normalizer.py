@@ -39,19 +39,67 @@ def test_unknown_team_below_threshold():
 
 
 def test_ambiguous_fuzzy_match_is_not_resolved():
-    # "Man United" scores ~85.5 against both "Manchester United" and
-    # "Manchester United U21" (verified via rapidfuzz.process.extract) --
-    # a near-exact tie, not a clear winner. Silently picking the top
-    # result here risks merging a reserve/youth team into the first team.
+    # "Manchester United Res" scores 89.5 against "Manchester United" and
+    # 85.7 against "Manchester United U21" (verified via
+    # rapidfuzz.fuzz.token_sort_ratio) -- both above threshold, and close
+    # enough (3.8 apart) to trip the default 5.0 ambiguity_margin. Not a
+    # clear winner. Silently picking the top result here risks merging a
+    # reserve/youth team into the first team.
     normalizer = TeamNormalizer(
         ["Manchester United", "Manchester United U21"],
         fuzzy_threshold=80,
     )
 
-    result = normalizer.normalize("Man United")
+    result = normalizer.normalize("Manchester United Res")
 
     assert result.canonical_name is None
     assert result.method == "ambiguous"
+
+
+def test_short_shared_token_does_not_falsely_merge_unrelated_teams():
+    # Regression test: WRatio (the scorer this project used before)
+    # scored "Iran U23" vs "United Arab Emirates U23" at 85.5 -- above a
+    # typical fuzzy_threshold -- purely because both share the "U23"
+    # token, despite the rest of the name being completely unrelated.
+    # Verified live against a real Meridianbet capture: six genuinely
+    # different teams (several "<country> U23" entries, several
+    # "<club> RS" entries sharing only a short suffix/prefix token) were
+    # silently merged into the wrong canonical team this way.
+    normalizer = TeamNormalizer(
+        ["United Arab Emirates U23"],
+        fuzzy_threshold=85,
+    )
+
+    result = normalizer.normalize("Iran U23")
+
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_short_shared_prefix_does_not_falsely_merge_unrelated_teams():
+    normalizer = TeamNormalizer(
+        ["FK Karvan Yevlakh"],
+        fuzzy_threshold=85,
+    )
+
+    result = normalizer.normalize("Zaqatala FK")
+
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_word_reordering_still_matches():
+    # token_sort_ratio's whole point over plain character-based ratio:
+    # a word-order swap alone must not prevent a match.
+    normalizer = TeamNormalizer(
+        ["FC Barcelona"],
+        fuzzy_threshold=85,
+    )
+
+    result = normalizer.normalize("Barcelona FC")
+
+    assert result.canonical_name == "FC Barcelona"
+    assert result.method == "fuzzy"
 
 
 def test_clear_winner_is_not_treated_as_ambiguous():

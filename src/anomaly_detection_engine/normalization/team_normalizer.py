@@ -35,10 +35,23 @@ class TeamNormalizer:
         if alias_match:
             return NormalizationResult(candidate, alias_match, 100.0, "alias")
 
+        # token_sort_ratio, not WRatio: WRatio's internal partial/token-set
+        # blending scores two names sharing just one short common token
+        # (e.g. "Iran U23" vs "United Arab Emirates U23", or "Zaqatala FK"
+        # vs "FK Karvan Yevlakh") as high as 85.5 -- confidently above a
+        # typical fuzzy_threshold -- regardless of how different the rest
+        # of the name is, silently merging genuinely different teams
+        # (verified live: six real, distinct Meridianbet teams collapsed
+        # into wrong canonical teams this way). token_sort_ratio still
+        # correctly handles legitimate word-reordering ("Barcelona FC" vs
+        # "FC Barcelona" -> 100) and every other case this project's own
+        # tests already covered, while scoring every one of the false-
+        # positive cases above at 50 or well below -- safely under any
+        # threshold this project actually uses.
         matches = process.extract(
             candidate,
             self._canonical_names,
-            scorer=fuzz.WRatio,
+            scorer=fuzz.token_sort_ratio,
             limit=2,
         )
 
