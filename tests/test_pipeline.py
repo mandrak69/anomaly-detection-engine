@@ -55,23 +55,20 @@ def _clear_source_env(monkeypatch):
 
 def test_national_team_acronym_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider matching gap: Mozzart
-    # reports "UAE M23", Meridianbet reports "United Arab Emirates U23",
-    # for the exact same real Asian Games U23 team -- they resolved to
-    # two separate canonical teams until pipeline.TOKEN_ALIASES carried
-    # "UAE" -> "United Arab Emirates". Fuzzy matching alone (token_sort_
-    # ratio) can never bridge an acronym (the two strings share almost no
-    # characters), and pipeline.ALIASES can't either, since it only ever
-    # matches a raw name that is *entirely* one of its keys -- "UAE" as a
-    # key there never matches within the longer string "UAE M23". Two
-    # separate FixtureCatalog instances sharing one connection, mirroring
-    # exactly how run_ingestion wires one per collector.
-    #
-    # League deliberately identical here ("Azijske Igre U23" both sides)
-    # to isolate the team-alias fix under test: the two real captures'
-    # actual league spellings ("Azijske igre M23" vs "Azijske Igre U23")
-    # differ enough on their own (case + M23/U23) to also fall below the
-    # fuzzy_threshold, a separate, not-yet-addressed gap in competition-
-    # name matching that would otherwise mask what this test is checking.
+    # reports "UAE M23" (league "Azijske igre M23"), Meridianbet reports
+    # "United Arab Emirates U23" (league "Azijske Igre U23"), for the
+    # exact same real Asian Games U23 match -- resolved to two separate
+    # canonical events until pipeline.TOKEN_ALIASES ("UAE" -> "United Arab
+    # Emirates") and pipeline.LEAGUE_ALIASES (an explicit "these are the
+    # same league" entry -- a one-off tournament name isn't worth teaching
+    # the matcher to handle algorithmically) were both added. Fuzzy
+    # matching alone (token_sort_ratio) can never bridge an acronym (the
+    # two strings share almost no characters), and pipeline.ALIASES can't
+    # either, since it only ever matches a raw name that is *entirely* one
+    # of its keys -- "UAE" as a key there never matches within the longer
+    # string "UAE M23". Two separate FixtureCatalog instances sharing one
+    # connection, mirroring exactly how run_ingestion wires one per
+    # collector, using the exact real spellings both captures reported.
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -82,16 +79,18 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
         provider_id="mozzart",
         aliases=pipeline.ALIASES,
         token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
     )
     meridianbet_catalog = FixtureCatalog(
         connection,
         provider_id="meridianbet",
         aliases=pipeline.ALIASES,
         token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
     )
 
     mozzart_result = mozzart_catalog.match(
-        sport="football", league="Azijske Igre U23",
+        sport="football", league="Azijske igre M23",
         home_team_raw="UAE M23", away_team_raw="Iran M23",
         start_time=start_time,
     )

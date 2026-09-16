@@ -76,6 +76,19 @@ TOKEN_ALIASES = {
     "USA": "United States",
 }
 
+# Same shape as ALIASES above, but fed to FixtureCatalog's *competition*
+# resolution instead of its team resolution. A one-off tournament like
+# "Asian Games U23" is rare enough (unlike a club appearing in every
+# season) that teaching the matcher to handle its naming quirks
+# algorithmically isn't worth it -- a plain, explicit "these are the same
+# league" entry is simpler and just as effective. Whichever spelling is
+# used as the value here is what every variant resolves to, regardless of
+# which provider's spelling a real run happens to see first -- unlike the
+# fuzzy-match path, an explicit alias is not order-dependent.
+LEAGUE_ALIASES = {
+    "Azijske igre M23": "Azijske Igre U23",
+}
+
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
 # freshness is evaluated relative to the newest observation in the batch
 # (not wall-clock "now", which would drift stale as real time passes).
@@ -384,6 +397,7 @@ def run_ingestion(runtime: Runtime, config: AppConfig) -> list[Event]:
             provider_id=collector.provider_id,
             aliases=ALIASES,
             token_aliases=TOKEN_ALIASES,
+            league_aliases=LEAGUE_ALIASES,
         )
         # Same per-provider scoping FixtureCatalog uses (see its own
         # docstring): two collectors for the same real provider (auto vs.
