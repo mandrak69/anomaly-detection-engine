@@ -70,6 +70,23 @@ def drop_capture(capture_dir, events, filename="meridianbet.json"):
     return path
 
 
+def drop_flat_capture(capture_dir, events, filename="meridianbet.json"):
+    # meridianbet.com's frontend has been observed using a second,
+    # differently-wrapped envelope (payload.events directly, no leagues
+    # grouping) for the same underlying header/positions event shape --
+    # both must be accepted.
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    path = capture_dir / filename
+    body = {
+        "errorCode": None,
+        "parameters": None,
+        "errorMessages": None,
+        "payload": {"events": events},
+    }
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
 def test_maps_a_clean_event_into_two_market_records(tmp_path):
     drop_capture(tmp_path, [football_event()])
 
@@ -97,6 +114,15 @@ def test_maps_a_clean_event_into_two_market_records(tmp_path):
     totals = next(r for r in result if r.market.market_type == MarketType.TOTALS)
     assert totals.market.line == Decimal("2.5")
     assert totals.odds == {"UNDER": Decimal("2.01"), "OVER": Decimal("1.63")}
+
+
+def test_accepts_the_flat_payload_events_envelope_shape(tmp_path):
+    drop_flat_capture(tmp_path, [football_event()])
+
+    collector = MeridianbetFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert len(result) == 2
 
 
 def test_returns_empty_when_no_capture_is_waiting(tmp_path):

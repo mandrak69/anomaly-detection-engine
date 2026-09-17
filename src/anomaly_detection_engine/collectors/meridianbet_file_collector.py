@@ -23,8 +23,12 @@ class MeridianbetResponseError(ValueError):
 def parse_meridianbet_response(
     raw_text: str, observed_at: datetime, *, source_name: str = "Meridianbet"
 ) -> list[RawEventOdds]:
-    """Maps a meridianbet.com pre-match listing response
-    (payload.leagues[].events[]) onto RawEventOdds.
+    """Maps a meridianbet.com pre-match listing response onto
+    RawEventOdds. Two real, observed envelope shapes are accepted --
+    events grouped by league (payload.leagues[].events[]) and a flat
+    list (payload.events[]) -- meridianbet.com's own frontend appears to
+    use both depending on which page/filter produced the request; the
+    per-event header/positions shape underneath is identical either way.
 
     Only two markets are extracted -- "Konačan Ishod" (1X2, DEFAULT_MARKET)
     and "Ukupno golova" at exactly the 2.5 line (TOTALS_2_5_MARKET); no
@@ -34,27 +38,33 @@ def parse_meridianbet_response(
     already set by MozzartFileCollector only extracting 1X2.
 
     Raises MeridianbetResponseError if the top-level shape doesn't even
-    look like this response (no "payload"/"leagues") -- e.g. the wrong
-    request was captured (meridianbet.com's own frontend also exposes a
-    "market column config" endpoint shaped very differently, with no
-    odds/team data in it at all, that has been captured by mistake here
-    before). Same "better to stop the run than ingest nothing while
-    believing everything is fine" reasoning as MozzartResponseError.
+    look like one of these two responses (no "payload"/"leagues" or
+    "events") -- e.g. the wrong request was captured (meridianbet.com's
+    own frontend also exposes a "market column config" endpoint shaped
+    very differently, with no odds/team data in it at all, that has been
+    captured by mistake here before). Same "better to stop the run than
+    ingest nothing while believing everything is fine" reasoning as
+    MozzartResponseError.
     """
     data = json.loads(raw_text, parse_float=Decimal)
 
     payload = data.get("payload") if isinstance(data, dict) else None
-    if not isinstance(payload, dict) or "leagues" not in payload:
+    events: list[dict[str, Any]]
+    if isinstance(payload, dict) and "leagues" in payload:
+        events = [event for league in payload["leagues"] for event in league.get("events", [])]
+    elif isinstance(payload, dict) and "events" in payload:
+        events = payload["events"]
+    else:
         raise MeridianbetResponseError(
             "This capture doesn't look like a Meridianbet pre-match listing "
-            "response (expected an object with payload.leagues) -- check "
-            "that the right request was saved to this collector's drop file."
+            "response (expected an object with payload.leagues or "
+            "payload.events) -- check that the right request was saved to "
+            "this collector's drop file."
         )
 
     result: list[RawEventOdds] = []
-    for league in payload["leagues"]:
-        for event in league.get("events", []):
-            result.extend(_map_event(event, observed_at, source_name))
+    for event in events:
+        result.extend(_map_event(event, observed_at, source_name))
     return result
 
 
