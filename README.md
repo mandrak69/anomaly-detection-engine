@@ -507,14 +507,23 @@ archives it. Two collectors are built on it:
 
 ```text
 MozzartFileCollector          drop file: <capture_dir>/live.json
+MeridianbetFileCollector       drop file: <capture_dir>/meridianbet.json
 TheOddsApiManualCollector      drop file: <capture_dir>/capture.json
 ```
 
-`MozzartFileCollector` exists because mozzartbet.com sits behind
-Cloudflare bot-management (`cf_clearance`/`__cf_bm` cookies observed on
-the captured request) -- an automated fetch would mean scripting around
-that protection, which this project won't do regardless of technical
-feasibility. It has no automatic mode.
+See `docs/manual-capture-sources.md` for the exact request URL, correct
+response shape, and known *wrong* responses already captured by mistake
+for each of these -- worth checking before saving a new capture, since
+that list of wrong-endpoint traps (a stream endpoint, a UI-config
+endpoint, ...) only grows as more manual-capture sources get added.
+
+`MozzartFileCollector`/`MeridianbetFileCollector` exist because their
+sites sit behind Cloudflare bot-management (`cf_clearance`/`__cf_bm`
+cookies observed on the captured requests) -- Meridianbet's endpoint
+also requires an OAuth-style bearer token tied to a real logged-in
+session, not a plain API key. An automated fetch for either would mean
+scripting around that protection, which this project won't do
+regardless of technical feasibility. Neither has an automatic mode.
 
 `TheOddsApiManualCollector` exists for a different reason: **even a
 source with a perfectly good API can need a manual fallback sometimes**
