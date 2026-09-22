@@ -121,6 +121,19 @@ class AppConfig:
     # field is where the key comes from; ApiFootballCollector itself
     # raises if it ends up unset when actually needed.
     api_football_key: str | None
+    # How old a RUNNING CollectorRun must be, at process startup, before
+    # it's assumed abandoned (the process that started it crashed or was
+    # killed before reaching finish()) rather than a sibling process's
+    # genuinely still-in-progress run -- see
+    # runtime.build_runtime/CollectorRunRepository.recover_stale_running.
+    # Real runs finish in low single-digit seconds (see
+    # OddsIngestionService.run()'s own duration_seconds), so the default
+    # is generous on purpose: this project explicitly supports multiple
+    # concurrent watch_capture.py-spawned processes sharing one database
+    # file (see FixtureCatalog's docstring), and marking a genuinely
+    # still-running sibling's row FAILED out from under it would be
+    # worse than leaving a truly stuck row RUNNING a little longer.
+    stale_running_threshold: timedelta
 
 
 def load_dotenv(path: Path = DEFAULT_DOTENV_PATH) -> None:
@@ -232,4 +245,7 @@ def load_config() -> AppConfig:
             hours=float(os.environ.get("ODDS_API_MIN_INTERVAL_HOURS", "4"))
         ),
         api_football_key=os.environ.get("API_FOOTBALL_KEY"),
+        stale_running_threshold=timedelta(
+            minutes=float(os.environ.get("STALE_RUNNING_THRESHOLD_MINUTES", "60"))
+        ),
     )

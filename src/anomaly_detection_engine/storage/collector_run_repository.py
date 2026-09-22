@@ -111,6 +111,75 @@ class CollectorRunRepository:
         )
         self._connection.commit()
 
+    def recover_stale_running(
+        self, *, older_than: datetime, recovered_at: datetime
+    ) -> list[str]:
+        """Marks FAILED every RUNNING row whose started_at is older than
+        `older_than` -- called once at process startup (see
+        runtime.build_runtime), not periodically inside a live process.
+
+        A row is written as RUNNING at the very start of
+        OddsIngestionService.run() and only ever moved to a final status
+        by finish() at the end (see start()/finish()) -- a process killed
+        or crashed in between (the AppHang-style terminations this
+        project has hit in practice) leaves that row RUNNING forever,
+        with nothing else to ever notice or explain it, unless something
+        explicitly looks for it. This is that explicit check, not a
+        silent cleanup: error_type="process_interrupted" makes the cause
+        visible in the same collector_runs row any other failure would
+        show up in, rather than a plain status flip with no explanation.
+
+        older_than (not "any RUNNING row") exists specifically because
+        this project supports multiple concurrent watch_capture.py-
+        spawned processes sharing one database file (see FixtureCatalog's
+        own docstring) -- a RUNNING row could genuinely belong to a
+        sibling process still in the middle of its own run, not this
+        process's own past crash. Real runs finish in low single-digit
+        seconds (see CollectorRun.duration_seconds), so a threshold of
+        AppConfig.stale_running_threshold (default 60 minutes) is
+        deliberately generous: marking a still-genuinely-running
+        sibling's row FAILED out from under it would be worse than
+        leaving a truly stuck row RUNNING a little longer before the
+        next startup catches it.
+
+        Returns the recovered run ids, purely so the caller can log them
+        -- this method already persists the change itself.
+        """
+        stale_ids = [
+            row["id"]
+            for row in self._connection.execute(
+                "SELECT id FROM collector_runs WHERE status = ? AND started_at < ?",
+                (CollectorRunStatus.RUNNING.value, older_than.isoformat()),
+            ).fetchall()
+        ]
+
+        if stale_ids:
+            self._connection.executemany(
+                """
+                UPDATE collector_runs SET
+                    status = ?,
+                    finished_at = ?,
+                    error_type = ?,
+                    error_message = ?
+                WHERE id = ?
+                """,
+                [
+                    (
+                        CollectorRunStatus.FAILED.value,
+                        recovered_at.isoformat(),
+                        "process_interrupted",
+                        "Left in RUNNING state past process startup -- the process "
+                        "that started this run likely crashed or was killed before "
+                        "reaching finish() (see recover_stale_running).",
+                        run_id,
+                    )
+                    for run_id in stale_ids
+                ],
+            )
+            self._connection.commit()
+
+        return stale_ids
+
     def find_by_id(self, run_id: str) -> CollectorRun | None:
         row = self._connection.execute(
             "SELECT * FROM collector_runs WHERE id = ?",

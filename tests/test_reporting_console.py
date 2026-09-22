@@ -55,6 +55,7 @@ def build_config() -> AppConfig:
         odds_api_key=None,
         odds_api_min_interval=timedelta(hours=4),
         api_football_key=None,
+        stale_running_threshold=timedelta(minutes=60),
     )
 
 

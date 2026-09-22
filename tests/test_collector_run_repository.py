@@ -108,6 +108,82 @@ def test_finish_updates_the_existing_running_row_in_place():
     assert all_rows == 1
 
 
+def test_recover_stale_running_fails_a_run_older_than_the_threshold():
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+    repository.start(
+        CollectorRun(
+            id="run-old",
+            source="mozzart-file:mozzart",
+            started_at=datetime(2026, 9, 22, 8, 0, 0, tzinfo=UTC),
+            status=CollectorRunStatus.RUNNING,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+        )
+    )
+
+    recovered = repository.recover_stale_running(
+        older_than=datetime(2026, 9, 22, 9, 0, 0, tzinfo=UTC),
+        recovered_at=datetime(2026, 9, 22, 9, 30, 0, tzinfo=UTC),
+    )
+
+    assert recovered == ["run-old"]
+    found = repository.find_by_id("run-old")
+    assert found is not None
+    assert found.status == CollectorRunStatus.FAILED
+    assert found.error_type == "process_interrupted"
+    assert found.error_message is not None
+    assert found.finished_at == datetime(2026, 9, 22, 9, 30, 0, tzinfo=UTC)
+
+
+def test_recover_stale_running_leaves_a_recent_running_row_alone():
+    # Could genuinely belong to a sibling watch_capture.py-spawned
+    # process still in the middle of its own run -- see
+    # FixtureCatalog's own docstring on concurrent processes sharing one
+    # database file. Must not be marked FAILED out from under it.
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+    repository.start(
+        CollectorRun(
+            id="run-recent",
+            source="mozzart-file:mozzart",
+            started_at=datetime(2026, 9, 22, 9, 15, 0, tzinfo=UTC),
+            status=CollectorRunStatus.RUNNING,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+        )
+    )
+
+    recovered = repository.recover_stale_running(
+        older_than=datetime(2026, 9, 22, 9, 0, 0, tzinfo=UTC),
+        recovered_at=datetime(2026, 9, 22, 9, 30, 0, tzinfo=UTC),
+    )
+
+    assert recovered == []
+    found = repository.find_by_id("run-recent")
+    assert found is not None
+    assert found.status == CollectorRunStatus.RUNNING
+    assert found.finished_at is None
+
+
+def test_recover_stale_running_does_not_touch_already_finished_runs():
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+    repository.save(_make_run("run-done", "mozzart-file:mozzart", datetime(2026, 1, 1, tzinfo=UTC)))
+
+    recovered = repository.recover_stale_running(
+        older_than=datetime(2026, 9, 22, 9, 0, 0, tzinfo=UTC),
+        recovered_at=datetime(2026, 9, 22, 9, 30, 0, tzinfo=UTC),
+    )
+
+    assert recovered == []
+    found = repository.find_by_id("run-done")
+    assert found is not None
+    assert found.status == CollectorRunStatus.SUCCESS
+
+
 def test_find_by_id_returns_none_when_missing():
     connection = create_test_connection()
     repository = CollectorRunRepository(connection)
