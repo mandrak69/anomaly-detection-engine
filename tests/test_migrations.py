@@ -14,6 +14,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_11_collector_run_running_status,
     _migration_12_mapping_resolution_audit,
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
+    _migration_14_signal_history,
 )
 
 
@@ -735,3 +736,59 @@ def test_migration_13_recovers_from_an_interruption_after_copy_before_drop():
     rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
     assert len(rows) == 1
     assert rows[0]["event_id"] == "event-1"
+
+
+def test_migration_14_adds_signal_history_table():
+    connection = make_connection()
+    for migration in MIGRATIONS[:13]:
+        migration(connection)
+
+    _migration_14_signal_history(connection)
+
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "signal_history" in tables
+
+    connection.execute(
+        """
+        INSERT INTO signals (
+            id, signal_type, event_id, market_type, market_period,
+            market_phase, outcome, status, edge_percent, details,
+            first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "signal-1", "SUREBET", "event-1", "three_way", "full_time",
+            "pre_match", None, "ACTIVE", "10.0", "{}",
+            "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO signal_history
+            (signal_id, event_type, status, edge_percent, details, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("signal-1", "created", "ACTIVE", "10.0", "{}", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.commit()
+
+    row = connection.execute("SELECT * FROM signal_history WHERE signal_id = 'signal-1'").fetchone()
+    assert row["event_type"] == "created"
+
+
+def test_migration_14_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:13]:
+        migration(connection)
+
+    _migration_14_signal_history(connection)
+    _migration_14_signal_history(connection)  # must not raise
+
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "signal_history" in tables

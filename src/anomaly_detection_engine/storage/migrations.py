@@ -900,6 +900,50 @@ def _migration_13_odds_snapshot_and_raw_payload_foreign_keys(
     )
 
 
+def _migration_14_signal_history(connection: sqlite3.Connection) -> None:
+    """Adds signal_history -- see storage.signal_repository.
+    SignalRepository._record_history, the only writer.
+
+    signals itself stays exactly what it already was: one row per
+    (signal_type, event_id, market, outcome) identity, holding *current*
+    state. reconcile()'s upsert overwrites edge_percent/details/status
+    on every repeated sighting, and _find() matches on identity alone
+    regardless of status -- so a RESOLVED signal that becomes ACTIVE
+    again reuses the very same row, and the previous episode's peak
+    edge_percent, its own details, and exactly when it resolved are
+    gone, overwritten with no trace. That made "how long was this
+    surebet open", "what was its peak edge", and "how many times has
+    this opportunity reopened" all unanswerable after the fact, even
+    though this project's whole purpose is detecting and later
+    understanding exactly these opportunities.
+
+    Deliberately not a row on *every* reconcile() touch, though: this
+    project polls frequently, and a signal reconfirmed ACTIVE with an
+    unchanged edge_percent every cycle for hours would otherwise grow
+    signal_history as fast as odds_snapshots for no analytical benefit.
+    A row is recorded only on: creation, reactivation (was RESOLVED/
+    EXPIRED, now ACTIVE again), a new peak edge_percent while ACTIVE,
+    resolution, and expiry -- the actual transitions/milestones worth
+    reconstructing later, not routine reconfirmation.
+    """
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS signal_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL REFERENCES signals(id),
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            edge_percent TEXT NOT NULL,
+            details TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_signal_history_signal
+            ON signal_history(signal_id, recorded_at);
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -914,6 +958,7 @@ MIGRATIONS: list[Migration] = [
     _migration_11_collector_run_running_status,
     _migration_12_mapping_resolution_audit,
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
+    _migration_14_signal_history,
 ]
 
 

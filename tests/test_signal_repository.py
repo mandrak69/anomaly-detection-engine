@@ -274,6 +274,126 @@ def test_resolved_signal_reappearing_is_reactivated_not_duplicated():
     assert all_rows["n"] == 1  # reactivated the same row, did not insert a second one
 
 
+def test_creating_a_signal_records_a_created_history_entry():
+    repo = make_repository()
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    signal_id = repo.find_active(SUREBET)[0].id
+    history = repo.find_history(signal_id)
+
+    assert len(history) == 1
+    assert history[0].event_type == "created"
+    assert history[0].status == ACTIVE
+    assert history[0].edge_percent == Decimal("10.0")
+    assert history[0].recorded_at == T0
+
+
+def test_routine_reconfirmation_with_unchanged_edge_percent_records_no_new_history():
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=t1, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    signal_id = repo.find_active(SUREBET)[0].id
+    history = repo.find_history(signal_id)
+
+    assert len(history) == 1  # just "created" -- no growth on routine reconfirmation
+    assert history[0].event_type == "created"
+
+
+def test_a_lower_edge_percent_on_reconfirmation_records_no_new_history():
+    # Only a new *peak* is worth recording -- a dip is still just a
+    # routine reconfirmation of the same open signal.
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="8.0"))],
+        observed_at=t1, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    signal_id = repo.find_active(SUREBET)[0].id
+    history = repo.find_history(signal_id)
+
+    assert len(history) == 1
+
+
+def test_a_new_edge_percent_peak_records_an_edge_peak_history_entry():
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="15.0"))],
+        observed_at=t1, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    signal_id = repo.find_active(SUREBET)[0].id
+    history = repo.find_history(signal_id)
+
+    assert [entry.event_type for entry in history] == ["created", "edge_peak"]
+    assert history[1].edge_percent == Decimal("15.0")
+    assert history[1].recorded_at == t1
+
+
+def test_resolving_a_signal_records_a_resolved_history_entry():
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    signal_id = repo.find_active(SUREBET)[0].id
+    repo.reconcile(SUREBET, [], observed_at=t1, evaluated_keys=SUREBET_EVALUATED)
+
+    history = repo.find_history(signal_id)
+
+    assert [entry.event_type for entry in history] == ["created", "resolved"]
+    assert history[1].status == RESOLVED
+    assert history[1].recorded_at == t1
+
+
+def test_reactivating_a_resolved_signal_records_a_reactivated_history_entry():
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+    t2 = T0 + timedelta(minutes=10)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    signal_id = repo.find_active(SUREBET)[0].id
+    repo.reconcile(SUREBET, [], observed_at=t1, evaluated_keys=SUREBET_EVALUATED)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate())],
+        observed_at=t2, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    history = repo.find_history(signal_id)
+
+    assert [entry.event_type for entry in history] == ["created", "resolved", "reactivated"]
+    assert history[2].status == ACTIVE
+    assert history[2].recorded_at == t2
+
+
 def test_resolving_one_signal_type_does_not_touch_another():
     repo = make_repository()
     t1 = T0 + timedelta(minutes=5)
@@ -439,6 +559,11 @@ def test_expire_active_signals_expires_a_stale_signal_past_its_events_lifecycle(
     row = repo._connection.execute("SELECT * FROM signals").fetchone()
     assert row["status"] == EXPIRED
     assert row["resolved_at"] == later.isoformat()
+
+    history = repo.find_history(row["id"])
+    assert [entry.event_type for entry in history] == ["created", "expired"]
+    assert history[1].status == EXPIRED
+    assert history[1].recorded_at == later
 
 
 def test_expire_active_signals_leaves_a_not_yet_started_event_untouched():

@@ -56,6 +56,23 @@ class SignalCandidate:
 
 
 @dataclass(frozen=True)
+class SignalHistoryEntry:
+    """One transition/milestone in a signal's lifecycle -- see
+    SignalRepository._record_history for exactly which moments get one
+    of these (creation, reactivation, a new edge_percent peak,
+    resolution, expiry -- not every routine reconfirmation).
+    """
+
+    id: int
+    signal_id: str
+    event_type: str
+    status: SignalStatus
+    edge_percent: Decimal
+    details: dict[str, Any]
+    recorded_at: datetime
+
+
+@dataclass(frozen=True)
 class SignalRecord:
     id: str
     signal_type: str
@@ -156,7 +173,7 @@ class SignalRepository:
                     signal_id = self._insert(candidate, observed_at)
                 else:
                     signal_id = existing["id"]
-                    self._touch(signal_id, candidate, observed_at)
+                    self._touch(signal_id, existing, candidate, observed_at)
                 seen_ids.add(signal_id)
 
             self._resolve_stale(signal_type, evaluated_keys, seen_ids, observed_at)
@@ -209,7 +226,7 @@ class SignalRepository:
         with self._connection:
             rows = self._connection.execute(
                 """
-                SELECT s.id FROM signals s
+                SELECT s.* FROM signals s
                 JOIN events e ON e.id = s.event_id
                 LEFT JOIN event_status es ON es.event_id = s.event_id
                 WHERE s.status = ?
@@ -229,10 +246,18 @@ class SignalRepository:
             ).fetchall()
             expired_ids = [row["id"] for row in rows]
 
-            for signal_id in expired_ids:
+            for row in rows:
                 self._connection.execute(
                     "UPDATE signals SET status = ?, resolved_at = ? WHERE id = ?",
-                    (EXPIRED, expired_at.isoformat(), signal_id),
+                    (EXPIRED, expired_at.isoformat(), row["id"]),
+                )
+                self._record_history(
+                    row["id"],
+                    event_type="expired",
+                    status=EXPIRED,
+                    edge_percent=Decimal(row["edge_percent"]),
+                    details=json.loads(row["details"]),
+                    recorded_at=expired_at,
                 )
 
         if expired_ids:
@@ -300,9 +325,19 @@ class SignalRepository:
                 "edge_percent": str(candidate.edge_percent),
             },
         )
+        self._record_history(
+            signal_id,
+            event_type="created",
+            status=ACTIVE,
+            edge_percent=candidate.edge_percent,
+            details=candidate.details,
+            recorded_at=observed_at,
+        )
         return signal_id
 
-    def _touch(self, signal_id: str, candidate: SignalCandidate, observed_at: datetime) -> None:
+    def _touch(
+        self, signal_id: str, existing: Row, candidate: SignalCandidate, observed_at: datetime
+    ) -> None:
         self._connection.execute(
             """
             UPDATE signals
@@ -316,6 +351,28 @@ class SignalRepository:
                 observed_at.isoformat(),
                 signal_id,
             ),
+        )
+
+        # Not a history row on every routine reconfirmation -- only the
+        # moments worth reconstructing later: this signal was previously
+        # RESOLVED/EXPIRED and is active again (a reopened opportunity,
+        # not a continuous one), or edge_percent just reached a new peak
+        # while it stayed ACTIVE. See migration 14's docstring for why.
+        previous_status = SignalStatus(existing["status"])
+        if previous_status != ACTIVE:
+            event_type = "reactivated"
+        elif candidate.edge_percent > Decimal(existing["edge_percent"]):
+            event_type = "edge_peak"
+        else:
+            return
+
+        self._record_history(
+            signal_id,
+            event_type=event_type,
+            status=ACTIVE,
+            edge_percent=candidate.edge_percent,
+            details=candidate.details,
+            recorded_at=observed_at,
         )
 
     def _resolve_stale(
@@ -333,15 +390,24 @@ class SignalRepository:
             (signal_type, ACTIVE),
         ).fetchall()
 
-        stale_ids = [
-            row["id"]
+        stale_rows = [
+            row
             for row in active_rows
             if row["id"] not in seen_ids and _identity_from_row(row) in evaluated_keys
         ]
-        for stale_id in stale_ids:
+        stale_ids = [row["id"] for row in stale_rows]
+        for row in stale_rows:
             self._connection.execute(
                 "UPDATE signals SET status = ?, resolved_at = ? WHERE id = ?",
-                (RESOLVED, observed_at.isoformat(), stale_id),
+                (RESOLVED, observed_at.isoformat(), row["id"]),
+            )
+            self._record_history(
+                row["id"],
+                event_type="resolved",
+                status=RESOLVED,
+                edge_percent=Decimal(row["edge_percent"]),
+                details=json.loads(row["details"]),
+                recorded_at=observed_at,
             )
 
         if stale_ids:
@@ -373,6 +439,54 @@ class SignalRepository:
                 datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None
             ),
         )
+
+    def _record_history(
+        self,
+        signal_id: str,
+        *,
+        event_type: str,
+        status: str,
+        edge_percent: Decimal,
+        details: dict[str, Any],
+        recorded_at: datetime,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO signal_history
+                (signal_id, event_type, status, edge_percent, details, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                event_type,
+                status,
+                str(edge_percent),
+                json.dumps(details),
+                recorded_at.isoformat(),
+            ),
+        )
+
+    def find_history(self, signal_id: str) -> list[SignalHistoryEntry]:
+        """Every recorded transition/milestone for one signal, oldest
+        first -- see SignalHistoryEntry/_record_history for exactly
+        which moments this covers.
+        """
+        rows = self._connection.execute(
+            "SELECT * FROM signal_history WHERE signal_id = ? ORDER BY recorded_at, id",
+            (signal_id,),
+        ).fetchall()
+        return [
+            SignalHistoryEntry(
+                id=row["id"],
+                signal_id=row["signal_id"],
+                event_type=row["event_type"],
+                status=SignalStatus(row["status"]),
+                edge_percent=Decimal(row["edge_percent"]),
+                details=json.loads(row["details"]),
+                recorded_at=datetime.fromisoformat(row["recorded_at"]),
+            )
+            for row in rows
+        ]
 
 
 def _line_str(market: MarketIdentity) -> str | None:
