@@ -144,6 +144,76 @@ def test_token_alias_only_matches_whole_words():
     assert result.raw_name == "UAEFC"
 
 
+def test_case_only_difference_is_an_exact_match_not_a_new_team():
+    normalizer = TeamNormalizer(["Manchester United", "Liverpool"])
+
+    result = normalizer.normalize("manchester united")
+
+    assert result.canonical_name == "Manchester United"
+    assert result.method == "exact"
+    assert result.confidence == 100.0
+
+
+def test_repeated_internal_whitespace_is_an_exact_match():
+    normalizer = TeamNormalizer(["Real Madrid"])
+
+    result = normalizer.normalize("Real   Madrid")
+
+    assert result.canonical_name == "Real Madrid"
+    assert result.method == "exact"
+
+
+def test_unicode_full_width_variant_is_an_exact_match():
+    # NFKC folds full-width Unicode forms (as seen in some Asian-market
+    # bookmaker feeds) onto their plain-ASCII equivalents.
+    normalizer = TeamNormalizer(["United"])
+
+    result = normalizer.normalize("Ｕｎｉｔｅｄ")
+
+    assert result.canonical_name == "United"
+    assert result.method == "exact"
+
+
+def test_case_insensitive_alias_match():
+    normalizer = TeamNormalizer(
+        ["Manchester United"], aliases={"Man Utd": "Manchester United"}
+    )
+
+    result = normalizer.normalize("MAN UTD")
+
+    assert result.canonical_name == "Manchester United"
+    assert result.method == "alias"
+
+
+def test_differently_cased_acronym_still_expands_via_token_alias():
+    normalizer = TeamNormalizer(
+        ["United Arab Emirates U23"],
+        token_aliases={"UAE": "United Arab Emirates"},
+        fuzzy_threshold=85,
+    )
+
+    result = normalizer.normalize("uae M23")
+
+    assert result.raw_name == "United Arab Emirates M23"
+    assert result.canonical_name == "United Arab Emirates U23"
+    assert result.method == "fuzzy"
+
+
+def test_case_and_whitespace_differences_do_not_affect_fuzzy_score():
+    # The same fuzzy match, differing only by case/whitespace in the raw
+    # spelling, must score identically -- case-sensitivity was a real gap
+    # in the fuzzy path too (rapidfuzz scorers are case-sensitive by
+    # default), not just exact/alias.
+    normalizer = TeamNormalizer(["Manchester United"], fuzzy_threshold=70)
+
+    plain = normalizer.normalize("Manchester Utd")
+    upper = normalizer.normalize("MANCHESTER   UTD")
+
+    assert plain.confidence == upper.confidence
+    assert upper.canonical_name == "Manchester United"
+    assert upper.method == "fuzzy"
+
+
 def test_clear_winner_is_not_treated_as_ambiguous():
     # Sanity check for the ambiguity margin itself: a huge gap between
     # best and second-best (unlike the tied case above) must still

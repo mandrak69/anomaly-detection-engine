@@ -194,6 +194,31 @@ def test_no_source_event_id_falls_back_to_normal_resolution():
     assert mappings == 0
 
 
+def test_case_and_whitespace_variant_spelling_reuses_the_existing_team():
+    # A different provider (or the same one, on a bad day) reporting the
+    # same real team under different case/whitespace must not create a
+    # second, duplicate canonical team.
+    connection = make_connection()
+    first_source = FixtureCatalog(connection, provider_id="mozzart")
+    second_source = FixtureCatalog(connection, provider_id="the-odds-api")
+
+    r1 = first_source.match(
+        sport="football", league="L", home_team_raw="Real Madrid",
+        away_team_raw="Barcelona", start_time=T0,
+    )
+    r2 = second_source.match(
+        sport="football", league="L", home_team_raw="real   madrid",
+        away_team_raw="barcelona", start_time=T0 + timedelta(minutes=5),
+    )
+
+    assert r1.event.home_team.id == r2.event.home_team.id
+    assert r2.event.home_team.canonical_name == "Real Madrid"
+    teams = connection.execute(
+        "SELECT COUNT(*) AS n FROM teams WHERE sport = 'football'"
+    ).fetchone()["n"]
+    assert teams == 2  # Real Madrid + Barcelona, not duplicated
+
+
 def test_two_different_sources_same_exact_spelling_share_one_team_and_event():
     connection = make_connection()
     mozzart = FixtureCatalog(connection, provider_id="mozzart")
