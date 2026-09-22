@@ -833,6 +833,23 @@ silently creating two rows that should have been one). A second
 connection attempting the same resolution blocks (up to its own
 `busy_timeout`) instead of racing it.
 
+Every connection also opens in **WAL journal mode**
+(`storage.database.configure_connection`) instead of SQLite's default
+rollback journal. journal_mode is a database-*file* setting (not a
+per-connection one), so this only ever needs to be set once and every
+later connection -- this project's own or an ad-hoc `sqlite3 data/
+anomaly_detection.db` session -- already sees it. The concurrency
+guarantee WAL actually buys here: a reader is never blocked by a
+writer holding an open transaction (only writer-vs-writer contention
+remains, which `BEGIN IMMEDIATE` above already serializes explicitly)
+-- verified directly, a reader connection reads successfully in ~5ms
+while a separate connection holds an open, uncommitted `BEGIN
+IMMEDIATE` write transaction. Under the old default rollback-journal
+mode, a writer's lock can escalate to exclusive once it flushes pages
+to disk, blocking every concurrent reader (`inspect_data.py`,
+`run_retention_cleanup.py`, ...) until that writer finishes or the
+reader's own `busy_timeout` runs out.
+
 ---
 
 ## Time Handling
