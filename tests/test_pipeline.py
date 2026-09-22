@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +28,9 @@ from anomaly_detection_engine.models.market import (
     LIVE_MARKET,
     TOTALS_2_5_MARKET,
     EventLifecycle,
+    MarketIdentity,
+    MarketPeriod,
+    MarketPhase,
     MarketType,
 )
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
@@ -854,8 +858,9 @@ def _save_totals_surebet_snapshots(odds_repository, event_id, observed_at):
     # Shaped like what ApiFootballCollector actually extracts from a real
     # "Goals Over/Under" bet's 2.5 line (see
     # collectors.api_football_collector._extract_totals_2_5_odds) --
-    # OVER/UNDER only, no 1/X/2 -- proving run_detection's DETECTED_MARKETS
-    # loop reaches TOTALS_2_5_MARKET, not just DEFAULT_MARKET.
+    # OVER/UNDER only, no 1/X/2 -- proving run_detection's dynamic market
+    # discovery (OddsRepository.distinct_markets_for_events) reaches
+    # TOTALS_2_5_MARKET, not just DEFAULT_MARKET.
     for outcome, odds in [("OVER", "2.10"), ("UNDER", "2.10")]:
         odds_repository.save(
             OddsSnapshot(
@@ -870,8 +875,11 @@ def _save_totals_surebet_snapshots(odds_repository, event_id, observed_at):
 
 
 def test_run_detection_detects_a_totals_surebet_not_just_default_market(monkeypatch):
-    # Before DETECTED_MARKETS (see pipeline.py), run_detection() only
-    # ever called persist_detected_signals with market=DEFAULT_MARKET --
+    # Before DETECTED_MARKETS existed (a since-removed hand-maintained
+    # tuple in pipeline.py, replaced by dynamic discovery -- see
+    # test_run_detection_discovers_a_market_never_named_by_any_constant),
+    # run_detection() only ever called persist_detected_signals with
+    # market=DEFAULT_MARKET --
     # a TOTALS-shaped snapshot like ApiFootballCollector now ingests
     # could never produce a signal, no matter how good the arbitrage,
     # because nothing ever asked detect_surebet_candidates to look at
@@ -919,8 +927,8 @@ def _save_live_surebet_snapshots(odds_repository, event_id, observed_at):
 
 
 def test_run_detection_detects_a_live_market_surebet_not_just_pre_match(monkeypatch):
-    # Before LIVE_MARKET was added to DETECTED_MARKETS (see pipeline.py),
-    # run_detection() never once called persist_detected_signals with
+    # Before LIVE_MARKET was added to the since-removed DETECTED_MARKETS
+    # tuple, run_detection() never once called persist_detected_signals with
     # market=LIVE_MARKET -- a Mozzart live snapshot was ingested and
     # stored (see test_mozzart_file_collector.py) but could never produce
     # a signal, no matter how good the arbitrage, because nothing ever
@@ -977,3 +985,101 @@ def test_run_detection_keeps_live_and_pre_match_surebets_for_the_same_event_sepa
     assert summary["active_surebets"] == 2
     phases = {signal.market.phase for signal in runtime.signal_repository.find_active("SUREBET")}
     assert phases == {DEFAULT_MARKET.phase, LIVE_MARKET.phase}
+
+
+def test_run_detection_discovers_a_market_never_named_by_any_constant(monkeypatch):
+    # Regression test for the old DETECTED_MARKETS tuple's own failure
+    # mode: LIVE_MARKET was ingested and stored correctly for a real
+    # stretch of this project's history before anyone added it to that
+    # hand-maintained list, so it was never detected. Markets are now
+    # discovered from odds_snapshots itself (OddsRepository.
+    # distinct_markets_for_events), not named one by one -- this uses a
+    # MarketIdentity (THREE_WAY, FIRST_HALF) that no DEFAULT_MARKET/
+    # TOTALS_2_5_MARKET/HANDICAP_MINUS_1_MARKET/LIVE_MARKET constant ever
+    # named (all of those are FULL_TIME), proving detection reaches it
+    # purely because the data says it's there.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+    first_half_market = MarketIdentity(
+        market_type=MarketType.THREE_WAY, period=MarketPeriod.FIRST_HALF,
+        phase=MarketPhase.PRE_MATCH,
+    )
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="mozzart").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    for outcome, odds in [("1", "2.50"), ("X", "4.00"), ("2", "4.00")]:
+        runtime.odds_repository.save(
+            OddsSnapshot(
+                event_id=event.id,
+                bookmaker=Bookmaker("bet1", "Bet1"),
+                market=first_half_market,
+                outcome=outcome,
+                odds=Decimal(odds),
+                observed_at=quote_time,
+            )
+        )
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 1
+    active = runtime.signal_repository.find_active("SUREBET")
+    assert active[0].market.period == MarketPeriod.FIRST_HALF
+
+
+def test_run_detection_skips_an_unsupported_market_type_without_crashing(monkeypatch, caplog):
+    # A market_type present in the data but with no
+    # models.market.REQUIRED_OUTCOMES entry (MONEYLINE -- the enum value
+    # exists but detection was never wired up for it) must be skipped
+    # with a visible warning, not silently ignored and not a crash that
+    # would also block detecting the *other*, genuinely supported market
+    # in the very same cycle.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+    unsupported_market = MarketIdentity(
+        market_type=MarketType.MONEYLINE, period=MarketPeriod.FULL_TIME,
+        phase=MarketPhase.PRE_MATCH,
+    )
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="mozzart").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    runtime.odds_repository.save(
+        OddsSnapshot(
+            event_id=event.id,
+            bookmaker=Bookmaker("bet1", "Bet1"),
+            market=unsupported_market,
+            outcome="1",
+            odds=Decimal("2.50"),
+            observed_at=quote_time,
+        )
+    )
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+
+    # The package logger (see observability.logging_config.configure_logging)
+    # sets propagate=False once configured, which -- if any earlier test in
+    # this same process already called it -- would otherwise keep this
+    # record from ever reaching caplog's own handler on the root logger.
+    # Attaching caplog's handler directly works regardless of that.
+    package_logger = logging.getLogger("anomaly_detection_engine")
+    package_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level("WARNING", logger="anomaly_detection_engine"):
+            summary = pipeline.run_detection(runtime, [event], cfg)
+    finally:
+        package_logger.removeHandler(caplog.handler)
+
+    assert summary["active_surebets"] == 1  # the supported DEFAULT_MARKET surebet still detected
+    assert any(
+        "unsupported_market_type_present" in record.message for record in caplog.records
+    )

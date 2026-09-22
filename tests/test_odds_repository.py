@@ -793,3 +793,65 @@ def test_find_latest_for_market_does_not_mix_pre_match_and_live_snapshots():
     assert pre_match_result[0].odds == Decimal("2.20")
     assert len(live_result) == 1
     assert live_result[0].odds == Decimal("1.50")
+
+
+def test_distinct_markets_for_events_returns_every_market_actually_present():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+    totals_market = MarketIdentity(
+        market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME,
+        phase=MarketPhase.PRE_MATCH, line=Decimal("2.5"),
+    )
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-002", bookmaker=bookmaker, market=totals_market, outcome="OVER",
+            odds=Decimal("1.90"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+
+    markets = repository.distinct_markets_for_events(["event-001", "event-002"])
+
+    assert set(markets) == {MARKET, totals_market}
+
+
+def test_distinct_markets_for_events_only_covers_the_given_event_ids():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("mozzart", "Mozzart")
+    other_event_market = MarketIdentity(
+        market_type=MarketType.TOTALS, period=MarketPeriod.FULL_TIME,
+        phase=MarketPhase.PRE_MATCH, line=Decimal("2.5"),
+    )
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-999-not-requested", bookmaker=bookmaker, market=other_event_market,
+            outcome="OVER", odds=Decimal("1.90"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+
+    markets = repository.distinct_markets_for_events(["event-001"])
+
+    assert markets == [MARKET]
+
+
+def test_distinct_markets_for_events_returns_empty_for_no_event_ids():
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+
+    assert repository.distinct_markets_for_events([]) == []

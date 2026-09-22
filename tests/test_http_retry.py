@@ -1,6 +1,7 @@
 import email.message
 import email.utils
 import io
+import logging
 import urllib.error
 from datetime import UTC, datetime, timedelta
 
@@ -76,16 +77,28 @@ def test_retry_log_never_contains_the_api_key_in_the_url(monkeypatch, caplog):
         "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
     )
 
-    with caplog.at_level("WARNING"):
-        http_get_with_retry(
-            url,
-            headers={},
-            timeout=10,
-            error_cls=DummyError,
-            provider_label="Dummy",
-            sleep=lambda seconds: None,
-        )
+    # The package logger (see observability.logging_config.configure_logging)
+    # sets propagate=False once configured -- if an earlier test in this
+    # same process already called it, records would never reach caplog's
+    # own handler on the root logger otherwise. Attaching caplog's handler
+    # directly works regardless of that, so this doesn't depend on test
+    # execution order.
+    package_logger = logging.getLogger("anomaly_detection_engine")
+    package_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level("WARNING", logger="anomaly_detection_engine"):
+            http_get_with_retry(
+                url,
+                headers={},
+                timeout=10,
+                error_cls=DummyError,
+                provider_label="Dummy",
+                sleep=lambda seconds: None,
+            )
+    finally:
+        package_logger.removeHandler(caplog.handler)
 
+    assert len(caplog.records) >= 1  # the retry warning was actually captured
     assert "SUPER-SECRET-KEY" not in caplog.text
     for record in caplog.records:
         assert "SUPER-SECRET-KEY" not in str(record.__dict__.get("url", ""))

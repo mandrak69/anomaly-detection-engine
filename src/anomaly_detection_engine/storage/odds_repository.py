@@ -374,6 +374,50 @@ class OddsRepository:
 
         return [self._map_row(row) for row in rows]
 
+    def distinct_markets_for_events(self, event_ids: list[str]) -> list[MarketIdentity]:
+        """Every distinct MarketIdentity actually present in
+        odds_snapshots for the given events -- one query for a whole
+        cycle's touched events at once, the same bulk-lookup shape as
+        EventStatusRepository.get_many. This is what run_detection uses
+        instead of a hand-maintained "which markets do we detect" tuple
+        (formerly DETECTED_MARKETS): a collector can start ingesting a
+        new MarketIdentity (a new market_type, a new line/phase
+        combination) and detection picks it up automatically, the same
+        cycle, rather than silently storing it forever with nothing ever
+        analyzing it -- exactly the gap that let Mozzart's LIVE_MARKET
+        snapshots go undetected for a real stretch of this project's own
+        history until someone noticed and added LIVE_MARKET to the old
+        tuple by hand. Filtering the result down to market_types
+        detection actually knows how to evaluate (see
+        models.market.REQUIRED_OUTCOMES) is the caller's job, not this
+        method's -- this is purely "what's actually there", not "what's
+        safe to sweep".
+        """
+        if not event_ids:
+            return []
+        placeholders = ", ".join("?" for _ in event_ids)
+        rows = self._connection.execute(
+            f"""
+            SELECT DISTINCT
+                market_type, market_period, market_phase,
+                market_line, market_rules, market_specifier
+            FROM odds_snapshots
+            WHERE event_id IN ({placeholders})
+            """,
+            event_ids,
+        ).fetchall()
+        return [
+            MarketIdentity(
+                market_type=MarketType(row["market_type"]),
+                period=MarketPeriod(row["market_period"]),
+                phase=MarketPhase(row["market_phase"]),
+                line=Decimal(row["market_line"]) if row["market_line"] is not None else None,
+                rules=row["market_rules"],
+                specifier=row["market_specifier"],
+            )
+            for row in rows
+        ]
+
     @staticmethod
     def _map_row(row: Row) -> OddsSnapshot:
         return OddsSnapshot(

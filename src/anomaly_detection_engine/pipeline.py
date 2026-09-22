@@ -26,10 +26,7 @@ from anomaly_detection_engine.config import AppConfig
 from anomaly_detection_engine.ingestion.service import OddsIngestionService
 from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import (
-    DEFAULT_MARKET,
-    HANDICAP_MINUS_1_MARKET,
-    LIVE_MARKET,
-    TOTALS_2_5_MARKET,
+    REQUIRED_OUTCOMES,
     EventLifecycle,
     MarketIdentity,
 )
@@ -120,26 +117,6 @@ def resolve_freshness_policy(config: AppConfig) -> FreshnessPolicy:
         max_observation_spread=config.max_observation_spread,
     )
 
-# Every market run_detection actually analyzes. A market's collector(s)
-# ingesting it (see ApiFootballCollector) is necessary but not
-# sufficient for detection to happen -- this tuple is what closes that
-# gap; adding a new detected market later is exactly one line here,
-# nothing else in run_detection changes.
-#
-# LIVE_MARKET is included alongside the three PRE_MATCH markets: it's a
-# distinct MarketIdentity (see models.market.MarketPhase), so it gets its
-# own independent surebet/value-gap/movement sweep through the exact
-# same detection code below, never mixed with pre-match odds for the
-# same event. Before this, MozzartFileCollector's LIVE_MARKET snapshots
-# were ingested and stored but silently never reached detection at all --
-# not a missing feature so much as a real gap between what this project
-# collects and what it analyzes.
-DETECTED_MARKETS = (
-    DEFAULT_MARKET,
-    TOTALS_2_5_MARKET,
-    HANDICAP_MINUS_1_MARKET,
-    LIVE_MARKET,
-)
 
 
 def _the_odds_api_collector(config: AppConfig) -> OddsCollector:
@@ -622,14 +599,30 @@ def persist_detected_signals(
 
 def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> dict[str, int]:
     """Detects and persists signals/movements for every ingested event,
-    across every market in DETECTED_MARKETS, then expires ACTIVE signals
-    whose event's lifecycle has run out -- the last step of the *core*
-    pipeline: collect -> validate -> match -> persist observations ->
-    detect anomalies (per market) -> persist signals -> expire stale
-    signals.
+    across every market this cycle's events actually have odds for, then
+    expires ACTIVE signals whose event's lifecycle has run out -- the
+    last step of the *core* pipeline: collect -> validate -> match ->
+    persist observations -> detect anomalies (per market) -> persist
+    signals -> expire stale signals.
 
-    One persist_detected_signals() call per DETECTED_MARKETS entry, not
-    one call analyzing every market at once: detect_surebet_candidates/
+    Which markets to sweep is discovered from the data itself
+    (OddsRepository.distinct_markets_for_events), not a hand-maintained
+    list of MarketIdentity constants (the old DETECTED_MARKETS tuple) --
+    that tuple already caused a real gap once: MozzartFileCollector's
+    LIVE_MARKET snapshots were ingested and stored correctly but never
+    reached detection for a real stretch of this project's history,
+    simply because nobody had added LIVE_MARKET to the tuple yet. A
+    market present in the data but genuinely unsupported (its
+    market_type has no models.market.REQUIRED_OUTCOMES entry -- e.g. a
+    hypothetical MONEYLINE collector added later, before detection
+    logic for it exists) is skipped with a loud warning log, not a
+    silent one and not a crash -- visible enough that the same "we're
+    collecting something nothing ever analyzes" gap can't hide again,
+    without making an intentionally-not-yet-supported market type fail
+    the whole cycle.
+
+    One persist_detected_signals() call per discovered market, not one
+    call analyzing every market at once: detect_surebet_candidates/
     detect_value_gap_candidates and SignalRepository.reconcile() are all
     already scoped to a single MarketIdentity per call (see
     SignalCandidate.identity, which includes market), so looping here is
@@ -706,8 +699,25 @@ def run_detection(runtime: Runtime, events: list[Event], config: AppConfig) -> d
         not in (EventLifecycle.FINISHED, EventLifecycle.POSTPONED_OR_CANCELED)
     ]
 
+    present_markets = runtime.odds_repository.distinct_markets_for_events(
+        [event.id for event in events]
+    )
+    detectable_markets = [m for m in present_markets if m.market_type in REQUIRED_OUTCOMES]
+    unsupported_market_types = {
+        m.market_type for m in present_markets if m.market_type not in REQUIRED_OUTCOMES
+    }
+    if unsupported_market_types:
+        logger.warning(
+            "run_detection.unsupported_market_type_present",
+            extra={
+                "market_types": sorted(t.value for t in unsupported_market_types),
+                "hint": "data is being ingested for this market_type but "
+                "REQUIRED_OUTCOMES has no entry for it, so it is never analyzed",
+            },
+        )
+
     movements_recorded = 0
-    for market in DETECTED_MARKETS:
+    for market in detectable_markets:
         sweep = persist_detected_signals(
             events,
             runtime.odds_repository,
