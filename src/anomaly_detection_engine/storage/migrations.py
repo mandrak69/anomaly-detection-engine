@@ -588,11 +588,9 @@ def _migration_8_odds_snapshot_provenance(connection: sqlite3.Connection) -> Non
     reason.
 
     Migration 11 later closed that ordering gap (the collector_runs row
-    is now written as RUNNING before any snapshot referencing it), which
-    is what makes a real FK possible here -- not added in that same pass
-    though: that would mean rebuilding this project's two biggest tables
-    (odds_snapshots, raw_payloads), deliberately left for a separate,
-    more carefully considered migration rather than bundled in.
+    is now written as RUNNING before any snapshot referencing it), and
+    migration 13 adds the real FK this column always should have had
+    once that was safe.
 
     Nullable and left unbackfilled for existing rows, the same reasoning
     migration 6's own nullable columns used: no row written before this
@@ -780,6 +778,128 @@ def _migration_12_mapping_resolution_audit(connection: sqlite3.Connection) -> No
     _add_column_if_missing(connection, "source_competition_mappings", "created_at", "TEXT")
 
 
+def _migration_13_odds_snapshot_and_raw_payload_foreign_keys(
+    connection: sqlite3.Connection,
+) -> None:
+    """Adds real SQL foreign keys from odds_snapshots.collector_run_id
+    and raw_payloads.collector_run_id to collector_runs(id) -- possible
+    now that migration 11 guarantees a run's collector_runs row (written
+    as RUNNING) always exists before either table's rows referencing it
+    are ever written (see OddsIngestionService.run()). Migration 8's own
+    docstring documented exactly why this wasn't safe before that fix:
+    a real FK, with this project's connections running PRAGMA
+    foreign_keys = ON, would have rejected every snapshot insert since
+    the parent row didn't exist yet at that point in the old ordering.
+
+    odds_snapshots.collector_run_id stays nullable -- NULL means
+    "provenance unknown" (pre-migration-8 historical data), a legitimate
+    permanent state (see migration 8), and NULL never violates a foreign
+    key in SQLite regardless -- only a non-NULL value with no matching
+    parent row does. raw_payloads.collector_run_id has always been NOT
+    NULL (every row, from migration 1 onward, was written with a real
+    run_id) and stays that way.
+
+    Both tables are rebuilt the same way migration 11 rebuilt
+    collector_runs: a new table under the target schema, existing rows
+    copied across, the old table dropped, the new one renamed into
+    place, every step guarded by the same Python-level sqlite_master
+    check for resumability after an interruption -- see migration 11's
+    docstring for the full reasoning (SQLite has no ALTER TABLE ... ADD
+    CONSTRAINT). odds_snapshots is this project's largest table by a
+    wide margin; confirmed empirically before this shipped, against a
+    copy of the real production database, that the rebuild completes in
+    well under a second and PRAGMA foreign_key_check finds zero
+    violations afterward (every existing non-NULL collector_run_id
+    already referenced a real collector_runs row -- verified separately,
+    before writing this migration, precisely so it would ship only once
+    that was confirmed true).
+    """
+    if not _table_exists(connection, "odds_snapshots_new"):
+        connection.execute(
+            """
+            CREATE TABLE odds_snapshots_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                bookmaker_id TEXT NOT NULL,
+                bookmaker_name TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                market_period TEXT NOT NULL,
+                market_line TEXT,
+                market_rules TEXT,
+                market_specifier TEXT,
+                outcome TEXT NOT NULL,
+                odds TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                source_timestamp TEXT,
+                market_phase TEXT NOT NULL DEFAULT 'pre_match',
+                collector_run_id TEXT REFERENCES collector_runs(id)
+            )
+            """
+        )
+
+    if _table_exists(connection, "odds_snapshots"):
+        connection.execute(
+            "INSERT OR IGNORE INTO odds_snapshots_new SELECT * FROM odds_snapshots"
+        )
+        connection.execute("DROP TABLE odds_snapshots")
+
+    connection.execute("ALTER TABLE odds_snapshots_new RENAME TO odds_snapshots")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_odds_event ON odds_snapshots(event_id)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_odds_event_time ON odds_snapshots(event_id, observed_at)"
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_odds_event_market
+            ON odds_snapshots(
+                event_id, market_type, market_period, market_phase,
+                market_line, market_rules, market_specifier
+            )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_snapshot_dedupe
+            ON odds_snapshots(
+                event_id,
+                bookmaker_id,
+                market_type,
+                market_period,
+                market_phase,
+                COALESCE(market_line, ''),
+                COALESCE(market_rules, ''),
+                COALESCE(market_specifier, ''),
+                outcome,
+                observed_at
+            )
+        """
+    )
+
+    if not _table_exists(connection, "raw_payloads_new"):
+        connection.execute(
+            """
+            CREATE TABLE raw_payloads_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collector_run_id TEXT NOT NULL REFERENCES collector_runs(id),
+                source TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                accepted INTEGER NOT NULL,
+                rejection_reason TEXT,
+                received_at TEXT NOT NULL
+            )
+            """
+        )
+
+    if _table_exists(connection, "raw_payloads"):
+        connection.execute("INSERT OR IGNORE INTO raw_payloads_new SELECT * FROM raw_payloads")
+        connection.execute("DROP TABLE raw_payloads")
+
+    connection.execute("ALTER TABLE raw_payloads_new RENAME TO raw_payloads")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_payloads_run ON raw_payloads(collector_run_id)"
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -793,6 +913,7 @@ MIGRATIONS: list[Migration] = [
     _migration_10_source_event_mappings,
     _migration_11_collector_run_running_status,
     _migration_12_mapping_resolution_audit,
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
 ]
 
 

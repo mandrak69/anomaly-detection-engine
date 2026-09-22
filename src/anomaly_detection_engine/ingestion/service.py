@@ -254,12 +254,9 @@ class OddsIngestionService:
         run_id is stamped onto every OddsSnapshot this record produces
         (see OddsSnapshot.collector_run_id). The matching collector_runs
         row already exists by this point -- run() writes it as RUNNING
-        before ever calling this -- but the column still isn't declared
-        as a SQL foreign key (see migration 8): that would need
-        odds_snapshots.collector_run_id and raw_payloads.collector_run_id
-        both rebuilt with a REFERENCES clause, a larger change (this
-        project's two biggest tables) deliberately left for a separate
-        pass rather than bundled into the RUNNING-status fix itself.
+        before ever calling this -- and, since migration 13, the column
+        is a real SQL foreign key to it (see migration 8's docstring for
+        why it couldn't be one before that).
         """
         try:
             validation = validate_raw_event_odds(raw)

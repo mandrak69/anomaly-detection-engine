@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.migrations import (
     MIGRATIONS,
@@ -11,6 +13,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_6_collector_run_provenance,
     _migration_11_collector_run_running_status,
     _migration_12_mapping_resolution_audit,
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
 )
 
 
@@ -516,3 +519,219 @@ def test_migration_12_is_safe_to_re_run():
 
     team_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_team_mappings)")}
     assert {"resolution_method", "confidence", "created_at"} <= team_columns
+
+
+def _seed_run_and_snapshot(connection, run_id="run-1", snapshot_collector_run_id="run-1"):
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, "mozzart-file:mozzart", "2026-01-01T00:00:00+00:00",
+         "2026-01-01T00:00:04+00:00", "success", 1, 1, 0),
+    )
+    connection.execute(
+        """
+        INSERT INTO odds_snapshots (
+            event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+            market_line, market_rules, market_specifier, outcome, odds,
+            observed_at, market_phase, collector_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("event-1", "bet1", "Bet1", "three_way", "full_time",
+         None, None, None, "1", "2.10",
+         "2026-01-01T00:00:00+00:00", "pre_match", snapshot_collector_run_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO raw_payloads (
+            collector_run_id, source, payload, accepted, received_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (run_id, "Mozzart", "{}", 1, "2026-01-01T00:00:00+00:00"),
+    )
+    connection.commit()
+
+
+def test_migration_13_preserves_existing_odds_snapshots_and_raw_payloads():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _seed_run_and_snapshot(connection)
+
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    snapshot = connection.execute("SELECT * FROM odds_snapshots").fetchone()
+    assert snapshot["event_id"] == "event-1"
+    assert snapshot["collector_run_id"] == "run-1"
+    payload = connection.execute("SELECT * FROM raw_payloads").fetchone()
+    assert payload["collector_run_id"] == "run-1"
+    assert payload["source"] == "Mozzart"
+
+
+def test_migration_13_preserves_a_null_collector_run_id_on_odds_snapshots():
+    # NULL means "provenance unknown" (pre-migration-8 historical data)
+    # -- a legitimate permanent state that must survive the rebuild and
+    # must not itself violate the new foreign key (NULL never does).
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO odds_snapshots (
+            event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+            market_line, market_rules, market_specifier, outcome, odds,
+            observed_at, market_phase, collector_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("event-1", "bet1", "Bet1", "three_way", "full_time",
+         None, None, None, "1", "2.10",
+         "2026-01-01T00:00:00+00:00", "pre_match", None),
+    )
+    connection.commit()
+
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    snapshot = connection.execute("SELECT * FROM odds_snapshots").fetchone()
+    assert snapshot["collector_run_id"] is None
+
+
+def test_migration_13_enforces_the_new_foreign_key_on_odds_snapshots():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            """
+            INSERT INTO odds_snapshots (
+                event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+                market_line, market_rules, market_specifier, outcome, odds,
+                observed_at, market_phase, collector_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("event-1", "bet1", "Bet1", "three_way", "full_time",
+             None, None, None, "1", "2.10",
+             "2026-01-01T00:00:00+00:00", "pre_match", "does-not-exist"),
+        )
+
+
+def test_migration_13_enforces_the_new_foreign_key_on_raw_payloads():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            """
+            INSERT INTO raw_payloads (
+                collector_run_id, source, payload, accepted, received_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("does-not-exist", "Mozzart", "{}", 1, "2026-01-01T00:00:00+00:00"),
+        )
+
+
+def test_migration_13_preserves_all_odds_snapshots_indexes():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    index_names = {row[1] for row in connection.execute("PRAGMA index_list(odds_snapshots)")}
+    assert {"idx_odds_event", "idx_odds_event_time", "idx_odds_event_market"} <= index_names
+    unique_names = {
+        row[1] for row in connection.execute("PRAGMA index_list(odds_snapshots)") if row[2]
+    }
+    assert "uq_odds_snapshot_dedupe" in unique_names
+
+    raw_payload_index_names = {
+        row[1] for row in connection.execute("PRAGMA index_list(raw_payloads)")
+    }
+    assert "idx_raw_payloads_run" in raw_payload_index_names
+
+
+def test_migration_13_still_enforces_the_dedupe_unique_index():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _seed_run_and_snapshot(connection)
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    # Same identity as the row _seed_run_and_snapshot already inserted --
+    # ON CONFLICT DO NOTHING (odds_repository._INSERT_SQL), not tested
+    # here directly, but the underlying unique index it targets must
+    # still exist and still fire after the rebuild.
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            """
+            INSERT INTO odds_snapshots (
+                event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+                market_line, market_rules, market_specifier, outcome, odds,
+                observed_at, market_phase, collector_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("event-1", "bet1", "Bet1", "three_way", "full_time",
+             None, None, None, "1", "9.99",
+             "2026-01-01T00:00:00+00:00", "pre_match", "run-1"),
+        )
+
+
+def test_migration_13_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _seed_run_and_snapshot(connection)
+
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)  # must not raise
+
+    assert connection.execute("SELECT COUNT(*) FROM odds_snapshots").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM raw_payloads").fetchone()[0] == 1
+
+
+def test_migration_13_recovers_from_an_interruption_after_copy_before_drop():
+    connection = make_connection()
+    for migration in MIGRATIONS[:12]:
+        migration(connection)
+    _seed_run_and_snapshot(connection)
+
+    connection.execute(
+        """
+        CREATE TABLE odds_snapshots_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            bookmaker_id TEXT NOT NULL,
+            bookmaker_name TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            market_period TEXT NOT NULL,
+            market_line TEXT,
+            market_rules TEXT,
+            market_specifier TEXT,
+            outcome TEXT NOT NULL,
+            odds TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            source_timestamp TEXT,
+            market_phase TEXT NOT NULL DEFAULT 'pre_match',
+            collector_run_id TEXT REFERENCES collector_runs(id)
+        )
+        """
+    )
+    connection.execute("INSERT INTO odds_snapshots_new SELECT * FROM odds_snapshots")
+    connection.commit()
+
+    _migration_13_odds_snapshot_and_raw_payload_foreign_keys(connection)
+
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "odds_snapshots_new" not in tables
+    assert "odds_snapshots" in tables
+    rows = connection.execute("SELECT * FROM odds_snapshots").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "event-1"

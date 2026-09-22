@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal
 
+from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
 from anomaly_detection_engine.models.market import (
     MarketIdentity,
     MarketPeriod,
@@ -10,6 +11,7 @@ from anomaly_detection_engine.models.market import (
     MarketType,
 )
 from anomaly_detection_engine.models.raw_odds import RawEventOdds
+from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
 from anomaly_detection_engine.storage.raw_payload_repository import (
     RawPayloadRepository,
@@ -19,6 +21,25 @@ from anomaly_detection_engine.storage.raw_payload_repository import (
 MARKET = MarketIdentity(
     market_type=MarketType.THREE_WAY, period=MarketPeriod.FULL_TIME, phase=MarketPhase.PRE_MATCH
 )
+
+
+def save_collector_run(connection: sqlite3.Connection, run_id: str) -> None:
+    # raw_payloads.collector_run_id is a real foreign key to
+    # collector_runs(id) since migration 13 -- every test row here needs
+    # a matching parent.
+    t0 = datetime.fromisoformat("2026-08-27T08:00:00+00:00")
+    CollectorRunRepository(connection).save(
+        CollectorRun(
+            id=run_id,
+            source="test",
+            started_at=t0,
+            finished_at=t0,
+            status=CollectorRunStatus.SUCCESS,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+        )
+    )
 
 
 def build_raw_event() -> RawEventOdds:
@@ -52,6 +73,8 @@ def test_saves_and_finds_raw_payloads_for_a_run():
 
     repository = RawPayloadRepository(connection)
     raw = build_raw_event()
+    save_collector_run(connection, "run-001")
+    save_collector_run(connection, "run-002")
 
     repository.save(
         collector_run_id="run-001",
