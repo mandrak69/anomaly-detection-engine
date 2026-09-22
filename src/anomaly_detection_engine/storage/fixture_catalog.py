@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from sqlite3 import Connection, Row
 from uuid import uuid4
@@ -127,6 +128,17 @@ class FixtureCatalog:
             if source_event_id is not None:
                 mapped_event = self._find_event_mapping(source_event_id)
                 if mapped_event is not None:
+                    # A stable source_event_id identifies the same
+                    # real-world fixture even after the provider reschedules
+                    # its kickoff -- team/competition identity is what the
+                    # fast path is confident about, not that start_time
+                    # never changes once cached. Sync it here rather than
+                    # returning a stale value, since signal expiry keys
+                    # directly off events.start_time (see
+                    # SignalRepository.expire_active_signals) -- a
+                    # postponed match's odds would otherwise expire on the
+                    # original, no-longer-real kickoff time.
+                    mapped_event = self._sync_event_start_time(mapped_event, start_time)
                     self._connection.commit()
                     return EventMatchResult(mapped_event, 100.0, "resolved")
 
@@ -427,7 +439,13 @@ class FixtureCatalog:
             start_time=start_time,
         )
         if existing is not None:
-            return existing
+            # Same reasoning as match()'s source_event_id fast path: a
+            # later sighting within start_time_tolerance of the stored
+            # kickoff can still report a genuinely shifted start_time (a
+            # provider moving a match by 15 minutes, say), and signal
+            # expiry keys off events.start_time -- see
+            # _sync_event_start_time.
+            return self._sync_event_start_time(existing, start_time)
 
         event = Event(
             id=f"event-{uuid4().hex[:10]}",
@@ -459,6 +477,41 @@ class FixtureCatalog:
             extra={"event_id": event.id, "display_name": event.display_name},
         )
         return event
+
+    def _sync_event_start_time(self, event: Event, new_start_time: datetime) -> Event:
+        """Updates an already-resolved event's start_time in place when a
+        later sighting reports a different one -- a provider genuinely
+        rescheduling a fixture's kickoff, not corrected retroactively
+        (see both call sites above). Team/competition identity and the
+        event's own id are exactly what makes this the *same* canonical
+        event despite the new kickoff; only start_time itself is mutable
+        here, deliberately not a broader "any field can drift" policy --
+        a changed league/competition on an otherwise-matching sighting is
+        more likely a genuinely different fixture than the same one
+        rescheduled, and isn't something this method touches.
+
+        No-op (no write, no log) when the two times are already equal
+        under UTC-normalized comparison, so a routine re-poll of an
+        unchanged fixture -- the overwhelming majority of calls here --
+        never writes to events at all.
+        """
+        if to_utc_iso(event.start_time) == to_utc_iso(new_start_time):
+            return event
+
+        self._connection.execute(
+            "UPDATE events SET start_time = ? WHERE id = ?",
+            (to_utc_iso(new_start_time), event.id),
+        )
+        logger.info(
+            "fixture_catalog.event.start_time_rescheduled",
+            extra={
+                "event_id": event.id,
+                "display_name": event.display_name,
+                "previous_start_time": to_utc_iso(event.start_time),
+                "new_start_time": to_utc_iso(new_start_time),
+            },
+        )
+        return replace(event, start_time=new_start_time)
 
     def _find_event_mapping(self, source_event_id: str) -> Event | None:
         row = self._connection.execute(

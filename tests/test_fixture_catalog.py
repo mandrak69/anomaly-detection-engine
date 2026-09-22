@@ -82,6 +82,81 @@ def test_source_event_id_is_cached_and_reused_on_a_later_sighting():
     assert teams == 2
 
 
+def test_source_event_id_fast_path_syncs_a_rescheduled_kickoff():
+    # Signal expiry keys directly off events.start_time (see
+    # SignalRepository.expire_active_signals) -- a provider genuinely
+    # postponing a fixture must update the canonical event's start_time,
+    # not leave it pointing at a kickoff that no longer happens, even
+    # though the fast path otherwise trusts source_event_id outright and
+    # skips team/competition re-resolution.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    first = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id="12345",
+    )
+    postponed_start = T0 + timedelta(days=3)
+
+    second = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=postponed_start, source_event_id="12345",
+    )
+
+    assert second.event.id == first.event.id
+    assert second.event.start_time == postponed_start
+
+    row = connection.execute(
+        "SELECT start_time FROM events WHERE id = ?", (first.event.id,)
+    ).fetchone()
+    assert datetime.fromisoformat(row["start_time"]) == postponed_start
+
+
+def test_source_event_id_fast_path_does_not_rewrite_an_unchanged_start_time():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id="12345",
+    )
+    result = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0, source_event_id="12345",
+    )
+
+    assert result.event.start_time == T0
+
+
+def test_slow_path_syncs_a_kickoff_shift_within_tolerance():
+    # No source_event_id here -- the general team/competition/tolerance-
+    # window matching path (_find_event) must sync start_time too, not
+    # just the source_event_id fast path.
+    connection = make_connection()
+    catalog = FixtureCatalog(
+        connection, provider_id="mozzart", start_time_tolerance=timedelta(minutes=30)
+    )
+
+    first = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+    )
+    shifted_start = T0 + timedelta(minutes=15)
+
+    second = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=shifted_start,
+    )
+
+    assert second.event.id == first.event.id
+    assert second.event.start_time == shifted_start
+
+    row = connection.execute(
+        "SELECT start_time FROM events WHERE id = ?", (first.event.id,)
+    ).fetchone()
+    assert datetime.fromisoformat(row["start_time"]) == shifted_start
+
+
 def test_different_providers_do_not_share_source_event_id_mappings():
     connection = make_connection()
     api_football = FixtureCatalog(connection, provider_id="api-football")
