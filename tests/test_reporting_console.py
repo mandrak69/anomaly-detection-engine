@@ -56,6 +56,11 @@ def build_config() -> AppConfig:
         odds_api_min_interval=timedelta(hours=4),
         api_football_key=None,
         stale_running_threshold=timedelta(minutes=60),
+        raw_payload_retention=timedelta(days=14),
+        collector_run_source_payload_retention=timedelta(days=14),
+        odds_snapshot_retention=timedelta(days=90),
+        movement_retention=timedelta(days=180),
+        signal_history_retention=timedelta(days=180),
     )
 
 

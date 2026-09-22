@@ -134,6 +134,22 @@ class AppConfig:
     # still-running sibling's row FAILED out from under it would be
     # worse than leaving a truly stuck row RUNNING a little longer.
     stale_running_threshold: timedelta
+    # How long each continuously-growing table's rows are kept before
+    # maintenance.retention.run_retention_cleanup deletes them -- see
+    # that module's own docstring for the reasoning behind each default.
+    # Never consulted automatically by the poller itself; cleanup is a
+    # separate, explicitly-invoked operation (see
+    # scripts/run_retention_cleanup.py), not a side effect of an
+    # ordinary poll cycle.
+    raw_payload_retention: timedelta
+    # Only the collector_runs.source_payload column is cleared at this
+    # age -- the row itself (status, counts, timestamps) is cheap and
+    # stays, useful for operational history far longer than the raw
+    # response body it once carried is worth keeping.
+    collector_run_source_payload_retention: timedelta
+    odds_snapshot_retention: timedelta
+    movement_retention: timedelta
+    signal_history_retention: timedelta
 
 
 def load_dotenv(path: Path = DEFAULT_DOTENV_PATH) -> None:
@@ -247,5 +263,20 @@ def load_config() -> AppConfig:
         api_football_key=os.environ.get("API_FOOTBALL_KEY"),
         stale_running_threshold=timedelta(
             minutes=float(os.environ.get("STALE_RUNNING_THRESHOLD_MINUTES", "60"))
+        ),
+        raw_payload_retention=timedelta(
+            days=float(os.environ.get("RAW_PAYLOAD_RETENTION_DAYS", "14"))
+        ),
+        collector_run_source_payload_retention=timedelta(
+            days=float(os.environ.get("COLLECTOR_RUN_SOURCE_PAYLOAD_RETENTION_DAYS", "14"))
+        ),
+        odds_snapshot_retention=timedelta(
+            days=float(os.environ.get("ODDS_SNAPSHOT_RETENTION_DAYS", "90"))
+        ),
+        movement_retention=timedelta(
+            days=float(os.environ.get("MOVEMENT_RETENTION_DAYS", "180"))
+        ),
+        signal_history_retention=timedelta(
+            days=float(os.environ.get("SIGNAL_HISTORY_RETENTION_DAYS", "180"))
         ),
     )

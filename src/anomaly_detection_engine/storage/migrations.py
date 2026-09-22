@@ -974,6 +974,37 @@ def _migration_15_signal_peak_edge_percent(connection: sqlite3.Connection) -> No
     connection.execute("UPDATE signals SET peak_edge_percent = edge_percent")
 
 
+def _migration_16_retention_cleanup_indexes(connection: sqlite3.Connection) -> None:
+    """Adds single-column indexes on every timestamp column
+    maintenance.retention deletes/nulls by. Without these, "delete rows
+    older than N days" on odds_snapshots/raw_payloads -- this project's
+    two largest, continuously-growing tables -- would be a full table
+    scan on every cleanup run: none of the existing indexes have the
+    retention cutoff column as their leading column (idx_odds_event_time
+    is (event_id, observed_at), useless for a plain observed_at < ?
+    scan; idx_signal_history_signal is (signal_id, recorded_at), same
+    problem).
+    """
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_odds_snapshots_observed_at
+            ON odds_snapshots(observed_at);
+
+        CREATE INDEX IF NOT EXISTS idx_raw_payloads_received_at
+            ON raw_payloads(received_at);
+
+        CREATE INDEX IF NOT EXISTS idx_movements_detected_at
+            ON movements(detected_at);
+
+        CREATE INDEX IF NOT EXISTS idx_signal_history_recorded_at
+            ON signal_history(recorded_at);
+
+        CREATE INDEX IF NOT EXISTS idx_collector_runs_finished_at
+            ON collector_runs(finished_at);
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -990,6 +1021,7 @@ MIGRATIONS: list[Migration] = [
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
     _migration_14_signal_history,
     _migration_15_signal_peak_edge_percent,
+    _migration_16_retention_cleanup_indexes,
 ]
 
 

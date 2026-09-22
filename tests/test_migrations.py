@@ -16,6 +16,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
     _migration_14_signal_history,
     _migration_15_signal_peak_edge_percent,
+    _migration_16_retention_cleanup_indexes,
 )
 
 
@@ -831,3 +832,33 @@ def test_migration_15_is_safe_to_re_run():
 
     columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
     assert "peak_edge_percent" in columns
+
+
+def test_migration_16_adds_retention_cleanup_indexes():
+    connection = make_connection()
+    for migration in MIGRATIONS[:15]:
+        migration(connection)
+
+    _migration_16_retention_cleanup_indexes(connection)
+
+    for table, index in [
+        ("odds_snapshots", "idx_odds_snapshots_observed_at"),
+        ("raw_payloads", "idx_raw_payloads_received_at"),
+        ("movements", "idx_movements_detected_at"),
+        ("signal_history", "idx_signal_history_recorded_at"),
+        ("collector_runs", "idx_collector_runs_finished_at"),
+    ]:
+        index_names = {row[1] for row in connection.execute(f"PRAGMA index_list({table})")}
+        assert index in index_names, f"{index} missing on {table}"
+
+
+def test_migration_16_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:15]:
+        migration(connection)
+
+    _migration_16_retention_cleanup_indexes(connection)
+    _migration_16_retention_cleanup_indexes(connection)  # must not raise
+
+    index_names = {row[1] for row in connection.execute("PRAGMA index_list(odds_snapshots)")}
+    assert "idx_odds_snapshots_observed_at" in index_names
