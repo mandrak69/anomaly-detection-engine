@@ -24,6 +24,7 @@ from anomaly_detection_engine.models.collector_run import CollectorRun, Collecto
 from anomaly_detection_engine.models.event import Event, Team
 from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
+    LIVE_MARKET,
     TOTALS_2_5_MARKET,
     EventLifecycle,
     MarketType,
@@ -897,3 +898,82 @@ def test_run_detection_detects_a_totals_surebet_not_just_default_market(monkeypa
     assert len(active) == 1
     assert active[0].market.market_type == MarketType.TOTALS
     assert active[0].market.line == Decimal("2.5")
+
+
+def _save_live_surebet_snapshots(odds_repository, event_id, observed_at):
+    # Shaped like what MozzartFileCollector actually extracts for an
+    # in-play match (see
+    # mozzart_file_collector._resolve_market_and_lifecycle) -- market=
+    # LIVE_MARKET, not DEFAULT_MARKET.
+    for outcome, odds in [("1", "2.50"), ("X", "4.00"), ("2", "4.00")]:
+        odds_repository.save(
+            OddsSnapshot(
+                event_id=event_id,
+                bookmaker=Bookmaker("bet1", "Bet1"),
+                market=LIVE_MARKET,
+                outcome=outcome,
+                odds=Decimal(odds),
+                observed_at=observed_at,
+            )
+        )
+
+
+def test_run_detection_detects_a_live_market_surebet_not_just_pre_match(monkeypatch):
+    # Before LIVE_MARKET was added to DETECTED_MARKETS (see pipeline.py),
+    # run_detection() never once called persist_detected_signals with
+    # market=LIVE_MARKET -- a Mozzart live snapshot was ingested and
+    # stored (see test_mozzart_file_collector.py) but could never produce
+    # a signal, no matter how good the arbitrage, because nothing ever
+    # asked detect_surebet_candidates to look at LIVE_MARKET. This is the
+    # "Mozzart LIVE_MARKET snapshot -> run_detection() -> signal can be
+    # created" proof, mirroring
+    # test_run_detection_detects_a_totals_surebet_not_just_default_market
+    # above for TOTALS_2_5_MARKET.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="mozzart").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    _save_live_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 1
+    active = runtime.signal_repository.find_active("SUREBET")
+    assert len(active) == 1
+    assert active[0].market.phase == LIVE_MARKET.phase
+
+
+def test_run_detection_keeps_live_and_pre_match_surebets_for_the_same_event_separate(
+    monkeypatch,
+):
+    # LIVE_MARKET and DEFAULT_MARKET are distinct MarketIdentity values
+    # for the exact same event -- a pre-match 1X2 price and a live 1X2
+    # price are never the same market (see models.market.MarketPhase), so
+    # both should be independently detectable at once, not merged or
+    # mutually exclusive.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    cfg = config.load_config()
+    runtime = build_runtime(cfg)
+
+    quote_time = datetime.now(UTC) - timedelta(minutes=1)
+    match = FixtureCatalog(runtime.connection, provider_id="mozzart").match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=quote_time,
+    )
+    event = match.event
+    _save_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+    _save_live_surebet_snapshots(runtime.odds_repository, event.id, observed_at=quote_time)
+
+    summary = pipeline.run_detection(runtime, [event], cfg)
+
+    assert summary["active_surebets"] == 2
+    phases = {signal.market.phase for signal in runtime.signal_repository.find_active("SUREBET")}
+    assert phases == {DEFAULT_MARKET.phase, LIVE_MARKET.phase}

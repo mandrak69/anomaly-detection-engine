@@ -28,6 +28,7 @@ from anomaly_detection_engine.models.event import Event
 from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
     HANDICAP_MINUS_1_MARKET,
+    LIVE_MARKET,
     TOTALS_2_5_MARKET,
     EventLifecycle,
     MarketIdentity,
@@ -124,10 +125,20 @@ def resolve_freshness_policy(config: AppConfig) -> FreshnessPolicy:
 # sufficient for detection to happen -- this tuple is what closes that
 # gap; adding a new detected market later is exactly one line here,
 # nothing else in run_detection changes.
+#
+# LIVE_MARKET is included alongside the three PRE_MATCH markets: it's a
+# distinct MarketIdentity (see models.market.MarketPhase), so it gets its
+# own independent surebet/value-gap/movement sweep through the exact
+# same detection code below, never mixed with pre-match odds for the
+# same event. Before this, MozzartFileCollector's LIVE_MARKET snapshots
+# were ingested and stored but silently never reached detection at all --
+# not a missing feature so much as a real gap between what this project
+# collects and what it analyzes.
 DETECTED_MARKETS = (
     DEFAULT_MARKET,
     TOTALS_2_5_MARKET,
     HANDICAP_MINUS_1_MARKET,
+    LIVE_MARKET,
 )
 
 
