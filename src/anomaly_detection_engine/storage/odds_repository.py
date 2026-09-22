@@ -12,8 +12,19 @@ from anomaly_detection_engine.models.market import (
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
+# ON CONFLICT (...) DO NOTHING, not INSERT OR IGNORE: the conflict
+# target below is spelled out to match uq_odds_snapshot_dedupe
+# (migrations.py) column-for-column, expression-for-expression --
+# SQLite only recognizes this as "the same unique index" when the two
+# lists match exactly. This is deliberately narrower than OR IGNORE,
+# which silently swallows *any* constraint violation on this INSERT
+# (a NOT NULL, CHECK, or future FK violation, not just the intended
+# duplicate-snapshot case) -- odds_snapshots has no such other
+# constraint today, so OR IGNORE and this ON CONFLICT behave
+# identically right now, but only one of them stays correct if a later
+# migration adds one.
 _INSERT_SQL = """
-    INSERT OR IGNORE INTO odds_snapshots (
+    INSERT INTO odds_snapshots (
         event_id,
         bookmaker_id,
         bookmaker_name,
@@ -30,6 +41,18 @@ _INSERT_SQL = """
         collector_run_id
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (
+        event_id,
+        bookmaker_id,
+        market_type,
+        market_period,
+        market_phase,
+        COALESCE(market_line, ''),
+        COALESCE(market_rules, ''),
+        COALESCE(market_specifier, ''),
+        outcome,
+        observed_at
+    ) DO NOTHING
 """
 
 # The "latest"/"most current" ordering every selection query below
