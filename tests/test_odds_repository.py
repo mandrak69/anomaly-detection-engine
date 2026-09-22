@@ -1,6 +1,6 @@
 import dataclasses
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from anomaly_detection_engine.models.collector_run import CollectorRun, CollectorRunStatus
@@ -543,6 +543,55 @@ def test_find_last_two_same_provider_treats_unknown_provider_as_matching_unknown
 
     result = repository.find_last_two_same_provider(
         event_id="event-001", bookmaker_id="mozzart", market=MARKET, outcome="1",
+    )
+
+    assert len(result) == 2
+    assert result[0].odds == Decimal("2.20")
+    assert result[1].odds == Decimal("1.90")
+
+
+def test_find_last_two_same_provider_finds_a_match_beyond_the_old_10_row_window():
+    # Regression test for a real limitation: an earlier version of this
+    # query only looked at the 10 most recent readings combined across
+    # every provider, so a genuine same-provider reading older than that
+    # window was missed even though the data existed. 12 other providers'
+    # readings land in between two of "the-odds-api"'s own readings here
+    # -- strictly more than the old window -- and the real previous
+    # same-provider reading must still be found.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    bookmaker = Bookmaker("bet365", "Bet365")
+    save_collector_run(connection, "run-a", "the-odds-api")
+
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("2.20"), observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+            collector_run_id="run-a",
+        )
+    )
+    for i in range(12):
+        run_id = f"run-noise-{i}"
+        save_collector_run(connection, run_id, f"other-provider-{i}")
+        repository.save(
+            OddsSnapshot(
+                event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+                odds=Decimal("2.30"),
+                observed_at=datetime.fromisoformat("2026-08-27T08:01:00+00:00")
+                + timedelta(minutes=i),
+                collector_run_id=run_id,
+            )
+        )
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=bookmaker, market=MARKET, outcome="1",
+            odds=Decimal("1.90"), observed_at=datetime.fromisoformat("2026-08-27T08:20:00+00:00"),
+            collector_run_id="run-a",
+        )
+    )
+
+    result = repository.find_last_two_same_provider(
+        event_id="event-001", bookmaker_id="bet365", market=MARKET, outcome="1",
     )
 
     assert len(result) == 2

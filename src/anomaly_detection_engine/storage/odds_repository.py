@@ -227,13 +227,20 @@ class OddsRepository:
         as before rather than being silently excluded from movement
         detection entirely.
 
-        Looks at only the most recent 10 readings (across every
-        provider combined), not the whole history -- correct as long as
-        a genuine same-provider reading, if one exists, is among the
-        last 10 combined readings, true for any realistic difference in
-        polling cadence between providers.
+        Two queries, not one windowed one: the first finds the single
+        latest reading (any provider) and its provider; the second finds
+        the latest *earlier* reading whose provider matches, searching
+        the full history rather than an arbitrary recent window. An
+        earlier version capped the search at the 10 most recent readings
+        combined across every provider -- correct only as long as a
+        genuine same-provider reading was among those 10, which breaks
+        once enough other providers poll the same event/market/outcome
+        in between (more active bookmakers, tighter POLL_INTERVAL_SECONDS,
+        or simply more providers added over time -- all of which make the
+        10-row window shrink in effective same-provider coverage even
+        though nothing about the underlying data changed).
         """
-        rows = self._connection.execute(
+        latest_rows = self._connection.execute(
             f"""
             SELECT o.*, cr.provider_id AS run_provider_id
             FROM odds_snapshots o
@@ -243,7 +250,7 @@ class OddsRepository:
               AND {_market_identity_where("o")}
               AND o.outcome = ?
             ORDER BY {_latest_order_by("o")}
-            LIMIT 10
+            LIMIT 1
             """,
             (
                 event_id,
@@ -253,21 +260,46 @@ class OddsRepository:
             ),
         ).fetchall()
 
-        if not rows:
+        if not latest_rows:
             return []
 
-        latest_row = rows[0]
+        latest_row = latest_rows[0]
         latest_provider = latest_row["run_provider_id"]
 
-        previous_row = next(
-            (row for row in rows[1:] if row["run_provider_id"] == latest_provider),
-            None,
-        )
+        # "cr.provider_id IS ?" (not "="): SQLite's IS is NULL-safe, so
+        # this matches other unknown-provider rows when latest_provider
+        # itself is None, and matches only the exact provider otherwise
+        # -- "=" would instead make every comparison against a NULL
+        # latest_provider evaluate to NULL (neither true nor false),
+        # silently excluding every candidate.
+        previous_rows = self._connection.execute(
+            f"""
+            SELECT o.*, cr.provider_id AS run_provider_id
+            FROM odds_snapshots o
+            LEFT JOIN collector_runs cr ON cr.id = o.collector_run_id
+            WHERE o.event_id = ?
+              AND o.bookmaker_id = ?
+              AND {_market_identity_where("o")}
+              AND o.outcome = ?
+              AND o.id != ?
+              AND cr.provider_id IS ?
+            ORDER BY {_latest_order_by("o")}
+            LIMIT 1
+            """,
+            (
+                event_id,
+                bookmaker_id,
+                *_market_identity_params(market),
+                outcome,
+                latest_row["id"],
+                latest_provider,
+            ),
+        ).fetchall()
 
-        if previous_row is None:
+        if not previous_rows:
             return [self._map_row(latest_row)]
 
-        return [self._map_row(previous_row), self._map_row(latest_row)]
+        return [self._map_row(previous_rows[0]), self._map_row(latest_row)]
 
     def find_latest_for_market(
         self,
