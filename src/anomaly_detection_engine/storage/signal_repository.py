@@ -90,6 +90,11 @@ class SignalRecord:
     # check status, not just whether this is set, to tell which one
     # actually happened.
     resolved_at: datetime | None
+    # The highest edge_percent seen so far in the *current* episode --
+    # resets to edge_percent on creation/reactivation, otherwise only
+    # ever rises. See _touch/migration 15 for why this is tracked
+    # explicitly rather than re-derived from edge_percent alone.
+    peak_edge_percent: Decimal
 
 
 class SignalRepository:
@@ -293,10 +298,10 @@ class SignalRepository:
             INSERT INTO signals (
                 id, signal_type, event_id, market_type, market_period,
                 market_phase, market_line, market_rules, market_specifier,
-                outcome, status, edge_percent, details,
+                outcome, status, edge_percent, peak_edge_percent, details,
                 first_seen_at, last_seen_at, resolved_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 signal_id,
@@ -310,6 +315,7 @@ class SignalRepository:
                 candidate.market.specifier,
                 candidate.outcome,
                 ACTIVE,
+                str(candidate.edge_percent),
                 str(candidate.edge_percent),
                 json.dumps(candidate.details),
                 observed_at.isoformat(),
@@ -338,32 +344,45 @@ class SignalRepository:
     def _touch(
         self, signal_id: str, existing: Row, candidate: SignalCandidate, observed_at: datetime
     ) -> None:
+        # Not a history row on every routine reconfirmation -- only the
+        # moments worth reconstructing later: this signal was previously
+        # RESOLVED/EXPIRED and is active again (a reopened opportunity,
+        # not a continuous one), or edge_percent just reached a new peak
+        # *within this episode* while it stayed ACTIVE. See migration
+        # 14/15's docstrings for why, and why the comparison is against
+        # peak_edge_percent (the running max), not the previous
+        # edge_percent alone -- 10% -> 8% -> 9% must not record 9% as a
+        # new peak just because it's higher than 8%, the last *touched*
+        # value, when the real peak (10%) was never beaten.
+        previous_status = SignalStatus(existing["status"])
+        if previous_status != ACTIVE:
+            new_peak = candidate.edge_percent
+            event_type: str | None = "reactivated"
+        elif candidate.edge_percent > Decimal(existing["peak_edge_percent"]):
+            new_peak = candidate.edge_percent
+            event_type = "edge_peak"
+        else:
+            new_peak = Decimal(existing["peak_edge_percent"])
+            event_type = None
+
         self._connection.execute(
             """
             UPDATE signals
-            SET status = ?, edge_percent = ?, details = ?, last_seen_at = ?, resolved_at = NULL
+            SET status = ?, edge_percent = ?, peak_edge_percent = ?, details = ?,
+                last_seen_at = ?, resolved_at = NULL
             WHERE id = ?
             """,
             (
                 ACTIVE,
                 str(candidate.edge_percent),
+                str(new_peak),
                 json.dumps(candidate.details),
                 observed_at.isoformat(),
                 signal_id,
             ),
         )
 
-        # Not a history row on every routine reconfirmation -- only the
-        # moments worth reconstructing later: this signal was previously
-        # RESOLVED/EXPIRED and is active again (a reopened opportunity,
-        # not a continuous one), or edge_percent just reached a new peak
-        # while it stayed ACTIVE. See migration 14's docstring for why.
-        previous_status = SignalStatus(existing["status"])
-        if previous_status != ACTIVE:
-            event_type = "reactivated"
-        elif candidate.edge_percent > Decimal(existing["edge_percent"]):
-            event_type = "edge_peak"
-        else:
+        if event_type is None:
             return
 
         self._record_history(
@@ -438,6 +457,7 @@ class SignalRepository:
             resolved_at=(
                 datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None
             ),
+            peak_edge_percent=Decimal(row["peak_edge_percent"]),
         )
 
     def _record_history(

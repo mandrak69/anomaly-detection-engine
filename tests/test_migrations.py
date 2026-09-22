@@ -15,6 +15,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_12_mapping_resolution_audit,
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
     _migration_14_signal_history,
+    _migration_15_signal_peak_edge_percent,
 )
 
 
@@ -792,3 +793,41 @@ def test_migration_14_is_safe_to_re_run():
         for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert "signal_history" in tables
+
+
+def test_migration_15_backfills_peak_edge_percent_from_edge_percent():
+    connection = make_connection()
+    for migration in MIGRATIONS[:14]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO signals (
+            id, signal_type, event_id, market_type, market_period,
+            market_phase, outcome, status, edge_percent, details,
+            first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "signal-1", "SUREBET", "event-1", "three_way", "full_time",
+            "pre_match", None, "ACTIVE", "12.5", "{}",
+            "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    connection.commit()
+
+    _migration_15_signal_peak_edge_percent(connection)
+
+    row = connection.execute("SELECT * FROM signals WHERE id = 'signal-1'").fetchone()
+    assert row["peak_edge_percent"] == "12.5"
+
+
+def test_migration_15_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:14]:
+        migration(connection)
+
+    _migration_15_signal_peak_edge_percent(connection)
+    _migration_15_signal_peak_edge_percent(connection)  # must not raise
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
+    assert "peak_edge_percent" in columns

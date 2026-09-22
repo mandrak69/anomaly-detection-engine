@@ -944,6 +944,36 @@ def _migration_14_signal_history(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_15_signal_peak_edge_percent(connection: sqlite3.Connection) -> None:
+    """Adds signals.peak_edge_percent -- the highest edge_percent seen
+    so far in the *current* ACTIVE episode, tracked explicitly rather
+    than re-derived, so SignalRepository._touch can tell a genuine new
+    peak from a value that's merely higher than whatever the signal
+    happened to be touched with last.
+
+    Migration 14's own "edge_peak" detection compared a new sighting's
+    edge_percent against signals.edge_percent -- the *last recorded*
+    value, not the true peak. 10% -> 8% -> 9% would wrongly record 9%
+    as a new peak (9 > 8) even though the real peak, 10%, was never
+    beaten. peak_edge_percent fixes this by tracking the running max
+    directly: reset to the new sighting's edge_percent whenever a
+    signal is created or reactivated (a new episode has no peak of its
+    own yet), otherwise only raised, never lowered, while the signal
+    stays ACTIVE.
+
+    Backfilled as edge_percent for every existing row (both column's
+    starting values are the same field, so this is a genuine copy, not
+    a fabricated default) -- the best available baseline for a
+    currently-ACTIVE row (this project has no history predating
+    migration 14 to derive a truer peak from), and simply unused going
+    forward for an already-terminal row until it's ever reactivated.
+    """
+    _add_column_if_missing(
+        connection, "signals", "peak_edge_percent", "TEXT NOT NULL", default_sql="'0'"
+    )
+    connection.execute("UPDATE signals SET peak_edge_percent = edge_percent")
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -959,6 +989,7 @@ MIGRATIONS: list[Migration] = [
     _migration_12_mapping_resolution_audit,
     _migration_13_odds_snapshot_and_raw_payload_foreign_keys,
     _migration_14_signal_history,
+    _migration_15_signal_peak_edge_percent,
 ]
 
 

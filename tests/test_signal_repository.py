@@ -110,6 +110,7 @@ def test_first_sighting_creates_an_active_signal():
     assert isinstance(record.status, SignalStatus)  # not a bare str
     assert record.event_id == "e1"
     assert record.edge_percent == Decimal("10.0")
+    assert record.peak_edge_percent == Decimal("10.0")
     assert record.first_seen_at == T0
     assert record.last_seen_at == T0
     assert record.resolved_at is None
@@ -351,6 +352,97 @@ def test_a_new_edge_percent_peak_records_an_edge_peak_history_entry():
     assert [entry.event_type for entry in history] == ["created", "edge_peak"]
     assert history[1].edge_percent == Decimal("15.0")
     assert history[1].recorded_at == t1
+
+
+def test_a_recovery_after_a_dip_below_the_true_peak_is_not_a_new_peak():
+    # Regression test: comparing against the *previous touch's*
+    # edge_percent (8) rather than the true running peak (10) would
+    # wrongly record 9 as a new peak here, even though 10 was never
+    # beaten. 10 -> 8 -> 9.
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+    t2 = T0 + timedelta(minutes=10)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="8.0"))],
+        observed_at=t1, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="9.0"))],
+        observed_at=t2, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    active = repo.find_active(SUREBET)[0]
+    assert active.peak_edge_percent == Decimal("10.0")
+    history = repo.find_history(active.id)
+    assert [entry.event_type for entry in history] == ["created"]
+
+
+def test_a_rise_past_the_true_peak_is_recorded_as_a_new_peak():
+    # 10 -> 8 -> 11: this time the real peak *is* beaten.
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+    t2 = T0 + timedelta(minutes=10)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="8.0"))],
+        observed_at=t1, evaluated_keys=SUREBET_EVALUATED,
+    )
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="11.0"))],
+        observed_at=t2, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    active = repo.find_active(SUREBET)[0]
+    assert active.peak_edge_percent == Decimal("11.0")
+    history = repo.find_history(active.id)
+    assert [entry.event_type for entry in history] == ["created", "edge_peak"]
+    assert history[1].edge_percent == Decimal("11.0")
+
+
+def test_reactivation_starts_a_fresh_peak_for_the_new_episode():
+    # Resolve, reactivate at 5, then rise to 7 -- 7 must be recorded as
+    # the *new episode's* peak, not compared against the previous
+    # episode's peak (which could have been much higher or lower).
+    repo = make_repository()
+    t1 = T0 + timedelta(minutes=5)
+    t2 = T0 + timedelta(minutes=10)
+    t3 = T0 + timedelta(minutes=15)
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="10.0"))],
+        observed_at=T0, evaluated_keys=SUREBET_EVALUATED,
+    )
+    signal_id = repo.find_active(SUREBET)[0].id
+    repo.reconcile(SUREBET, [], observed_at=t1, evaluated_keys=SUREBET_EVALUATED)
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="5.0"))],
+        observed_at=t2, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    reactivated = repo.find_active(SUREBET)[0]
+    assert reactivated.peak_edge_percent == Decimal("5.0")  # not 10.0 from the old episode
+
+    repo.reconcile(
+        SUREBET, [from_surebet(surebet_candidate(profit="7.0"))],
+        observed_at=t3, evaluated_keys=SUREBET_EVALUATED,
+    )
+
+    active = repo.find_active(SUREBET)[0]
+    assert active.peak_edge_percent == Decimal("7.0")
+    history = repo.find_history(signal_id)
+    assert [entry.event_type for entry in history] == [
+        "created", "resolved", "reactivated", "edge_peak",
+    ]
+    assert history[3].edge_percent == Decimal("7.0")
 
 
 def test_resolving_a_signal_records_a_resolved_history_entry():
