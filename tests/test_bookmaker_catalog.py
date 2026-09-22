@@ -23,6 +23,44 @@ def test_normalize_bookmaker_name_collapses_case_whitespace_and_punctuation():
     assert normalize_bookmaker_name("  Bet365  ") == "bet365"
 
 
+def test_normalize_bookmaker_name_is_unicode_safe_for_non_latin_scripts():
+    # Regression test: the previous ASCII-only [a-z0-9] regex stripped
+    # every non-Latin-script character entirely, collapsing these two
+    # genuinely distinct real Cyrillic bookmaker names to the same empty
+    # string -- since bookmakers.normalized_name is UNIQUE, that would
+    # have silently merged two unrelated bookmakers into one identity.
+    melbet = normalize_bookmaker_name("Мелбет")
+    fonbet = normalize_bookmaker_name("Фонбет")
+
+    assert melbet != ""
+    assert fonbet != ""
+    assert melbet != fonbet
+
+
+def test_normalize_bookmaker_name_is_case_insensitive_for_cyrillic():
+    assert normalize_bookmaker_name("Мелбет") == normalize_bookmaker_name("МЕЛБЕТ")
+    assert normalize_bookmaker_name("Мелбет") == normalize_bookmaker_name("мелбет")
+
+
+def test_two_distinct_cyrillic_bookmakers_resolve_to_two_canonical_ids():
+    connection = _connection()
+    catalog = BookmakerCatalog(connection, provider_id="some-provider")
+
+    melbet = catalog.resolve(source_bookmaker_id=None, source_name="Мелбет")
+    fonbet = catalog.resolve(source_bookmaker_id=None, source_name="Фонбет")
+
+    assert melbet.id != fonbet.id
+    assert melbet.name == "Мелбет"
+    assert fonbet.name == "Фонбет"
+
+
+def test_normalize_bookmaker_name_folds_unicode_compatibility_forms():
+    # NFKC folds full-width Unicode digit/letter forms onto their plain
+    # ASCII equivalents, the same reasoning team_normalizer's own
+    # comparison key already applies.
+    assert normalize_bookmaker_name("Ｂｅｔ３６５") == normalize_bookmaker_name("Bet365")
+
+
 def test_two_providers_reporting_the_same_bookmaker_resolve_to_one_canonical_id():
     connection = _connection()
     the_odds_api = BookmakerCatalog(connection, provider_id="the-odds-api")

@@ -1,13 +1,11 @@
 import logging
-import re
+import unicodedata
 from sqlite3 import Connection, Row
 from uuid import uuid4
 
 from anomaly_detection_engine.models.odds import Bookmaker
 
 logger = logging.getLogger(__name__)
-
-_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_bookmaker_name(name: str) -> str:
@@ -18,8 +16,22 @@ def normalize_bookmaker_name(name: str) -> str:
     a wrong auto-merge here would permanently contaminate consensus/
     outlier math across every provider, unlike a harmless duplicate
     canonical bookmaker.
+
+    NFKC-normalizes and casefolds before keeping only alphanumeric
+    characters -- str.isalnum() is Unicode-aware, unlike an ASCII-only
+    [a-z0-9] regex (this function's own previous implementation), which
+    stripped every non-Latin-script character entirely. Two genuinely
+    different bookmakers with non-Latin names (e.g. Cyrillic "Мелбет"
+    and "Фонбет") both normalized to the same empty string under that
+    regex -- since bookmakers.normalized_name is UNIQUE and is exactly
+    what canonical bookmaker identity is keyed on, that collision would
+    have silently merged two real, unrelated bookmakers into one
+    identity, corrupting cross-provider consensus/outlier math for both
+    (see this class's own docstring for why that's the one thing this
+    catalog exists to prevent).
     """
-    return _NON_ALPHANUMERIC.sub("", name.strip().casefold())
+    normalized = unicodedata.normalize("NFKC", name.strip()).casefold()
+    return "".join(ch for ch in normalized if ch.isalnum())
 
 
 class BookmakerCatalog:
