@@ -169,6 +169,13 @@ def test_recover_stale_running_leaves_a_recent_running_row_alone():
 
 
 def test_recover_stale_running_does_not_touch_already_finished_runs():
+    # started_at here comfortably satisfies the staleness threshold on
+    # its own -- this row is only spared because status != RUNNING,
+    # which is exactly the race the single atomic UPDATE (status AND
+    # started_at re-checked together, in the same statement that writes
+    # the new status) exists to close: a row finish()ed by its own
+    # process between an earlier read and a later write must never be
+    # overwritten with FAILED. See recover_stale_running's own docstring.
     connection = create_test_connection()
     repository = CollectorRunRepository(connection)
     repository.save(_make_run("run-done", "mozzart-file:mozzart", datetime(2026, 1, 1, tzinfo=UTC)))
@@ -182,6 +189,42 @@ def test_recover_stale_running_does_not_touch_already_finished_runs():
     found = repository.find_by_id("run-done")
     assert found is not None
     assert found.status == CollectorRunStatus.SUCCESS
+
+
+def test_recover_stale_running_never_overwrites_a_failed_runs_own_details():
+    # A run that legitimately failed on its own (a real collector error,
+    # not an interrupted process) already has its own error_type/
+    # error_message -- recover_stale_running must never touch a non-
+    # RUNNING row, even one whose own status happens to be FAILED
+    # already, or it would stamp over the real failure reason with
+    # "process_interrupted".
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+    repository.save(
+        CollectorRun(
+            id="run-failed",
+            source="the-odds-api:soccer_epl",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+            status=CollectorRunStatus.FAILED,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            error_type="TheOddsApiError",
+            error_message="The Odds API request failed with HTTP 401: invalid key",
+        )
+    )
+
+    recovered = repository.recover_stale_running(
+        older_than=datetime(2026, 9, 22, 9, 0, 0, tzinfo=UTC),
+        recovered_at=datetime(2026, 9, 22, 9, 30, 0, tzinfo=UTC),
+    )
+
+    assert recovered == []
+    found = repository.find_by_id("run-failed")
+    assert found is not None
+    assert found.error_type == "TheOddsApiError"
+    assert found.error_message == "The Odds API request failed with HTTP 401: invalid key"
 
 
 def test_find_by_id_returns_none_when_missing():

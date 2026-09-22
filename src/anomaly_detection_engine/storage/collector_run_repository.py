@@ -144,41 +144,43 @@ class CollectorRunRepository:
 
         Returns the recovered run ids, purely so the caller can log them
         -- this method already persists the change itself.
+
+        One atomic UPDATE ... WHERE status = 'running' AND started_at < ?,
+        not a SELECT followed by a separate UPDATE-by-id: with multiple
+        processes sharing this database, a row that was RUNNING when the
+        SELECT read it could have been finish()ed by its own process
+        (moved to SUCCESS/PARTIAL/FAILED) in the gap before a later,
+        separate UPDATE applied -- overwriting a legitimate result with
+        a wrong FAILED/"process_interrupted" verdict. Re-checking
+        `status = 'running'` as part of the same UPDATE that changes it
+        closes that gap: a row can only be caught by this statement if
+        it is still RUNNING at the exact moment SQLite applies the
+        write, the same guarantee RETURNING then reads back from.
         """
-        stale_ids = [
-            row["id"]
-            for row in self._connection.execute(
-                "SELECT id FROM collector_runs WHERE status = ? AND started_at < ?",
-                (CollectorRunStatus.RUNNING.value, older_than.isoformat()),
-            ).fetchall()
-        ]
+        rows = self._connection.execute(
+            """
+            UPDATE collector_runs SET
+                status = ?,
+                finished_at = ?,
+                error_type = ?,
+                error_message = ?
+            WHERE status = ? AND started_at < ?
+            RETURNING id
+            """,
+            (
+                CollectorRunStatus.FAILED.value,
+                recovered_at.isoformat(),
+                "process_interrupted",
+                "Left in RUNNING state past process startup -- the process "
+                "that started this run likely crashed or was killed before "
+                "reaching finish() (see recover_stale_running).",
+                CollectorRunStatus.RUNNING.value,
+                older_than.isoformat(),
+            ),
+        ).fetchall()
+        self._connection.commit()
 
-        if stale_ids:
-            self._connection.executemany(
-                """
-                UPDATE collector_runs SET
-                    status = ?,
-                    finished_at = ?,
-                    error_type = ?,
-                    error_message = ?
-                WHERE id = ?
-                """,
-                [
-                    (
-                        CollectorRunStatus.FAILED.value,
-                        recovered_at.isoformat(),
-                        "process_interrupted",
-                        "Left in RUNNING state past process startup -- the process "
-                        "that started this run likely crashed or was killed before "
-                        "reaching finish() (see recover_stale_running).",
-                        run_id,
-                    )
-                    for run_id in stale_ids
-                ],
-            )
-            self._connection.commit()
-
-        return stale_ids
+        return [row["id"] for row in rows]
 
     def find_by_id(self, run_id: str) -> CollectorRun | None:
         row = self._connection.execute(
