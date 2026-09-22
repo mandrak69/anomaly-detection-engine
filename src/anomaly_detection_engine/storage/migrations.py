@@ -315,6 +315,20 @@ def _add_column_if_missing(
         )
 
 
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    """The sqlite_master check a table-rebuild migration needs to be
+    resumable from any interruption point (see
+    _migration_11_collector_run_running_status) -- "CREATE TABLE IF NOT
+    EXISTS" covers re-running a CREATE safely, but DROP TABLE/ALTER
+    TABLE ... RENAME TO have no equivalent conditional form, so each step
+    of a rebuild needs its own explicit existence check instead.
+    """
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
 def _migration_3_competitions(connection: sqlite3.Connection) -> None:
     """Adds the canonical competition registry FixtureCatalog uses to
     resolve raw league/competition strings the same way it already
@@ -561,16 +575,24 @@ def _migration_8_odds_snapshot_provenance(connection: sqlite3.Connection) -> Non
     API-Football poll" was unanswerable without guessing from timing.
 
     Deliberately NOT a SQL foreign key (unlike the REFERENCES columns
-    migration 3/7 added): OddsIngestionService.run() generates its own
-    run_id and starts saving odds_snapshots rows against it *before* the
-    matching collector_runs row is written (that only happens at the
-    very end, in _record_run()) -- a real FK constraint, with this
-    project's connections running with PRAGMA foreign_keys = ON, would
-    reject every snapshot insert since the parent row doesn't exist yet
-    at that point. odds_snapshots.event_id/bookmaker_id already follow
-    this same "plain TEXT, no REFERENCES" precedent for an unrelated
-    reason (see migration 1); this column follows it for its own,
-    ordering-specific reason.
+    migration 3/7 added): at the time this migration shipped,
+    OddsIngestionService.run() generated its own run_id and started
+    saving odds_snapshots rows against it *before* the matching
+    collector_runs row was written (that only happened at the very end)
+    -- a real FK constraint, with this project's connections running
+    with PRAGMA foreign_keys = ON, would have rejected every snapshot
+    insert since the parent row didn't exist yet at that point.
+    odds_snapshots.event_id/bookmaker_id already follow this same "plain
+    TEXT, no REFERENCES" precedent for an unrelated reason (see
+    migration 1); this column followed it for its own, ordering-specific
+    reason.
+
+    Migration 11 later closed that ordering gap (the collector_runs row
+    is now written as RUNNING before any snapshot referencing it), which
+    is what makes a real FK possible here -- not added in that same pass
+    though: that would mean rebuilding this project's two biggest tables
+    (odds_snapshots, raw_payloads), deliberately left for a separate,
+    more carefully considered migration rather than bundled in.
 
     Nullable and left unbackfilled for existing rows, the same reasoning
     migration 6's own nullable columns used: no row written before this
@@ -648,6 +670,75 @@ def _migration_10_source_event_mappings(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_11_collector_run_running_status(connection: sqlite3.Connection) -> None:
+    """Relaxes collector_runs.finished_at from NOT NULL to nullable, so a
+    row can be inserted while a run is still in progress (status=RUNNING,
+    finished_at=None) and updated in place once it finishes -- see
+    CollectorRunStatus.RUNNING, CollectorRun.finished_at,
+    CollectorRunRepository.start()/finish(), and
+    OddsIngestionService.run().
+
+    Before this, OddsIngestionService.run() generated its own run_id up
+    front but only ever wrote the matching collector_runs row at the
+    very end (via what is now CollectorRunRepository.save()) -- every
+    odds_snapshots/raw_payloads row this run produced was written with
+    that run_id in the meantime, referencing a run that, if the process
+    had died before reaching that final write, would never have existed
+    at all (see migration 8's docstring, which documents this exact
+    ordering and why collector_run_id deliberately isn't a SQL foreign
+    key). Starting the row as RUNNING closes that window: from this
+    migration forward, every snapshot/raw-payload row is written only
+    after its run's own row already exists, so a crash mid-run leaves an
+    honestly-stuck RUNNING row behind (observable, not silently missing)
+    rather than a snapshot pointing at nothing.
+
+    SQLite has no ALTER TABLE ... ALTER COLUMN to drop a NOT NULL
+    constraint, so the table is rebuilt: a new table under the relaxed
+    schema, existing rows copied across, the old table dropped, the new
+    one renamed into place. Every step is guarded by a Python-level
+    sqlite_master check (not just "IF NOT EXISTS" in the SQL, which
+    doesn't cover DROP/RENAME the same way `_add_column_if_missing`'s
+    ALTER guard covers ADD COLUMN) so a crash between any two steps
+    converges to the same end state on retry -- the same idempotency
+    discipline every migration here follows, just applied to a rebuild
+    instead of a single ALTER/CREATE. collector_runs is small (nowhere
+    near the size of odds_snapshots), so a full rebuild costs nothing
+    worth optimizing away.
+    """
+    if not _table_exists(connection, "collector_runs_new"):
+        connection.execute(
+            """
+            CREATE TABLE collector_runs_new (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                records_received INTEGER NOT NULL,
+                records_accepted INTEGER NOT NULL,
+                records_rejected INTEGER NOT NULL,
+                collector_version TEXT,
+                error_type TEXT,
+                error_message TEXT,
+                provider_id TEXT,
+                parser_version TEXT,
+                source_payload TEXT
+            )
+            """
+        )
+
+    if _table_exists(connection, "collector_runs"):
+        connection.execute(
+            "INSERT OR IGNORE INTO collector_runs_new SELECT * FROM collector_runs"
+        )
+        connection.execute("DROP TABLE collector_runs")
+
+    connection.execute("ALTER TABLE collector_runs_new RENAME TO collector_runs")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_collector_runs_source ON collector_runs(source, started_at)"
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -659,6 +750,7 @@ MIGRATIONS: list[Migration] = [
     _migration_8_odds_snapshot_provenance,
     _migration_9_event_status,
     _migration_10_source_event_mappings,
+    _migration_11_collector_run_running_status,
 ]
 
 

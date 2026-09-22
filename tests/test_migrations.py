@@ -9,6 +9,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_4_market_phase,
     _migration_5_event_competition_id,
     _migration_6_collector_run_provenance,
+    _migration_11_collector_run_running_status,
 )
 
 
@@ -322,3 +323,149 @@ def test_migration_6_is_safe_to_re_run():
 
     columns = {row[1] for row in connection.execute("PRAGMA table_info(collector_runs)")}
     assert {"provider_id", "parser_version", "source_payload"} <= columns
+
+
+def test_migration_11_preserves_existing_collector_runs_rows():
+    connection = make_connection()
+    initialize_database(connection)  # up through migration 10
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected,
+            collector_version, provider_id, parser_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-1", "mozzart-file:mozzart", "2026-01-01T00:00:00+00:00",
+         "2026-01-01T00:00:04+00:00", "success", 3, 3, 0, "0.1.0", "mozzart", "1"),
+    )
+    connection.commit()
+
+    _migration_11_collector_run_running_status(connection)
+
+    row = connection.execute("SELECT * FROM collector_runs WHERE id = 'run-1'").fetchone()
+    assert row is not None
+    assert row["source"] == "mozzart-file:mozzart"
+    assert row["finished_at"] == "2026-01-01T00:00:04+00:00"
+    assert row["status"] == "success"
+    assert row["records_received"] == 3
+    assert row["provider_id"] == "mozzart"
+
+
+def test_migration_11_allows_a_null_finished_at():
+    # The entire point of this migration -- a RUNNING row (see
+    # CollectorRunStatus.RUNNING) has no finished_at yet. Before this
+    # migration, finished_at was NOT NULL and this insert would raise
+    # sqlite3.IntegrityError.
+    connection = make_connection()
+    initialize_database(connection)
+
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-1", "mozzart-file:mozzart", "2026-01-01T00:00:00+00:00",
+         None, "running", 0, 0, 0),
+    )
+    connection.commit()
+
+    row = connection.execute("SELECT * FROM collector_runs WHERE id = 'run-1'").fetchone()
+    assert row["finished_at"] is None
+    assert row["status"] == "running"
+
+
+def test_migration_11_preserves_the_source_started_at_index():
+    connection = make_connection()
+    initialize_database(connection)
+
+    index_names = {
+        row[1]
+        for row in connection.execute("PRAGMA index_list(collector_runs)")
+    }
+    assert "idx_collector_runs_source" in index_names
+
+
+def test_migration_11_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:10]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-1", "mozzart-file:mozzart", "2026-01-01T00:00:00+00:00",
+         "2026-01-01T00:00:04+00:00", "success", 3, 3, 0),
+    )
+    connection.commit()
+
+    _migration_11_collector_run_running_status(connection)
+    _migration_11_collector_run_running_status(connection)  # must not raise
+
+    row = connection.execute("SELECT * FROM collector_runs WHERE id = 'run-1'").fetchone()
+    assert row is not None
+    assert row["source"] == "mozzart-file:mozzart"
+
+
+def test_migration_11_recovers_from_an_interruption_after_copy_before_drop():
+    # Simulates a crash between the copy-into-collector_runs_new step and
+    # the drop-old/rename step -- both collector_runs and
+    # collector_runs_new exist at once, exactly like a real interrupted
+    # run would leave things. Re-running must still converge on one
+    # correct final collector_runs table with the row intact.
+    connection = make_connection()
+    for migration in MIGRATIONS[:10]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO collector_runs (
+            id, source, started_at, finished_at, status,
+            records_received, records_accepted, records_rejected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-1", "mozzart-file:mozzart", "2026-01-01T00:00:00+00:00",
+         "2026-01-01T00:00:04+00:00", "success", 3, 3, 0),
+    )
+    connection.commit()
+
+    connection.execute(
+        """
+        CREATE TABLE collector_runs_new (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            records_received INTEGER NOT NULL,
+            records_accepted INTEGER NOT NULL,
+            records_rejected INTEGER NOT NULL,
+            collector_version TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            provider_id TEXT,
+            parser_version TEXT,
+            source_payload TEXT
+        )
+        """
+    )
+    connection.execute("INSERT INTO collector_runs_new SELECT * FROM collector_runs")
+    connection.commit()
+
+    _migration_11_collector_run_running_status(connection)
+
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert "collector_runs_new" not in tables
+    assert "collector_runs" in tables
+    rows = connection.execute("SELECT * FROM collector_runs").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "run-1"

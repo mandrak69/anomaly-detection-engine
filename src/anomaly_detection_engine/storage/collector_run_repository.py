@@ -9,6 +9,14 @@ class CollectorRunRepository:
         self._connection = connection
 
     def save(self, run: CollectorRun) -> None:
+        """Inserts a full, already-final CollectorRun row in one shot --
+        for a caller (test, one-off script) building a complete record
+        directly rather than living through the RUNNING -> final
+        two-phase lifecycle. OddsIngestionService.run() itself never
+        calls this: it uses start()/finish() instead, specifically so
+        the row exists (as RUNNING) before any odds_snapshots/
+        raw_payloads row referencing it is written -- see those methods.
+        """
         self._connection.execute(
             """
             INSERT INTO collector_runs (
@@ -33,6 +41,60 @@ class CollectorRunRepository:
                 run.id,
                 run.source,
                 run.started_at.isoformat(),
+                run.finished_at.isoformat() if run.finished_at else None,
+                run.status.value,
+                run.records_received,
+                run.records_accepted,
+                run.records_rejected,
+                run.collector_version,
+                run.error_type,
+                run.error_message,
+                run.provider_id,
+                run.parser_version,
+                run.source_payload,
+            ),
+        )
+        self._connection.commit()
+
+    def start(self, run: CollectorRun) -> None:
+        """Inserts a new CollectorRun row while the run is still in
+        progress -- run.status must be RUNNING and run.finished_at must
+        be None. Called once, at the very start of
+        OddsIngestionService.run(), before any odds_snapshots/
+        raw_payloads row referencing this run_id is written, so those
+        rows' FK (migration 11) is always backed by a real parent row
+        from the moment they're inserted, never pointing at a run_id
+        that doesn't exist in this table yet.
+        """
+        assert run.status == CollectorRunStatus.RUNNING
+        assert run.finished_at is None
+        self.save(run)
+
+    def finish(self, run: CollectorRun) -> None:
+        """Updates the existing RUNNING row (inserted by start(), same
+        run.id) to its final status/counts/finished_at -- an UPDATE, not
+        a second INSERT, since the row already exists. run.status must
+        not be RUNNING and run.finished_at must be set.
+        """
+        assert run.status != CollectorRunStatus.RUNNING
+        assert run.finished_at is not None
+        self._connection.execute(
+            """
+            UPDATE collector_runs SET
+                finished_at = ?,
+                status = ?,
+                records_received = ?,
+                records_accepted = ?,
+                records_rejected = ?,
+                collector_version = ?,
+                error_type = ?,
+                error_message = ?,
+                provider_id = ?,
+                parser_version = ?,
+                source_payload = ?
+            WHERE id = ?
+            """,
+            (
                 run.finished_at.isoformat(),
                 run.status.value,
                 run.records_received,
@@ -44,6 +106,7 @@ class CollectorRunRepository:
                 run.provider_id,
                 run.parser_version,
                 run.source_payload,
+                run.id,
             ),
         )
         self._connection.commit()
@@ -78,7 +141,7 @@ class CollectorRunRepository:
             id=row["id"],
             source=row["source"],
             started_at=datetime.fromisoformat(row["started_at"]),
-            finished_at=datetime.fromisoformat(row["finished_at"]),
+            finished_at=datetime.fromisoformat(row["finished_at"]) if row["finished_at"] else None,
             status=CollectorRunStatus(row["status"]),
             records_received=row["records_received"],
             records_accepted=row["records_accepted"],

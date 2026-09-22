@@ -147,6 +147,65 @@ def test_successful_run_persists_snapshots():
     assert all(s.collector_run_id == run.id for s in snapshots)
 
 
+class PeekingCollector(OddsCollector):
+    """Regression test double for the RUNNING-status ordering fix
+    (migration 11): collect() itself peeks at collector_run_repository
+    to prove the run's own CollectorRun row already exists -- as
+    RUNNING, with no finished_at -- by the time collect() is called,
+    not just once run() finishes. Before that fix, this row was only
+    ever written at the very end of run(), so this same check would
+    have found nothing at all at this point.
+    """
+
+    def __init__(self, collector_run_repository: CollectorRunRepository):
+        self._collector_run_repository = collector_run_repository
+        self.observed_run: object = "not called yet"
+
+    @property
+    def source(self) -> str:
+        return "peeking-stub"
+
+    @property
+    def provider_id(self) -> str:
+        return "peeking-stub"
+
+    @property
+    def parser_version(self) -> str:
+        return "1"
+
+    def collect(self) -> CollectionResult:
+        self.observed_run = self._collector_run_repository.find_latest_by_source(self.source)
+        return CollectionResult(source_payload=None, records=[], complete=True)
+
+
+def test_the_collector_runs_row_already_exists_as_running_before_collect_is_called():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    collector_run_repository = CollectorRunRepository(connection)
+    collector = PeekingCollector(collector_run_repository)
+
+    service = OddsIngestionService(
+        collector=collector,
+        matcher=build_matcher(),
+        odds_repository=OddsRepository(connection),
+        collector_run_repository=collector_run_repository,
+        raw_payload_repository=RawPayloadRepository(connection),
+        bookmaker_catalog=BookmakerCatalog(connection, provider_id="test"),
+    )
+
+    run = service.run()
+
+    assert collector.observed_run is not None
+    assert collector.observed_run.status == CollectorRunStatus.RUNNING
+    assert collector.observed_run.finished_at is None
+    assert collector.observed_run.id == run.id
+    # And by the time run() returns, that same row has moved on to a
+    # final status -- finish() updated it in place, not a second row.
+    assert run.status == CollectorRunStatus.SUCCESS
+    assert connection.execute("SELECT COUNT(*) FROM collector_runs").fetchone()[0] == 1
+
+
 def test_successful_run_persists_provenance_metadata_on_the_collector_run():
     # provider_id/parser_version/source_payload let a future reprocessing
     # script know which parser to re-run against exactly which historical

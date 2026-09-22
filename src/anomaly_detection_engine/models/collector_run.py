@@ -4,6 +4,15 @@ from enum import StrEnum
 
 
 class CollectorRunStatus(StrEnum):
+    # A run's initial, transient state: the row exists (see
+    # storage.collector_run_repository.CollectorRunRepository.start())
+    # from the moment ingestion begins, specifically so every
+    # odds_snapshots/raw_payloads row this run produces can carry a real
+    # SQL foreign key to it from the instant those rows are written, not
+    # just once the run happens to finish (see OddsIngestionService.run()
+    # and migration 11). Never a final status -- .finish() always moves
+    # a row on to SUCCESS/PARTIAL/FAILED.
+    RUNNING = "running"
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
@@ -14,11 +23,14 @@ class CollectorRun:
     id: str
     source: str
     started_at: datetime
-    finished_at: datetime
     status: CollectorRunStatus
     records_received: int
     records_accepted: int
     records_rejected: int
+    # None while status is RUNNING; set once the run reaches a final
+    # status (SUCCESS/PARTIAL/FAILED) -- see
+    # OddsIngestionService.run()/CollectorRunRepository.finish().
+    finished_at: datetime | None = None
     collector_version: str | None = None
     error_type: str | None = None
     error_message: str | None = None
@@ -37,6 +49,11 @@ class CollectorRun:
 
     @property
     def duration_seconds(self) -> float:
+        if self.finished_at is None:
+            raise ValueError(
+                "duration_seconds is undefined for a RUNNING run -- finished_at "
+                "is only set once the run reaches a final status."
+            )
         return (self.finished_at - self.started_at).total_seconds()
 
     @property

@@ -77,6 +77,28 @@ class OddsIngestionService:
 
         logger.info("ingestion.run.started", extra={"run_id": run_id, "source": source})
 
+        # Written as RUNNING *before* collect()/_ingest_one() ever runs --
+        # every odds_snapshots/raw_payloads row this run produces is only
+        # written after this row already exists, closing the window
+        # migration 8's docstring/collector_run_id describes (previously,
+        # this row was only ever written at the very end, by what is now
+        # _finish_run(); a crash before that point left snapshots
+        # referencing a run_id that had never been recorded at all).
+        self._collector_run_repository.start(
+            CollectorRun(
+                id=run_id,
+                source=source,
+                started_at=started_at,
+                status=CollectorRunStatus.RUNNING,
+                records_received=0,
+                records_accepted=0,
+                records_rejected=0,
+                collector_version=self._collector_version,
+                provider_id=self._collector.provider_id,
+                parser_version=self._collector.parser_version,
+            )
+        )
+
         try:
             collection = self._collector.collect()
         except Exception as exc:
@@ -230,13 +252,14 @@ class OddsIngestionService:
         must always reach a final state.
 
         run_id is stamped onto every OddsSnapshot this record produces
-        (see OddsSnapshot.collector_run_id) even though the matching
-        collector_runs row for it doesn't exist yet at this point in
-        run() -- it's only written at the very end, by _record_run().
-        That ordering is exactly why this column has no SQL foreign key
-        (see migration 8): the value is correct and stable (run_id is
-        generated once, up front, in run()), just not yet backed by a
-        parent row when these inserts happen.
+        (see OddsSnapshot.collector_run_id). The matching collector_runs
+        row already exists by this point -- run() writes it as RUNNING
+        before ever calling this -- but the column still isn't declared
+        as a SQL foreign key (see migration 8): that would need
+        odds_snapshots.collector_run_id and raw_payloads.collector_run_id
+        both rebuilt with a REFERENCES clause, a larger change (this
+        project's two biggest tables) deliberately left for a separate
+        pass rather than bundled into the RUNNING-status fix itself.
         """
         try:
             validation = validate_raw_event_odds(raw)
@@ -360,7 +383,9 @@ class OddsIngestionService:
             parser_version=self._collector.parser_version,
             source_payload=source_payload,
         )
-        self._collector_run_repository.save(run)
+        # UPDATE, not a second INSERT -- the row already exists as
+        # RUNNING (written at the top of run()).
+        self._collector_run_repository.finish(run)
 
         logger.info(
             "ingestion.run.completed",

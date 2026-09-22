@@ -41,6 +41,73 @@ def test_saves_and_finds_collector_run():
     assert found.duration_seconds == 4.0
 
 
+def test_start_inserts_a_running_row_with_no_finished_at():
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+
+    repository.start(
+        CollectorRun(
+            id="run-1",
+            source="mozzart-file:mozzart",
+            started_at=datetime(2026, 9, 22, 8, 0, 0, tzinfo=UTC),
+            status=CollectorRunStatus.RUNNING,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            provider_id="mozzart",
+        )
+    )
+
+    found = repository.find_by_id("run-1")
+    assert found is not None
+    assert found.status == CollectorRunStatus.RUNNING
+    assert found.finished_at is None
+    assert found.provider_id == "mozzart"
+
+
+def test_finish_updates_the_existing_running_row_in_place():
+    # Proves finish() is an UPDATE, not a second INSERT -- start() then
+    # finish() on the same run.id must leave exactly one row, with the
+    # RUNNING row's original started_at preserved.
+    connection = create_test_connection()
+    repository = CollectorRunRepository(connection)
+    started_at = datetime(2026, 9, 22, 8, 0, 0, tzinfo=UTC)
+
+    repository.start(
+        CollectorRun(
+            id="run-1",
+            source="mozzart-file:mozzart",
+            started_at=started_at,
+            status=CollectorRunStatus.RUNNING,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+        )
+    )
+    repository.finish(
+        CollectorRun(
+            id="run-1",
+            source="mozzart-file:mozzart",
+            started_at=started_at,
+            finished_at=datetime(2026, 9, 22, 8, 0, 4, tzinfo=UTC),
+            status=CollectorRunStatus.SUCCESS,
+            records_received=5,
+            records_accepted=5,
+            records_rejected=0,
+        )
+    )
+
+    found = repository.find_by_id("run-1")
+    assert found is not None
+    assert found.status == CollectorRunStatus.SUCCESS
+    assert found.finished_at is not None
+    assert found.records_accepted == 5
+    assert found.started_at == started_at
+
+    all_rows = connection.execute("SELECT COUNT(*) FROM collector_runs").fetchone()[0]
+    assert all_rows == 1
+
+
 def test_find_by_id_returns_none_when_missing():
     connection = create_test_connection()
     repository = CollectorRunRepository(connection)
