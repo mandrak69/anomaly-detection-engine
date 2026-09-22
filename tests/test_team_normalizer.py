@@ -185,6 +185,34 @@ def test_case_insensitive_alias_match():
     assert result.method == "alias"
 
 
+def test_alias_target_resolves_to_the_existing_canonical_names_own_spelling():
+    # The alias's own target string ("MANCHESTER UNITED") differs from
+    # the real existing canonical row ("Manchester United") only by
+    # case -- returning the alias's raw target as-is would make
+    # FixtureCatalog's exact, non-normalized `existing.get(...)` lookup
+    # miss and create a needless duplicate team.
+    normalizer = TeamNormalizer(
+        ["Manchester United"], aliases={"Man Utd": "MANCHESTER UNITED"}
+    )
+
+    result = normalizer.normalize("Man Utd")
+
+    assert result.canonical_name == "Manchester United"  # the existing row's own spelling
+    assert result.method == "alias"
+
+
+def test_alias_target_with_no_existing_match_falls_back_to_its_own_spelling():
+    # No existing canonical team matches the alias target at all yet --
+    # falls back to the alias's own target string exactly as before,
+    # so FixtureCatalog creates a brand-new team under that spelling.
+    normalizer = TeamNormalizer([], aliases={"Man Utd": "Manchester United"})
+
+    result = normalizer.normalize("Man Utd")
+
+    assert result.canonical_name == "Manchester United"
+    assert result.method == "alias"
+
+
 def test_differently_cased_acronym_still_expands_via_token_alias():
     normalizer = TeamNormalizer(
         ["United Arab Emirates U23"],

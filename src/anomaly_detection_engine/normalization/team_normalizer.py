@@ -91,7 +91,23 @@ class TeamNormalizer:
 
         alias_match = self._alias_by_key.get(candidate_key)
         if alias_match:
-            return NormalizationResult(candidate, alias_match, 100.0, "alias")
+            # An alias's own target string is whatever the caller wrote
+            # in the aliases dict ("Man Utd": "MANCHESTER UNITED"),
+            # which is not necessarily spelled exactly like the existing
+            # canonical row it's supposed to point at ("Manchester
+            # United") -- without resolving through the same comparison
+            # key used everywhere else here, FixtureCatalog's own exact,
+            # non-normalized `existing.get(canonical_name)` lookup would
+            # miss and create a needless duplicate team differing from
+            # the real one only by case/whitespace/Unicode form. Falls
+            # back to the alias's own target string when nothing
+            # existing matches it yet (the alias's first-ever use, or a
+            # target that genuinely doesn't exist as a team row yet --
+            # both already handled downstream in FixtureCatalog).
+            resolved_target = self._canonical_name_by_key.get(
+                _comparison_key(alias_match), alias_match
+            )
+            return NormalizationResult(candidate, resolved_target, 100.0, "alias")
 
         # token_sort_ratio, not WRatio: WRatio's internal partial/token-set
         # blending scores two names sharing just one short common token

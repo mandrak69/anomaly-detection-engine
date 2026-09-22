@@ -259,6 +259,38 @@ def test_alias_merges_a_never_before_seen_spelling_into_its_canonical_target():
     assert row["canonical_name"] == "Manchester United"
 
 
+def test_alias_target_differing_only_by_case_reuses_the_existing_team_not_a_duplicate():
+    # The alias's own target string ("MANCHESTER UNITED") is spelled
+    # differently -- only by case -- from the real existing canonical
+    # team ("Manchester United", created by an earlier sighting from a
+    # different provider). Without resolving the alias target through
+    # the same comparison key used everywhere else, this would create a
+    # second, duplicate "MANCHESTER UNITED" team instead of reusing the
+    # real one.
+    connection = make_connection()
+    first_source = FixtureCatalog(connection, provider_id="the-odds-api")
+    first_source.match(
+        sport="football", league="EPL", home_team_raw="Manchester United",
+        away_team_raw="Everton", start_time=T0,
+    )
+
+    second_source = FixtureCatalog(
+        connection,
+        provider_id="json-demo",
+        aliases={"Man Utd": "MANCHESTER UNITED"},
+    )
+    result = second_source.match(
+        sport="football", league="EPL", home_team_raw="Man Utd",
+        away_team_raw="Liverpool", start_time=T0 + timedelta(minutes=5),
+    )
+
+    assert result.event.home_team.canonical_name == "Manchester United"
+    teams = connection.execute(
+        "SELECT COUNT(*) AS n FROM teams WHERE canonical_name LIKE '%anchester%nited%'"
+    ).fetchone()["n"]
+    assert teams == 1
+
+
 def test_token_alias_expands_a_brand_new_teams_canonical_name():
     # The expansion must apply even on a team's very first sighting (no
     # existing candidate to fuzzy-match against yet) -- otherwise a
