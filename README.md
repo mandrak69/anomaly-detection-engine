@@ -492,7 +492,7 @@ environment-variable decision this app makes, resolved exactly once at
 startup -- including `ODDS_API_MODE`/`ODDS_API_CAPTURE_DIR`/
 `MOZZART_CAPTURE_DIR`/`MOZZART_MODE`, not just `ODDS_SOURCE`/`DB_PATH`/
 the threshold env vars. `pipeline._the_odds_api_collector()`/
-`_mozzart_collector()` read these off the `AppConfig` they're passed
+`_mozzart_collectors()` read these off the `AppConfig` they're passed
 rather than calling `os.environ.get(...)` themselves, so nothing
 downstream of `load_config()` reads `os.environ` directly -- one place
 to look for what an env var actually resolves to, and one place a future
@@ -571,8 +571,22 @@ ODDS_API_MODE=auto|manual      default "auto" (TheOddsApiCollector).
 MOZZART_MODE=manual            the only value that exists today --
                                 Mozzart has no automatic mode yet, but
                                 the flag is explicit anyway rather than
-                                silently assumed.
+                                silently assumed. Governs both
+                                MOZZART_CAPTURE_DIR and the optional
+                                MOZZART_PREMATCH_CAPTURE_DIR below.
 ```
+
+`MOZZART_PREMATCH_CAPTURE_DIR` is an optional *second* drop directory for
+Mozzart, alongside `MOZZART_CAPTURE_DIR` -- not a second source of truth
+for phase (each match's own `status` decides that regardless of which
+directory it came from, see `mozzart_file_collector.
+_resolve_market_and_lifecycle`). It exists purely to avoid an overwrite
+race: capture tooling saves every Mozzart response under the same
+default filename ("live.json") no matter which phase it captured, so a
+live capture and a pre-match capture landing in the *same* directory
+close together in time can silently clobber each other before the
+poller's next cycle reads either one. Only set it if you're actually
+capturing both phases back-to-back.
 
 ```bash
 # Live API, normal case

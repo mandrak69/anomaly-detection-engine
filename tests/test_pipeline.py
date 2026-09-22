@@ -45,6 +45,7 @@ def _clear_source_env(monkeypatch):
         "ODDS_API_CAPTURE_DIR",
         "MOZZART_MODE",
         "MOZZART_CAPTURE_DIR",
+        "MOZZART_PREMATCH_CAPTURE_DIR",
         "MERIDIANBET_MODE",
         "MERIDIANBET_CAPTURE_DIR",
         "API_FOOTBALL_KEY",
@@ -278,6 +279,47 @@ def test_no_meridianbet_capture_dir_means_no_supplemental_collector(monkeypatch)
     collectors = pipeline.build_collectors(config.load_config())
 
     assert not any(isinstance(c, MeridianbetFileCollector) for c in collectors)
+
+
+def test_mozzart_prematch_capture_dir_adds_a_second_collector(monkeypatch, tmp_path):
+    # Two separate directories exist to avoid a real overwrite race: the
+    # capture tooling saves every Mozzart response under the same
+    # default filename ("live.json") regardless of phase, so a live and
+    # a pre-match capture landing in the same directory close together
+    # can clobber each other before the poller reads either one.
+    _clear_source_env(monkeypatch)
+    live_dir = tmp_path / "mozzart-live"
+    prematch_dir = tmp_path / "mozzart-prematch"
+    monkeypatch.setenv("MOZZART_CAPTURE_DIR", str(live_dir))
+    monkeypatch.setenv("MOZZART_PREMATCH_CAPTURE_DIR", str(prematch_dir))
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 4
+    assert isinstance(collectors[2], MozzartFileCollector)
+    assert isinstance(collectors[3], MozzartFileCollector)
+    assert collectors[2].capture_dir == live_dir
+    assert collectors[3].capture_dir == prematch_dir
+
+
+def test_mozzart_prematch_capture_dir_alone_works_without_the_live_one(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MOZZART_PREMATCH_CAPTURE_DIR", str(tmp_path))
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert len(collectors) == 3
+    assert isinstance(collectors[2], MozzartFileCollector)
+    assert collectors[2].capture_dir == tmp_path
+
+
+def test_mozzart_prematch_mode_auto_is_rejected(monkeypatch, tmp_path):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MOZZART_PREMATCH_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("MOZZART_MODE", "auto")
+
+    with pytest.raises(ValueError, match="MOZZART_MODE"):
+        pipeline.build_collectors(config.load_config())
 
 
 def test_mozzart_and_meridianbet_can_both_be_active_at_once(monkeypatch, tmp_path):

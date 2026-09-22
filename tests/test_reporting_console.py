@@ -45,6 +45,7 @@ def build_config() -> AppConfig:
         odds_api_capture_dir=None,
         mozzart_capture_dir=None,
         mozzart_mode="manual",
+        mozzart_prematch_capture_dir=None,
         meridianbet_capture_dir=None,
         meridianbet_mode="manual",
         min_value_gap_percent=Decimal("15.0"),

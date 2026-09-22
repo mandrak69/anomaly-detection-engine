@@ -71,6 +71,19 @@ class AppConfig:
     odds_api_capture_dir: str | None
     mozzart_capture_dir: str | None
     mozzart_mode: str
+    # None means "not configured" -- a second, optional drop directory
+    # for pre-match Mozzart captures, kept separate from
+    # mozzart_capture_dir precisely because the capture tooling saves
+    # every response under the same default filename ("live.json")
+    # regardless of which phase it captured: a live capture and a
+    # pre-match capture landing in the *same* directory close together
+    # in time can silently overwrite each other before the poller's next
+    # cycle reads either one (see pipeline._mozzart_collectors). Each
+    # directory's collector still resolves phase per match from its own
+    # status.isLive/status.name (mozzart_file_collector), so this is
+    # purely about eliminating the overwrite race, not a second source
+    # of truth for phase.
+    mozzart_prematch_capture_dir: str | None
     # Same manual-capture shape as mozzart_capture_dir/mozzart_mode above
     # -- see pipeline._meridianbet_collector.
     meridianbet_capture_dir: str | None
@@ -205,6 +218,7 @@ def load_config() -> AppConfig:
         odds_api_capture_dir=os.environ.get("ODDS_API_CAPTURE_DIR"),
         mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
+        mozzart_prematch_capture_dir=os.environ.get("MOZZART_PREMATCH_CAPTURE_DIR"),
         meridianbet_capture_dir=os.environ.get("MERIDIANBET_CAPTURE_DIR"),
         meridianbet_mode=os.environ.get("MERIDIANBET_MODE", "manual"),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),

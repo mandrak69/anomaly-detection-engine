@@ -45,14 +45,31 @@ wasted capture. This table is what you check *before* that happens.
 
 - **URL**: not on record with the exact full path -- captured historically
   as a `/live/matches`-shaped request on mozzartbet.com's live-betting
-  page. Confirm you're on the *live* odds page (not pre-match) before
-  capturing.
+  page. The pre-match listing page returns the *exact same envelope
+  shape* -- you no longer need to avoid it; the collector tells live and
+  pre-match matches apart itself (see below).
 - **Correct response shape**: a JSON object with an `"items"` key (a
   list of matches), each with `oddsGroup[]` containing a group named
   `"Konačan ishod"` with real `odds[]` prices.
+- **Live vs pre-match**: each match's own `status` field decides its
+  phase, not which page you captured from -- a live match has
+  `status.isLive: true`; a pre-match (not-yet-started) match has
+  `status.name: "Nije počeo"` and no `isLive`/`result`/`matchTime` keys.
+  Don't use `betStatus` for this: it reads `"STARTED"` in *both* cases
+  (it means "this market accepts bets", not "kickoff happened"). A
+  single capture can safely mix matches from both phases -- each is
+  tagged correctly on its own (see `mozzart_file_collector.
+  _resolve_market_and_lifecycle`).
 - **Wrong responses actually captured here before**: none on record yet
   for this source specifically.
-- **Drop as**: `mozzart/live.json` (`MOZZART_CAPTURE_DIR`)
+- **Drop as**: `mozzart/live.json` (`MOZZART_CAPTURE_DIR`). If your
+  capture tooling always saves under the same default filename
+  regardless of phase, a live capture and a pre-match capture landing in
+  the same directory close together can overwrite each other before the
+  poller reads either one -- point a second capture at
+  `MOZZART_PREMATCH_CAPTURE_DIR` (a different directory) to avoid that
+  race. Optional: only set it if you're actually capturing both phases
+  back-to-back.
 - **Needs auth to fetch automatically**: Cloudflare bot-management
   (`cf_clearance`/`__cf_bm` cookies observed) -- not automated for the
   same reason as Meridianbet.

@@ -159,18 +159,36 @@ def _the_odds_api_collector(config: AppConfig) -> OddsCollector:
     raise ValueError(f"ODDS_API_MODE={mode!r} must be 'auto' or 'manual'.")
 
 
-def _mozzart_collector(config: AppConfig) -> OddsCollector | None:
-    """Builds the Mozzart supplemental collector, if MOZZART_CAPTURE_DIR is set.
+def _mozzart_collectors(config: AppConfig) -> list[OddsCollector]:
+    """Builds the Mozzart supplemental collector(s): one for
+    MOZZART_CAPTURE_DIR, and -- only if it's set -- a second one for
+    MOZZART_PREMATCH_CAPTURE_DIR.
+
+    The second directory exists purely to avoid an overwrite race: the
+    capture tooling saves every response under the same default filename
+    ("live.json") regardless of whether it captured the live or the
+    pre-match listing, so a live capture and a pre-match capture landing
+    in the *same* directory close together in time can silently
+    overwrite each other before the poller's next cycle reads either
+    one. Each directory's collector still resolves phase per match from
+    its own status.isLive/status.name (see
+    mozzart_file_collector._resolve_market_and_lifecycle) -- routing to
+    two directories only removes the race, it isn't a second source of
+    truth for which phase a match is in, so a stray wrong-phase match
+    landing in the "wrong" directory is still tagged correctly rather
+    than mislabeled.
 
     MOZZART_MODE exists (default and currently only valid value:
     "manual") so the mode is an explicit, visible flag rather than
     something inferred from which env vars happen to be set -- the same
     reasoning as _the_odds_api_collector's ODDS_API_MODE, even though
     Mozzart has no working automatic mode yet (mozzartbet.com's
-    Cloudflare bot-management, see MozzartFileCollector).
+    Cloudflare bot-management, see MozzartFileCollector). It governs
+    both directories: there's no meaningful case for one being manual
+    and the other automatic.
     """
-    if not config.mozzart_capture_dir:
-        return None
+    if not config.mozzart_capture_dir and not config.mozzart_prematch_capture_dir:
+        return []
 
     if config.mozzart_mode != "manual":
         raise ValueError(
@@ -178,7 +196,12 @@ def _mozzart_collector(config: AppConfig) -> OddsCollector | None:
             "no automatic mode yet (see README.md's Data Collection section)."
         )
 
-    return MozzartFileCollector(Path(config.mozzart_capture_dir))
+    collectors: list[OddsCollector] = []
+    if config.mozzart_capture_dir:
+        collectors.append(MozzartFileCollector(Path(config.mozzart_capture_dir)))
+    if config.mozzart_prematch_capture_dir:
+        collectors.append(MozzartFileCollector(Path(config.mozzart_prematch_capture_dir)))
+    return collectors
 
 
 def _meridianbet_collector(config: AppConfig) -> OddsCollector | None:
@@ -281,9 +304,7 @@ def _supplemental_collectors(
     """
     collectors: list[OddsCollector] = []
 
-    mozzart = _mozzart_collector(config)
-    if mozzart is not None:
-        collectors.append(mozzart)
+    collectors.extend(_mozzart_collectors(config))
 
     meridianbet = _meridianbet_collector(config)
     if meridianbet is not None:
