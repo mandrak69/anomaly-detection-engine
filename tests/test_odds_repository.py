@@ -13,7 +13,12 @@ from anomaly_detection_engine.models.market import (
 from anomaly_detection_engine.models.odds import Bookmaker, OddsSnapshot
 from anomaly_detection_engine.storage.collector_run_repository import CollectorRunRepository
 from anomaly_detection_engine.storage.database import configure_connection, initialize_database
-from anomaly_detection_engine.storage.odds_repository import OddsRepository
+from anomaly_detection_engine.storage.odds_repository import (
+    OddsRepository,
+    _latest_order_by,
+    _market_identity_params,
+    _market_identity_where,
+)
 
 
 def save_collector_run(connection, run_id: str, provider_id: str) -> None:
@@ -855,3 +860,49 @@ def test_distinct_markets_for_events_returns_empty_for_no_event_ids():
     repository = OddsRepository(connection)
 
     assert repository.distinct_markets_for_events([]) == []
+
+
+def test_find_latest_for_market_query_plan_avoids_a_temp_sort():
+    # Regression test for the migration 17 fix: SQLite could not use an
+    # index to satisfy this window function's ORDER BY when it read a
+    # computed COALESCE(source_timestamp, observed_at) expression, and
+    # fell back to sorting the whole matching set on every call --
+    # verified directly against a copy of the real production database
+    # before this changed. Materializing quote_time and switching the
+    # market-identity filters to `IS` (see odds_repository._latest_
+    # order_by/_market_identity_where) lets the planner use one index
+    # for the whole query. "USE TEMP B-TREE FOR ORDER BY" reappearing
+    # here means that regressed.
+    connection = create_test_connection()
+    repository = OddsRepository(connection)
+    repository.save(
+        OddsSnapshot(
+            event_id="event-001", bookmaker=Bookmaker("bet1", "Bet1"), market=MARKET,
+            outcome="1", odds=Decimal("2.20"),
+            observed_at=datetime.fromisoformat("2026-08-27T08:00:00+00:00"),
+        )
+    )
+
+    plan_rows = connection.execute(
+        f"""
+        EXPLAIN QUERY PLAN
+        SELECT *
+        FROM (
+            SELECT
+                o.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY o.bookmaker_id, o.outcome
+                    ORDER BY {_latest_order_by("o")}
+                ) AS rn
+            FROM odds_snapshots o
+            WHERE o.event_id = ?
+              AND {_market_identity_where("o")}
+        )
+        WHERE rn = 1
+        """,
+        ("event-001", *_market_identity_params(MARKET)),
+    ).fetchall()
+
+    plan_text = " ".join(row["detail"] for row in plan_rows)
+    assert "TEMP B-TREE" not in plan_text
+    assert "idx_odds_latest" in plan_text

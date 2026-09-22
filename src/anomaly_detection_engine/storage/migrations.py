@@ -1005,6 +1005,64 @@ def _migration_16_retention_cleanup_indexes(connection: sqlite3.Connection) -> N
     )
 
 
+def _migration_17_odds_snapshot_quote_time(connection: sqlite3.Connection) -> None:
+    """Adds odds_snapshots.quote_time (materialized COALESCE(source_
+    timestamp, observed_at) -- see OddsSnapshot.quote_time, the Python
+    property this mirrors) plus a composite index covering every
+    "latest odds" query's filter, partition, and order columns in one
+    -- see OddsRepository._latest_order_by/_market_identity_where, both
+    updated in the same change to use this column and an `IS` (not
+    `COALESCE(...) = COALESCE(...)`) comparison for market_line/rules/
+    specifier.
+
+    Why: SQLite's query planner cannot use an index to satisfy a window
+    function's ORDER BY when that ORDER BY references a computed
+    expression like COALESCE(source_timestamp, observed_at) -- verified
+    directly against a copy of this project's real production database
+    (EXPLAIN QUERY PLAN kept showing "USE TEMP B-TREE FOR ORDER BY" even
+    with an index built on that exact expression). The same is true of
+    the market_line/rules/specifier COALESCE(...) = COALESCE(?, '')
+    equality filters: SQLite can't use an index to seek past a
+    COALESCE-wrapped comparison either, which was *also* blocking the
+    planner from using any index for this query's WHERE clause, not
+    just its ORDER BY. Replacing the computed ORDER BY expression with
+    this plain, materialized column, and the COALESCE equality filters
+    with the NULL-safe `IS` operator (behaviorally identical for this
+    project's data -- MarketIdentity.__post_init__ already normalizes
+    ''/None consistently, and the real database has zero rows with an
+    empty-string market_line/rules/specifier, confirmed before this
+    migration shipped), lets the planner use one index for the whole
+    query: WHERE seek, PARTITION BY, and ORDER BY, eliminating the sort
+    step entirely (confirmed via EXPLAIN QUERY PLAN: no more "USE TEMP
+    B-TREE FOR ORDER BY", and the returned result set is byte-for-byte
+    identical to the old COALESCE-based query's, verified against real
+    production data before shipping).
+
+    Nullable at the ALTER TABLE step (SQLite requires a literal DEFAULT
+    to add a NOT NULL column to a non-empty table) -- default_sql='' is
+    a placeholder immediately overwritten by the backfill UPDATE just
+    below, the same two-step pattern migration 4's own market_phase
+    backfill already uses.
+    """
+    _add_column_if_missing(
+        connection, "odds_snapshots", "quote_time", "TEXT NOT NULL", default_sql="''"
+    )
+    connection.execute(
+        "UPDATE odds_snapshots SET quote_time = COALESCE(source_timestamp, observed_at)"
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_odds_latest
+            ON odds_snapshots(
+                event_id, market_type, market_period, market_phase,
+                market_line, market_rules, market_specifier,
+                bookmaker_id, outcome,
+                quote_time DESC, observed_at DESC, id DESC
+            )
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -1022,6 +1080,7 @@ MIGRATIONS: list[Migration] = [
     _migration_14_signal_history,
     _migration_15_signal_peak_edge_percent,
     _migration_16_retention_cleanup_indexes,
+    _migration_17_odds_snapshot_quote_time,
 ]
 
 

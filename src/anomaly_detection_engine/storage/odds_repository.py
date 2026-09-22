@@ -38,9 +38,10 @@ _INSERT_SQL = """
         odds,
         observed_at,
         source_timestamp,
-        collector_run_id
+        collector_run_id,
+        quote_time
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (
         event_id,
         bookmaker_id,
@@ -66,12 +67,20 @@ _INSERT_SQL = """
 # describing the freshest real price. observed_at DESC/id DESC stay as
 # tiebreakers for whenever quote_time is genuinely equal (e.g. neither
 # source reports a source_timestamp at all).
+#
+# Reads the materialized quote_time column (migration 17), not
+# COALESCE(source_timestamp, observed_at) computed at query time: the
+# two are values-equal (quote_time is backfilled/written as exactly
+# that expression -- see _snapshot_params), but SQLite's query planner
+# cannot use an index to satisfy a window function's ORDER BY on a
+# computed expression, only on a plain column -- confirmed directly via
+# EXPLAIN QUERY PLAN against a copy of this project's real production
+# database (find_latest_for_market showed "USE TEMP B-TREE FOR ORDER
+# BY" with the COALESCE form, gone with this one, same result set
+# either way).
 def _latest_order_by(alias: str | None = None) -> str:
     prefix = f"{alias}." if alias else ""
-    return (
-        f"COALESCE({prefix}source_timestamp, {prefix}observed_at) DESC, "
-        f"{prefix}observed_at DESC, {prefix}id DESC"
-    )
+    return f"{prefix}quote_time DESC, {prefix}observed_at DESC, {prefix}id DESC"
 
 
 def _snapshot_params(snapshot: OddsSnapshot) -> tuple[Any, ...]:
@@ -90,6 +99,7 @@ def _snapshot_params(snapshot: OddsSnapshot) -> tuple[Any, ...]:
         to_utc_iso(snapshot.observed_at),
         to_utc_iso(snapshot.source_timestamp) if snapshot.source_timestamp else None,
         snapshot.collector_run_id,
+        to_utc_iso(snapshot.quote_time),
     )
 
 
@@ -101,15 +111,26 @@ def _market_identity_where(alias: str | None = None) -> str:
     models.market), so filtering on type/period/line alone (the old
     behavior) could silently mix snapshots from different markets
     together.
+
+    `IS`, not `COALESCE(col, '') = COALESCE(?, '')`: both are NULL-safe
+    (a NULL column matches a None param), but SQLite can only use an
+    index to seek on a plain `col IS ?`/`col = ?` comparison, not one
+    wrapped in COALESCE -- confirmed directly (see _latest_order_by's
+    own comment) that this was blocking the planner from using *any*
+    index for this WHERE clause, not just the ORDER BY. Safe to switch:
+    MarketIdentity.__post_init__ already normalizes an empty string to
+    None for rules/specifier (and line is never a string type at all),
+    and the real production database has zero rows with an empty-string
+    market_line/rules/specifier, confirmed before this changed.
     """
     prefix = f"{alias}." if alias else ""
     return (
         f"{prefix}market_type = ? "
         f"AND {prefix}market_period = ? "
         f"AND {prefix}market_phase = ? "
-        f"AND COALESCE({prefix}market_line, '') = COALESCE(?, '') "
-        f"AND COALESCE({prefix}market_rules, '') = COALESCE(?, '') "
-        f"AND COALESCE({prefix}market_specifier, '') = COALESCE(?, '')"
+        f"AND {prefix}market_line IS ? "
+        f"AND {prefix}market_rules IS ? "
+        f"AND {prefix}market_specifier IS ?"
     )
 
 

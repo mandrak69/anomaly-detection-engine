@@ -17,6 +17,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_14_signal_history,
     _migration_15_signal_peak_edge_percent,
     _migration_16_retention_cleanup_indexes,
+    _migration_17_odds_snapshot_quote_time,
 )
 
 
@@ -862,3 +863,87 @@ def test_migration_16_is_safe_to_re_run():
 
     index_names = {row[1] for row in connection.execute("PRAGMA index_list(odds_snapshots)")}
     assert "idx_odds_snapshots_observed_at" in index_names
+
+
+def test_migration_17_backfills_quote_time_from_source_timestamp_or_observed_at():
+    connection = make_connection()
+    for migration in MIGRATIONS[:16]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO odds_snapshots (
+            event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+            outcome, odds, observed_at, source_timestamp, market_phase
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1", "bet1", "Bet1", "three_way", "full_time", "1", "2.10",
+            "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00", "pre_match",
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO odds_snapshots (
+            event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+            outcome, odds, observed_at, market_phase
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e2", "bet1", "Bet1", "three_way", "full_time", "1", "2.10",
+            "2026-01-01T00:00:00+00:00", "pre_match",
+        ),
+    )
+    connection.commit()
+
+    _migration_17_odds_snapshot_quote_time(connection)
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(odds_snapshots)")}
+    assert "quote_time" in columns
+
+    with_source_ts = connection.execute(
+        "SELECT quote_time FROM odds_snapshots WHERE event_id = 'e1'"
+    ).fetchone()
+    assert with_source_ts["quote_time"] == "2026-01-01T01:00:00+00:00"
+
+    without_source_ts = connection.execute(
+        "SELECT quote_time FROM odds_snapshots WHERE event_id = 'e2'"
+    ).fetchone()
+    assert without_source_ts["quote_time"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_migration_17_adds_the_covering_index():
+    connection = make_connection()
+    for migration in MIGRATIONS[:16]:
+        migration(connection)
+
+    _migration_17_odds_snapshot_quote_time(connection)
+
+    index_names = {row[1] for row in connection.execute("PRAGMA index_list(odds_snapshots)")}
+    assert "idx_odds_latest" in index_names
+
+
+def test_migration_17_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:16]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO odds_snapshots (
+            event_id, bookmaker_id, bookmaker_name, market_type, market_period,
+            outcome, odds, observed_at, market_phase
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1", "bet1", "Bet1", "three_way", "full_time", "1", "2.10",
+            "2026-01-01T00:00:00+00:00", "pre_match",
+        ),
+    )
+    connection.commit()
+
+    _migration_17_odds_snapshot_quote_time(connection)
+    _migration_17_odds_snapshot_quote_time(connection)  # must not raise
+
+    row = connection.execute(
+        "SELECT quote_time FROM odds_snapshots WHERE event_id = 'e1'"
+    ).fetchone()
+    assert row["quote_time"] == "2026-01-01T00:00:00+00:00"
