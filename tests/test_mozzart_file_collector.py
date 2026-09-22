@@ -7,7 +7,7 @@ from anomaly_detection_engine.collectors.mozzart_file_collector import (
     MozzartFileCollector,
     MozzartResponseError,
 )
-from anomaly_detection_engine.models.market import MarketPhase
+from anomaly_detection_engine.models.market import EventLifecycle, MarketPhase
 
 
 def odds_group(name: str, outcomes: dict[str, tuple[str, str, str]]) -> dict:
@@ -25,6 +25,21 @@ def odds_group(name: str, outcomes: dict[str, tuple[str, str, str]]) -> dict:
     }
 
 
+# A genuine live capture: status.isLive=True (see
+# _resolve_market_and_lifecycle). This is football_match()'s default so
+# every pre-existing test in this file keeps exercising the live path
+# unchanged.
+LIVE_STATUS = {"id": 1, "name": "Prvo poluvreme", "isLive": True}
+
+# A genuine pre-match capture: status.name == "Nije počeo" ("not
+# started"), no isLive key at all -- confirmed against a real Mozzart
+# pre-match response (see mozzart_file_collector._resolve_market_and_lifecycle
+# docstring). betStatus="STARTED" is included deliberately: it's present
+# in real pre-match captures too and must NOT be mistaken for "match
+# started".
+NOT_STARTED_STATUS = {"id": 0, "name": "Nije počeo"}
+
+
 def football_match(
     match_id=1,
     home="Partizan",
@@ -34,6 +49,7 @@ def football_match(
     outcomes=None,
     sport_name="Fudbal",
     include_final_result=True,
+    status=None,
 ):
     outcomes = outcomes or {
         "1": (2.10, "ACTIVE", home),
@@ -53,6 +69,8 @@ def football_match(
         "visitor": {"name": away},
         "startTime": start_time_ms,
         "oddsGroup": groups,
+        "status": LIVE_STATUS if status is None else status,
+        "betStatus": "STARTED",
     }
 
 
@@ -81,9 +99,64 @@ def test_maps_a_clean_match_into_raw_event_odds(tmp_path):
     assert raw.odds == {"1": Decimal("2.10"), "X": Decimal("3.40"), "2": Decimal("3.20")}
     assert raw.start_time.tzinfo is not None
     assert raw.observed_at.tzinfo is not None
-    # mozzartbet.com's /live/matches is exactly that -- live, in-play
-    # odds -- never the pre-match phase (see models.market.MarketPhase).
+    # Resolved from this match's own status.isLive=True, not assumed from
+    # which endpoint the capture came from (see
+    # _resolve_market_and_lifecycle).
     assert raw.market.phase == MarketPhase.LIVE
+    assert raw.lifecycle == EventLifecycle.LIVE
+    assert raw.source_event_id == "1"
+
+
+def test_maps_a_pre_match_match_into_raw_event_odds(tmp_path):
+    drop_capture(tmp_path, [football_match(status=NOT_STARTED_STATUS)])
+
+    collector = MozzartFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert len(result) == 1
+    raw = result[0]
+    # status.name == "Nije počeo" ("not started"), despite this match's
+    # betStatus reading "STARTED" the same as a live match's would --
+    # betStatus means "this market accepts bets", not "kickoff happened"
+    # (see _resolve_market_and_lifecycle).
+    assert raw.market.phase == MarketPhase.PRE_MATCH
+    assert raw.lifecycle == EventLifecycle.SCHEDULED
+
+
+def test_skips_matches_with_an_unrecognized_status(tmp_path):
+    drop_capture(tmp_path, [football_match(status={"id": 99, "name": "Prekinut"})])
+
+    collector = MozzartFileCollector(tmp_path)
+    # No silent guess for a status this project hasn't confirmed the
+    # meaning of yet -- see _resolve_market_and_lifecycle.
+    assert collector.collect().records == []
+
+
+def test_skips_matches_with_no_status_at_all(tmp_path):
+    drop_capture(tmp_path, [football_match(status={})])
+
+    collector = MozzartFileCollector(tmp_path)
+    assert collector.collect().records == []
+
+
+def test_single_capture_mixing_live_and_pre_match_tags_each_correctly(tmp_path):
+    drop_capture(
+        tmp_path,
+        [
+            football_match(match_id=1, home="LiveHome", status=LIVE_STATUS),
+            football_match(match_id=2, home="PreMatchHome", status=NOT_STARTED_STATUS),
+        ],
+    )
+
+    collector = MozzartFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert len(result) == 2
+    by_home = {r.home_team: r for r in result}
+    assert by_home["LiveHome"].market.phase == MarketPhase.LIVE
+    assert by_home["LiveHome"].lifecycle == EventLifecycle.LIVE
+    assert by_home["PreMatchHome"].market.phase == MarketPhase.PRE_MATCH
+    assert by_home["PreMatchHome"].lifecycle == EventLifecycle.SCHEDULED
 
 
 def test_returns_empty_when_no_capture_is_waiting(tmp_path):
