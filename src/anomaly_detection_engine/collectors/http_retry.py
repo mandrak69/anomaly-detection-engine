@@ -76,6 +76,7 @@ def http_get_with_retry(
     provider_label: str,
     max_attempts: int = 3,
     backoff_base_seconds: float = 1.0,
+    max_delay_seconds: float = 60.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bytes:
     """Fetches `url`, retrying up to `max_attempts` total attempts (so
@@ -103,8 +104,14 @@ def http_get_with_retry(
     the server sent a Retry-After header (common on 429, sometimes on
     503) -- when present, that value is honored instead of guessing,
     since the server knows its own recovery time better than a fixed
-    backoff schedule could. sleep is injectable so tests exercise the
-    retry path without actually waiting.
+    backoff schedule could. Either way, the delay is clamped to
+    max_delay_seconds: a server-supplied Retry-After has no upper bound
+    of its own, and this project's poller runs one cycle at a time, so
+    an unbounded wait here would stall every other source's poll for as
+    long as the misbehaving/overloaded one asked for -- better to give
+    up on honoring that specific value and retry sooner than to block
+    indefinitely on it. sleep is injectable so tests exercise the retry
+    path without actually waiting.
     """
     last_exception: Exception | None = None
 
@@ -122,13 +129,23 @@ def http_get_with_retry(
             if exc.code not in _RETRYABLE_HTTP_STATUSES or attempt == max_attempts - 1:
                 raise wrapped from exc
             last_exception = wrapped
-            delay = _retry_after_seconds(exc.headers) or backoff_base_seconds * (2**attempt)
+            # "is not None", not a bare truthy check: a server sending
+            # "Retry-After: 0" (retry immediately) is a real, valid
+            # value that `retry_after or backoff` would silently
+            # discard, since 0.0 is falsy -- and fall through to a
+            # slower exponential-backoff wait the server never asked for.
+            retry_after = _retry_after_seconds(exc.headers)
+            delay = (
+                retry_after if retry_after is not None else backoff_base_seconds * (2**attempt)
+            )
         except urllib.error.URLError as exc:
             wrapped = error_cls(f"{provider_label} request failed: {exc.reason}")
             if attempt == max_attempts - 1:
                 raise wrapped from exc
             last_exception = wrapped
             delay = backoff_base_seconds * (2**attempt)
+
+        delay = min(delay, max_delay_seconds)
 
         logger.warning(
             "http_retry.retrying",

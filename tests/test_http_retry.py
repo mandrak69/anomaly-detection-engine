@@ -236,7 +236,7 @@ def test_a_permanent_404_fails_immediately_without_retrying(monkeypatch):
 
 
 def test_retry_after_header_in_seconds_is_honored_instead_of_backoff(monkeypatch):
-    fake_urlopen = make_fake_urlopen([http_error(429, retry_after="120"), b"ok"])
+    fake_urlopen = make_fake_urlopen([http_error(429, retry_after="30"), b"ok"])
     monkeypatch.setattr(
         "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
     )
@@ -252,7 +252,78 @@ def test_retry_after_header_in_seconds_is_honored_instead_of_backoff(monkeypatch
         sleep=sleeps.append,
     )
 
-    assert sleeps == [120.0]
+    assert sleeps == [30.0]
+
+
+def test_retry_after_zero_is_honored_not_treated_as_absent(monkeypatch):
+    # Regression test: `retry_after or backoff` would discard a real
+    # "Retry-After: 0" (retry immediately) because 0.0 is falsy, and
+    # fall through to a slower exponential-backoff wait the server never
+    # asked for. Must be distinguished from "no header at all" via an
+    # explicit `is not None` check.
+    fake_urlopen = make_fake_urlopen([http_error(429, retry_after="0"), b"ok"])
+    monkeypatch.setattr(
+        "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
+    )
+    sleeps = []
+
+    http_get_with_retry(
+        "https://example.test",
+        headers={},
+        timeout=10,
+        error_cls=DummyError,
+        provider_label="Dummy",
+        backoff_base_seconds=5.0,
+        sleep=sleeps.append,
+    )
+
+    assert sleeps == [0.0]
+
+
+def test_retry_after_larger_than_max_delay_is_clamped(monkeypatch):
+    fake_urlopen = make_fake_urlopen([http_error(429, retry_after="600"), b"ok"])
+    monkeypatch.setattr(
+        "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
+    )
+    sleeps = []
+
+    http_get_with_retry(
+        "https://example.test",
+        headers={},
+        timeout=10,
+        error_cls=DummyError,
+        provider_label="Dummy",
+        max_delay_seconds=60.0,
+        sleep=sleeps.append,
+    )
+
+    assert sleeps == [60.0]
+
+
+def test_exponential_backoff_is_also_clamped_to_max_delay(monkeypatch):
+    fake_urlopen = make_fake_urlopen(
+        [http_error(503), http_error(503), http_error(503), b"ok"]
+    )
+    monkeypatch.setattr(
+        "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
+    )
+    sleeps = []
+
+    http_get_with_retry(
+        "https://example.test",
+        headers={},
+        timeout=10,
+        error_cls=DummyError,
+        provider_label="Dummy",
+        max_attempts=4,
+        backoff_base_seconds=10.0,
+        max_delay_seconds=15.0,
+        sleep=sleeps.append,
+    )
+
+    # Unclamped this would be 10, 20, 40 -- clamped to 15 wherever it
+    # would otherwise exceed that.
+    assert sleeps == [10.0, 15.0, 15.0]
 
 
 def test_retry_after_header_as_an_http_date_is_honored(monkeypatch):
