@@ -40,6 +40,30 @@ wasted capture. This table is what you check *before* that happens.
   (`__cf_bm` cookie) with device-fingerprint checks on top. Not worth
   automating for the same reason Mozzart isn't -- see that collector's
   own docstring.
+- **Pagination**: the full listing for one sport is split across many
+  `?page=0`, `?page=1`, ... requests (40-50+ for football), each covering
+  a different subset of leagues -- not one response like the URL above
+  suggests. `scripts/import_meridianbet_har.py` merges a full HAR export
+  (DevTools Network tab -> "Save all as HAR with content", capturing
+  every page in one file) into the single combined drop file this
+  collector expects, deduplicating leagues by `leagueId` and events by
+  `header.eventId` in case pagination overlaps.
+- **Known HAR-export encoding bug (Chrome), not a capture mistake**:
+  league/team names with Serbian-specific characters (Š/š, Č/č, Ć/ć, ...)
+  can come out of Chrome's "Save all as HAR with content" as literal
+  U+FFFD replacement characters (e.g. "Liga Šampiona" -> "Liga
+  �ampiona") even though the response's `Content-Type: application/json`
+  never declared a non-UTF-8 charset -- confirmed present in the raw HAR
+  `response.content.text` itself, before any of our own code touches it,
+  so it is **not recoverable** by re-parsing or re-encoding after the
+  fact; the original bytes are already gone by the time HAR export wrote
+  them. Only display strings are affected -- odds, ids, and timestamps in
+  the same capture are untouched. If a capture needs to preserve these
+  characters exactly (e.g. for name-matching against another source),
+  don't use the HAR-export path for it; a live per-response capture via
+  the Chrome DevTools Protocol's own `Network.getResponseBody` (which
+  decodes the raw bytes directly, not through HAR's export path) does not
+  hit this bug.
 
 ## Mozzart
 
