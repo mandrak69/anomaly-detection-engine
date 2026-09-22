@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from anomaly_detection_engine.collectors.http_retry import http_get_with_retry
+from anomaly_detection_engine.collectors.http_retry import _redact_url, http_get_with_retry
 
 
 class DummyError(RuntimeError):
@@ -51,6 +51,44 @@ def make_fake_urlopen(actions):
 
     fake_urlopen.calls = calls
     return fake_urlopen
+
+
+def test_redact_url_strips_the_query_string():
+    # The Odds API sends its API key as ?apiKey=... -- the query string
+    # must never survive into a log line.
+    redacted = _redact_url("https://api.the-odds-api.com/v4/sports/soccer/odds?apiKey=SECRET123&regions=eu")
+
+    assert "SECRET123" not in redacted
+    assert redacted == "https://api.the-odds-api.com/v4/sports/soccer/odds"
+
+
+def test_redact_url_strips_userinfo_too():
+    redacted = _redact_url("https://user:hunter2@example.test/path?x=1")
+
+    assert "hunter2" not in redacted
+    assert redacted == "https://example.test/path"
+
+
+def test_retry_log_never_contains_the_api_key_in_the_url(monkeypatch, caplog):
+    url = "https://api.the-odds-api.com/v4/sports/soccer/odds?apiKey=SUPER-SECRET-KEY&regions=eu"
+    fake_urlopen = make_fake_urlopen([http_error(503), b"ok"])
+    monkeypatch.setattr(
+        "anomaly_detection_engine.collectors.http_retry.urllib.request.urlopen", fake_urlopen
+    )
+
+    with caplog.at_level("WARNING"):
+        http_get_with_retry(
+            url,
+            headers={},
+            timeout=10,
+            error_cls=DummyError,
+            provider_label="Dummy",
+            sleep=lambda seconds: None,
+        )
+
+    assert "SUPER-SECRET-KEY" not in caplog.text
+    for record in caplog.records:
+        assert "SUPER-SECRET-KEY" not in str(record.__dict__.get("url", ""))
 
 
 def test_succeeds_on_the_first_attempt_without_sleeping(monkeypatch):

@@ -2,6 +2,7 @@ import email.utils
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -44,6 +45,26 @@ def _retry_after_seconds(headers: object) -> float | None:
     if parsed.tzinfo is None:
         return None
     return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+
+
+def _redact_url(url: str) -> str:
+    """scheme://host/path only -- no query string, no userinfo. The Odds
+    API sends its API key as a query parameter (`?apiKey=...`), so
+    logging the complete url would put a real credential in the
+    application log on every retry (429/5xx/network failure) -- exactly
+    the kind of log line that ends up in a log aggregator, a support
+    ticket, or a screen share. The query string carries no information
+    this log line actually needs (which host/path is being retried is
+    the point, not what parameters it was called with), so it's dropped
+    entirely rather than trying to enumerate every provider's own
+    credential parameter name, which would only catch known ones and
+    silently miss the next provider added later.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def http_get_with_retry(
@@ -112,7 +133,7 @@ def http_get_with_retry(
         logger.warning(
             "http_retry.retrying",
             extra={
-                "url": url,
+                "url": _redact_url(url),
                 "attempt": attempt + 1,
                 "max_attempts": max_attempts,
                 "delay_seconds": delay,
