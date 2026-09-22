@@ -1,14 +1,13 @@
 import json
 import logging
 import os
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from anomaly_detection_engine.collectors.base import CollectionResult, OddsCollector
+from anomaly_detection_engine.collectors.http_retry import http_get_with_retry
 from anomaly_detection_engine.models.market import (
     DEFAULT_MARKET,
     HANDICAP_MINUS_1_MARKET,
@@ -561,17 +560,10 @@ class ApiFootballCollector(OddsCollector):
         )
 
     def _http_get(self, url: str) -> bytes:
-        request = urllib.request.Request(
-            url, headers={"x-apisports-key": self._api_key, "Accept": "application/json"}
+        return http_get_with_retry(
+            url,
+            headers={"x-apisports-key": self._api_key, "Accept": "application/json"},
+            timeout=10,
+            error_cls=ApiFootballError,
+            provider_label="API-Football",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                data: bytes = response.read()
-                return data
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise ApiFootballError(
-                f"API-Football request failed with HTTP {exc.code}: {body}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise ApiFootballError(f"API-Football request failed: {exc.reason}") from exc
