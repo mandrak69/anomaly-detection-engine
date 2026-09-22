@@ -253,6 +253,151 @@ def test_ambiguous_fuzzy_match_creates_a_new_team_instead_of_guessing():
     assert teams == 3
 
 
+def mapping_row(connection, *, provider_id: str, sport: str, raw_name: str):
+    return connection.execute(
+        """
+        SELECT resolution_method, confidence, created_at FROM source_team_mappings
+        WHERE source = ? AND sport = ? AND source_team_name = ?
+        """,
+        (provider_id, sport, raw_name),
+    ).fetchone()
+
+
+def test_first_sighting_records_unknown_resolution_method_at_full_confidence():
+    # A brand-new team has no existing candidate to match against at all
+    # -- TeamNormalizer reports this as "unknown", but the *mapping*
+    # confidence is still 100: raw_name definitionally maps to the team
+    # just created for it, no merge/guess involved.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="mozzart")
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+    )
+
+    row = mapping_row(connection, provider_id="mozzart", sport="football", raw_name="Partizan")
+    assert row["resolution_method"] == "unknown"
+    assert row["confidence"] == 100.0
+    assert row["created_at"] is not None
+
+
+def test_alias_match_records_alias_resolution_method():
+    connection = make_connection()
+    catalog = FixtureCatalog(
+        connection, provider_id="json-demo", aliases={"Man Utd": "Manchester United"},
+    )
+
+    catalog.match(
+        sport="football", league="EPL", home_team_raw="Man Utd",
+        away_team_raw="Liverpool", start_time=T0,
+    )
+
+    row = mapping_row(connection, provider_id="json-demo", sport="football", raw_name="Man Utd")
+    assert row["resolution_method"] == "alias"
+    assert row["confidence"] == 100.0
+
+
+def test_fuzzy_match_records_fuzzy_resolution_method_and_its_real_score():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Manchester United",
+        away_team_raw="Liverpool", start_time=T0,
+    )
+    catalog.match(
+        sport="football", league="L", home_team_raw="Manchester Utd",
+        away_team_raw="Liverpool", start_time=T0 + timedelta(minutes=10),
+    )
+
+    row = mapping_row(
+        connection, provider_id="src-a", sport="football", raw_name="Manchester Utd"
+    )
+    assert row["resolution_method"] == "fuzzy"
+    # Not asserted against a hardcoded score -- just that it's a real,
+    # sub-100 confidence (a fuzzy match, not a perfect one), the exact
+    # thing a reviewer would want visible without re-running the matcher.
+    assert 80.0 <= row["confidence"] < 100.0
+
+
+def test_exact_match_records_exact_resolution_method():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="src-a")
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Liverpool",
+        away_team_raw="Everton", start_time=T0,
+    )
+    catalog.match(
+        sport="football", league="L", home_team_raw="Liverpool",
+        away_team_raw="Arsenal", start_time=T0 + timedelta(days=1),
+        source_event_id=None,
+    )
+    # A different provider seeing the exact same already-canonical name
+    # -- not the cached-mapping fast path (a fresh provider_id), so this
+    # genuinely exercises TeamNormalizer's "exact" branch.
+    other_catalog = FixtureCatalog(connection, provider_id="src-b")
+    other_catalog.match(
+        sport="football", league="L", home_team_raw="Liverpool",
+        away_team_raw="Chelsea", start_time=T0 + timedelta(days=2),
+    )
+
+    row = mapping_row(connection, provider_id="src-b", sport="football", raw_name="Liverpool")
+    assert row["resolution_method"] == "exact"
+    assert row["confidence"] == 100.0
+
+
+def test_ambiguous_match_records_ambiguous_resolution_method_and_its_real_score():
+    connection = make_connection()
+    # Two candidates scoring an exact tie (86.79 each, under
+    # token_sort_ratio) against the raw name below -- genuinely
+    # ambiguous, not just "both plausible".
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        ("team-a", "Real City United Sporting Club", "football"),
+    )
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
+        ("team-b", "Real City Rovers Sporting Club", "football"),
+    )
+    connection.commit()
+    catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Real City Sporting Club",
+        away_team_raw="Everton", start_time=T0,
+    )
+
+    row = mapping_row(
+        connection, provider_id="src-a", sport="football", raw_name="Real City Sporting Club"
+    )
+    assert row["resolution_method"] == "ambiguous"
+    assert row["confidence"] > 80.0
+
+
+def test_pre_migration_12_mapping_rows_have_null_resolution_metadata():
+    # A mapping written before this project tracked resolution_method/
+    # confidence/created_at (see migration 12) has genuinely unknown
+    # provenance -- NULL, not a fabricated backfilled value.
+    connection = make_connection()
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES ('team-old', 'Old Team', 'football')"
+    )
+    connection.execute(
+        """
+        INSERT INTO source_team_mappings (source, sport, source_team_name, team_id)
+        VALUES ('old-source', 'football', 'Old Team', 'team-old')
+        """
+    )
+    connection.commit()
+
+    row = mapping_row(connection, provider_id="old-source", sport="football", raw_name="Old Team")
+    assert row["resolution_method"] is None
+    assert row["confidence"] is None
+    assert row["created_at"] is None
+
+
 def test_same_kickoff_reported_under_different_offsets_resolves_to_one_event():
     # Two sources reporting the exact same real kickoff instant under
     # different (equally valid) UTC offsets must still resolve to one
@@ -375,6 +520,37 @@ def test_fuzzy_league_match_merges_a_similar_spelling():
         "SELECT COUNT(*) AS n FROM competitions WHERE sport = 'football'"
     ).fetchone()["n"]
     assert competitions == 1
+
+
+def competition_mapping_row(connection, *, provider_id: str, sport: str, raw_league: str):
+    return connection.execute(
+        """
+        SELECT resolution_method, confidence, created_at FROM source_competition_mappings
+        WHERE source = ? AND sport = ? AND source_competition_name = ?
+        """,
+        (provider_id, sport, raw_league),
+    ).fetchone()
+
+
+def test_fuzzy_league_match_records_fuzzy_resolution_method_on_the_competition_mapping():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)
+
+    catalog.match(
+        sport="football", league="Premier League", home_team_raw="A",
+        away_team_raw="B", start_time=T0,
+    )
+    catalog.match(
+        sport="football", league="Premier Leage", home_team_raw="C",
+        away_team_raw="D", start_time=T0,
+    )
+
+    row = competition_mapping_row(
+        connection, provider_id="src-a", sport="football", raw_league="Premier Leage"
+    )
+    assert row["resolution_method"] == "fuzzy"
+    assert 80.0 <= row["confidence"] < 100.0
+    assert row["created_at"] is not None
 
 
 def test_same_matchup_within_tolerance_reuses_the_event():

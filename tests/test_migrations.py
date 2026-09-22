@@ -10,6 +10,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_5_event_competition_id,
     _migration_6_collector_run_provenance,
     _migration_11_collector_run_running_status,
+    _migration_12_mapping_resolution_audit,
 )
 
 
@@ -469,3 +470,49 @@ def test_migration_11_recovers_from_an_interruption_after_copy_before_drop():
     rows = connection.execute("SELECT * FROM collector_runs").fetchall()
     assert len(rows) == 1
     assert rows[0]["id"] == "run-1"
+
+
+def test_migration_12_adds_resolution_audit_columns():
+    connection = make_connection()
+    for migration in MIGRATIONS[:11]:
+        migration(connection)
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES ('team-1', 'Old Team', 'football')"
+    )
+    connection.execute(
+        """
+        INSERT INTO source_team_mappings (source, sport, source_team_name, team_id)
+        VALUES ('old-source', 'football', 'Old Team', 'team-1')
+        """
+    )
+    connection.commit()
+
+    _migration_12_mapping_resolution_audit(connection)
+
+    team_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_team_mappings)")}
+    competition_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_competition_mappings)")
+    }
+    assert {"resolution_method", "confidence", "created_at"} <= team_columns
+    assert {"resolution_method", "confidence", "created_at"} <= competition_columns
+
+    # Pre-existing rows are left unbackfilled (nothing to honestly
+    # recover) -- not NOT NULL, so this must not raise, and stays NULL.
+    row = connection.execute(
+        "SELECT * FROM source_team_mappings WHERE source_team_name = 'Old Team'"
+    ).fetchone()
+    assert row["resolution_method"] is None
+    assert row["confidence"] is None
+    assert row["created_at"] is None
+
+
+def test_migration_12_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:11]:
+        migration(connection)
+
+    _migration_12_mapping_resolution_audit(connection)
+    _migration_12_mapping_resolution_audit(connection)  # must not raise
+
+    team_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_team_mappings)")}
+    assert {"resolution_method", "confidence", "created_at"} <= team_columns

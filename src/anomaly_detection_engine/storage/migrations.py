@@ -739,6 +739,47 @@ def _migration_11_collector_run_running_status(connection: sqlite3.Connection) -
     )
 
 
+def _migration_12_mapping_resolution_audit(connection: sqlite3.Connection) -> None:
+    """Adds resolution_method/confidence/created_at to
+    source_team_mappings and source_competition_mappings -- see
+    FixtureCatalog._save_mapping/_save_competition_mapping.
+
+    FixtureCatalog already computes exactly this information every time
+    it resolves a raw name (TeamNormalizer.normalize()'s own
+    NormalizationResult -- "exact"/"alias"/"fuzzy"/"ambiguous"/"unknown"
+    plus a confidence score), but only ever logged it for the
+    "ambiguous" case before this, then discarded it once the mapping row
+    was written. A mapping is cached *permanently* the moment it's
+    created (see FixtureCatalog's own docstring) -- a wrong fuzzy match
+    becomes a permanently wrong mapping just as easily as a correct one
+    becomes a permanently correct one, and this project has already hit
+    exactly that in practice (a rapidfuzz scorer bug that silently
+    merged distinct teams -- see TeamNormalizer's own docstring). Without
+    this, finding which existing mappings were low-confidence guesses
+    worth a human's review meant re-deriving it after the fact by
+    re-running the matcher against current data, which cannot reconstruct
+    what the catalog actually looked like at the moment the original
+    resolution happened (more teams may have been added since, changing
+    what today's fuzzy match would even find).
+
+    All three columns are nullable and left unbackfilled for existing
+    rows, the same reasoning migration 6/8's own nullable columns used:
+    no row written before this migration recorded which method/
+    confidence produced it, so there is nothing to honestly recover --
+    NULL means "resolution provenance unknown (pre-migration mapping)",
+    a legitimate permanent state, not a gap to paper over with a
+    fabricated value.
+    """
+    _add_column_if_missing(connection, "source_team_mappings", "resolution_method", "TEXT")
+    _add_column_if_missing(connection, "source_team_mappings", "confidence", "REAL")
+    _add_column_if_missing(connection, "source_team_mappings", "created_at", "TEXT")
+    _add_column_if_missing(
+        connection, "source_competition_mappings", "resolution_method", "TEXT"
+    )
+    _add_column_if_missing(connection, "source_competition_mappings", "confidence", "REAL")
+    _add_column_if_missing(connection, "source_competition_mappings", "created_at", "TEXT")
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -751,6 +792,7 @@ MIGRATIONS: list[Migration] = [
     _migration_9_event_status,
     _migration_10_source_event_mappings,
     _migration_11_collector_run_running_status,
+    _migration_12_mapping_resolution_audit,
 ]
 
 

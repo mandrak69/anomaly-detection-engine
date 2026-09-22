@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from sqlite3 import Connection, Row
 from uuid import uuid4
 
@@ -217,7 +217,17 @@ class FixtureCatalog:
             team = self._create_team(canonical_name=result.raw_name, sport=sport)
             confidence = 100.0
 
-        self._save_mapping(raw_name, sport, team.id)
+        # result.method -- "exact"/"alias"/"fuzzy"/"ambiguous"/"unknown" --
+        # is stored alongside the mapping (migration 12), not just logged
+        # for the risky "ambiguous" case above: a *fuzzy* match that
+        # happened to score just above fuzzy_threshold is exactly as
+        # silently permanent as an ambiguous one once cached here, and
+        # without this, reviewing which mappings were confident exact/
+        # alias matches versus borderline fuzzy guesses meant re-deriving
+        # it by re-running the matcher after the fact.
+        self._save_mapping(
+            raw_name, sport, team.id, resolution_method=result.method, confidence=confidence
+        )
         return team, confidence
 
     def _find_mapping(self, raw_name: str, sport: str) -> Team | None:
@@ -231,14 +241,31 @@ class FixtureCatalog:
         ).fetchone()
         return self._map_team_row(row) if row else None
 
-    def _save_mapping(self, raw_name: str, sport: str, team_id: str) -> None:
+    def _save_mapping(
+        self,
+        raw_name: str,
+        sport: str,
+        team_id: str,
+        *,
+        resolution_method: str,
+        confidence: float,
+    ) -> None:
         self._connection.execute(
             """
             INSERT OR IGNORE INTO source_team_mappings
-                (source, sport, source_team_name, team_id)
-            VALUES (?, ?, ?, ?)
+                (source, sport, source_team_name, team_id,
+                 resolution_method, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (self._provider_id, sport, raw_name, team_id),
+            (
+                self._provider_id,
+                sport,
+                raw_name,
+                team_id,
+                resolution_method,
+                confidence,
+                to_utc_iso(datetime.now(UTC)),
+            ),
         )
 
     def _teams_for_sport(self, sport: str) -> dict[str, Team]:
@@ -298,16 +325,27 @@ class FixtureCatalog:
             )
             canonical_name = raw_league
             competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+            confidence = result.confidence
         elif result.canonical_name is not None:
             canonical_name = result.canonical_name
             competition_id = existing.get(canonical_name) or self._create_competition(
                 canonical_name=canonical_name, sport=sport
             )
+            confidence = result.confidence
         else:
             canonical_name = raw_league
             competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+            confidence = 100.0
 
-        self._save_competition_mapping(raw_league, sport, competition_id)
+        # Same audit-trail reasoning as _resolve_team's own _save_mapping
+        # call -- see that method's comment.
+        self._save_competition_mapping(
+            raw_league,
+            sport,
+            competition_id,
+            resolution_method=result.method,
+            confidence=confidence,
+        )
         return canonical_name, competition_id
 
     def _find_competition_mapping(self, raw_league: str, sport: str) -> tuple[str, str] | None:
@@ -321,14 +359,31 @@ class FixtureCatalog:
         ).fetchone()
         return (row["canonical_name"], row["id"]) if row else None
 
-    def _save_competition_mapping(self, raw_league: str, sport: str, competition_id: str) -> None:
+    def _save_competition_mapping(
+        self,
+        raw_league: str,
+        sport: str,
+        competition_id: str,
+        *,
+        resolution_method: str,
+        confidence: float,
+    ) -> None:
         self._connection.execute(
             """
             INSERT OR IGNORE INTO source_competition_mappings
-                (source, sport, source_competition_name, competition_id)
-            VALUES (?, ?, ?, ?)
+                (source, sport, source_competition_name, competition_id,
+                 resolution_method, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (self._provider_id, sport, raw_league, competition_id),
+            (
+                self._provider_id,
+                sport,
+                raw_league,
+                competition_id,
+                resolution_method,
+                confidence,
+                to_utc_iso(datetime.now(UTC)),
+            ),
         )
 
     def _competitions_for_sport(self, sport: str) -> dict[str, str]:
