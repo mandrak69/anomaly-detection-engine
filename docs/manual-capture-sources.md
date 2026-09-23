@@ -16,9 +16,27 @@ wasted capture. This table is what you check *before* that happens.
 
 ## Meridianbet
 
-- **URL**: `https://online.meridianbet.com/betshop/api/v1/standard/sport/58/events?page=0&time=ONE_DAY`
+- **URL**: `https://online.meridianbet.com/betshop/api/v1/offer/sport/58/leagues?page=0&time=ALL`
   (`sport/58` = football; other sport ids will have their own number --
-  the response's own `header.sport.name` confirms which one you got)
+  the response's own `header.sport.name` confirms which one you got).
+  This listing is **paginated** -- page 0 has no extra params, every
+  later page adds `&groupIndices=0,0,0` (a fixed value, not something
+  you need to vary):
+  `.../leagues?page=1&time=ALL&groupIndices=0,0,0`, `page=2`, ... A real
+  capture ran all the way to `page=49` to cover every league; you don't
+  need every page in one drop -- one page is a perfectly valid capture
+  on its own (partial coverage this cycle, more on the next), or
+  concatenate several pages' `payload.leagues` arrays into one JSON if
+  you want broader coverage in a single drop.
+
+  An older, differently-shaped endpoint
+  (`.../standard/sport/58/events?page=0&time=ONE_DAY`) was documented
+  here previously and still parses fine if you happen to have a capture
+  of it (same `payload.events[]` shape below), but the `leagues`
+  endpoint above is the one to capture going forward -- confirmed live
+  against a real 50-page capture: 0 parse errors, 2297 records across
+  1231 distinct matches and 118 leagues, both THREE_WAY and TOTALS
+  markets extracted correctly.
 - **Correct response shape**: a JSON object with `payload.leagues[]`
   (each with its own `events[]`) *or* `payload.events[]` directly (both
   seen live, same `header`/`positions` shape underneath either way --
@@ -34,6 +52,11 @@ wasted capture. This table is what you check *before* that happens.
   - a *market column config* endpoint -- `payload.positions` /
     `payload.configuredPositions`; market *names* only
     (`"Pobednik"`/`"Konačan Ishod"`/...), no actual event/odds data
+  - a `token=invalid_token` 401 error body (`{"error": "invalid_token",
+    ...}`) -- the request wasn't authenticated as your logged-in browser
+    session; re-capture from DevTools with the page actually loaded and
+    logged in, not a replayed/copied request missing your session's
+    cookies/fingerprint header
 - **Drop as**: `meridianbet/meridianbet.json` (`MERIDIANBET_CAPTURE_DIR`)
 - **Needs auth to fetch automatically**: yes -- 401 `invalid_token`
   (OAuth-style bearer token, not a plain API key), behind Cloudflare
@@ -43,11 +66,19 @@ wasted capture. This table is what you check *before* that happens.
 
 ## Mozzart
 
-- **URL**: not on record with the exact full path -- captured historically
-  as a `/live/matches`-shaped request on mozzartbet.com's live-betting
-  page. The pre-match listing page returns the *exact same envelope
-  shape* -- you no longer need to avoid it; the collector tells live and
-  pre-match matches apart itself (see below).
+- **URL**: `https://www.mozzartbet.com/betting/matches` -- a **POST**
+  request, not GET: the pagination/filter parameters live in the JSON
+  **request body**, not the query string --
+  `{"date":"all_days","sort":"bycompetition","currentPage":N,"pageSize":15,"sportId":1,"competitionIds":[],"search":"","matchTypeId":0}`
+  (`sportId: 1` = football). Confirmed live against a real 31-page
+  capture (`currentPage` 2 through 32): 0 parse errors, 451 records
+  across 451 distinct matches, all pre-match/scheduled. An older,
+  differently-shaped `/live/matches` request was captured historically
+  on mozzartbet.com's live-betting page and still parses fine if you
+  happen to have a capture of it (same envelope shape below) -- the
+  pre-match listing page above returns the *exact same envelope shape*
+  either way; the collector tells live and pre-match matches apart
+  itself (see below), not which endpoint/page produced the capture.
 - **Correct response shape**: a JSON object with an `"items"` key (a
   list of matches), each with `oddsGroup[]` containing a group named
   `"Konačan ishod"` with real `odds[]` prices.
