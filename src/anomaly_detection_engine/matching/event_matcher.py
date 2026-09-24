@@ -37,6 +37,7 @@ class EventResolver(Protocol):
         home_team_source_id: str | None = None,
         away_team_source_id: str | None = None,
         competition_source_id: str | None = None,
+        country: str | None = None,
     ) -> EventMatchResult: ...
 
 
@@ -63,12 +64,19 @@ class EventMatcher:
         home_team_source_id: str | None = None,
         away_team_source_id: str | None = None,
         competition_source_id: str | None = None,
+        country: str | None = None,
     ) -> EventMatchResult:
         # Unused: this fixed in-memory candidate list has no mapping
         # cache to consult or populate (see FixtureCatalog.match(), the
         # only implementation that acts on any of these) -- accepted here
         # purely to satisfy the shared EventResolver Protocol.
-        del source_event_id, home_team_source_id, away_team_source_id, competition_source_id
+        del (
+            source_event_id,
+            home_team_source_id,
+            away_team_source_id,
+            competition_source_id,
+            country,
+        )
         home = self._team_normalizer.normalize(home_team_raw)
         away = self._team_normalizer.normalize(away_team_raw)
 

@@ -30,13 +30,13 @@ class RawEventOdds:
     # The source's own stable identifier for the *event/fixture* itself
     # (e.g. api-football's fixture.id), distinct from source_id above
     # (which identifies the bookmaker) -- optional, the same way
-    # source_id is: a collector with no such stable id (the JSON demo,
-    # Mozzart, the-odds-api at time of writing) leaves this unset, and
+    # source_id is: a collector with no such stable id (the JSON demo)
+    # leaves this unset, and
     # FixtureCatalog falls back to its existing team/competition/
     # start_time resolution, exactly as it did before this field
     # existed. When present, FixtureCatalog caches and reuses it (see
-    # source_event_mappings) so a fixture already resolved once skips
-    # fuzzy team matching on every later sighting.
+    # source_event_mappings) so a fixture already resolved once can take
+    # a guarded fast path after its team/competition invariants pass.
     source_event_id: str | None = None
     # This event's real-world progress, when the source actually reports
     # it (e.g. api-football's fixture.status.short) -- None (the
@@ -50,11 +50,11 @@ class RawEventOdds:
     # sources report these right next to the display name and the
     # collector was simply discarding them in favor of fuzzy-matching the
     # name from scratch on every sighting; when present, FixtureCatalog
-    # caches and reuses them (see source_team_id_mappings /
-    # source_competition_id_mappings) so a team or competition already
-    # resolved once by id skips fuzzy matching entirely on every later
-    # sighting, the same way source_event_id already does for the whole
-    # fixture. A source with no such stable id (the-odds-api's teams, the
+    # records them (see source_team_id_mappings /
+    # source_competition_id_mappings) with trust/provenance metadata, so a
+    # verified id can skip fuzzy matching while a fuzzy-only or drifted
+    # mapping cannot become unconditional truth. A source with no such
+    # stable id (the-odds-api's teams, the
     # JSON demo) leaves these unset, and resolution falls back to the
     # existing name-based path exactly as it did before these fields
     # existed.

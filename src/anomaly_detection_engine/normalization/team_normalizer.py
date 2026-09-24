@@ -67,10 +67,9 @@ def names_are_similar(a: str, b: str, *, fuzzy_threshold: float = 85.0) -> bool:
     Used by FixtureCatalog's provider-id fast path (see
     source_team_id_mappings/source_competition_id_mappings) to detect a
     provider recycling a numeric id across a season boundary onto a
-    genuinely different name -- a mismatch here doesn't override the id
-    (a provider doesn't silently swap identities without also renaming;
-    the id is still trusted), it only decides whether to log a drift
-    warning for a human to notice.
+    genuinely different name. A mismatch moves the mapping to SUSPECT;
+    the id is no longer treated as unconditional truth until a human or
+    verified event context resolves it.
     """
     key_a, key_b = _comparison_key(a), _comparison_key(b)
     if key_a == key_b:

@@ -1113,6 +1113,263 @@ def _migration_18_source_id_mappings(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_19_reference_identity_and_mapping_trust(
+    connection: sqlite3.Connection,
+) -> None:
+    """Adds the reference-provider identity model and auditable mapping trust.
+
+    API-Football is the canonical namespace when it has an entity.  A team or
+    competition first seen elsewhere remains PROVISIONAL until an API-Football
+    id is attached.  Provider mappings separately record whether the link is
+    VERIFIED, UNVERIFIED, or SUSPECT; in particular, a fuzzy-only result is no
+    longer indistinguishable from a manually or event-context verified link.
+
+    The two provider-id tables are rebuilt so ``sport`` is part of their key.
+    That avoids relying on an undocumented assumption that every upstream id is
+    globally unique across every sport.  Event mappings gain an identity
+    snapshot used to detect a recycled fixture id before changing an existing
+    event's kickoff.
+    """
+    for table in ("teams", "competitions"):
+        _add_column_if_missing(connection, table, "reference_provider", "TEXT")
+        _add_column_if_missing(connection, table, "reference_provider_id", "TEXT")
+        _add_column_if_missing(
+            connection,
+            table,
+            "identity_status",
+            "TEXT NOT NULL",
+            default_sql="'PROVISIONAL'",
+        )
+    _add_column_if_missing(connection, "competitions", "country", "TEXT")
+
+    # Same competition display name is legitimate in different countries.
+    connection.execute("DROP INDEX IF EXISTS uq_competitions_name_sport")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_competitions_name_sport_country
+            ON competitions(canonical_name, sport, COALESCE(country, ''))
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_reference_identity
+            ON teams(reference_provider, sport, reference_provider_id)
+            WHERE reference_provider IS NOT NULL AND reference_provider_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_competitions_reference_identity
+            ON competitions(reference_provider, sport, reference_provider_id)
+            WHERE reference_provider IS NOT NULL AND reference_provider_id IS NOT NULL
+        """
+    )
+
+    for table in ("source_team_mappings", "source_competition_mappings"):
+        _add_column_if_missing(
+            connection, table, "trust_state", "TEXT NOT NULL", default_sql="'UNVERIFIED'"
+        )
+        _add_column_if_missing(connection, table, "resolver_version", "INTEGER")
+
+    # Existing exact/alias rows and rows that created their own provisional
+    # entity are deterministic.  Existing fuzzy/ambiguous rows remain
+    # UNVERIFIED and therefore cannot become a trusted fast path by migration.
+    connection.execute(
+        """
+        UPDATE source_team_mappings
+        SET trust_state = CASE
+                WHEN source = 'api-football' THEN 'VERIFIED'
+                WHEN resolution_method IN ('exact', 'alias', 'unknown') THEN 'VERIFIED'
+                ELSE 'UNVERIFIED'
+            END,
+            resolver_version = COALESCE(resolver_version, 1)
+        """
+    )
+    connection.execute(
+        """
+        UPDATE source_competition_mappings
+        SET trust_state = CASE
+                WHEN source = 'api-football' THEN 'VERIFIED'
+                WHEN resolution_method IN ('exact', 'alias', 'unknown') THEN 'VERIFIED'
+                ELSE 'UNVERIFIED'
+            END,
+            resolver_version = COALESCE(resolver_version, 1)
+        """
+    )
+
+    team_id_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_team_id_mappings)")
+    }
+    if "sport" not in team_id_columns:
+        connection.executescript(
+            """
+            CREATE TABLE source_team_id_mappings_v19 (
+                source TEXT NOT NULL,
+                sport TEXT NOT NULL,
+                source_team_id TEXT NOT NULL,
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                first_seen_raw_name TEXT,
+                last_seen_raw_name TEXT,
+                last_verified_raw_name TEXT,
+                trust_state TEXT NOT NULL,
+                resolution_method TEXT,
+                resolver_version INTEGER NOT NULL,
+                verified_at TEXT,
+                last_checked_at TEXT,
+                drift_detected_at TEXT,
+                created_at TEXT,
+                PRIMARY KEY (source, sport, source_team_id)
+            );
+
+            INSERT INTO source_team_id_mappings_v19 (
+                source, sport, source_team_id, team_id,
+                first_seen_raw_name, last_seen_raw_name, last_verified_raw_name,
+                trust_state, resolution_method, resolver_version,
+                verified_at, last_checked_at, drift_detected_at, created_at
+            )
+            SELECT m.source, t.sport, m.source_team_id, m.team_id,
+                   m.last_seen_raw_name, m.last_seen_raw_name,
+                   CASE WHEN m.source = 'api-football' THEN m.last_seen_raw_name END,
+                   CASE WHEN m.source = 'api-football' THEN 'VERIFIED' ELSE 'UNVERIFIED' END,
+                   'legacy', 1,
+                   CASE WHEN m.source = 'api-football' THEN m.created_at END,
+                   m.created_at, NULL, m.created_at
+            FROM source_team_id_mappings m
+            JOIN teams t ON t.id = m.team_id;
+
+            DROP TABLE source_team_id_mappings;
+            ALTER TABLE source_team_id_mappings_v19 RENAME TO source_team_id_mappings;
+            """
+        )
+
+    competition_id_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(source_competition_id_mappings)")
+    }
+    if "sport" not in competition_id_columns:
+        connection.executescript(
+            """
+            CREATE TABLE source_competition_id_mappings_v19 (
+                source TEXT NOT NULL,
+                sport TEXT NOT NULL,
+                source_competition_id TEXT NOT NULL,
+                competition_id TEXT NOT NULL REFERENCES competitions(id),
+                first_seen_raw_name TEXT,
+                last_seen_raw_name TEXT,
+                last_verified_raw_name TEXT,
+                trust_state TEXT NOT NULL,
+                resolution_method TEXT,
+                resolver_version INTEGER NOT NULL,
+                verified_at TEXT,
+                last_checked_at TEXT,
+                drift_detected_at TEXT,
+                created_at TEXT,
+                PRIMARY KEY (source, sport, source_competition_id)
+            );
+
+            INSERT INTO source_competition_id_mappings_v19 (
+                source, sport, source_competition_id, competition_id,
+                first_seen_raw_name, last_seen_raw_name, last_verified_raw_name,
+                trust_state, resolution_method, resolver_version,
+                verified_at, last_checked_at, drift_detected_at, created_at
+            )
+            SELECT m.source, c.sport, m.source_competition_id, m.competition_id,
+                   m.last_seen_raw_name, m.last_seen_raw_name,
+                   CASE WHEN m.source = 'api-football' THEN m.last_seen_raw_name END,
+                   CASE WHEN m.source = 'api-football' THEN 'VERIFIED' ELSE 'UNVERIFIED' END,
+                   'legacy', 1,
+                   CASE WHEN m.source = 'api-football' THEN m.created_at END,
+                   m.created_at, NULL, m.created_at
+            FROM source_competition_id_mappings m
+            JOIN competitions c ON c.id = m.competition_id;
+
+            DROP TABLE source_competition_id_mappings;
+            ALTER TABLE source_competition_id_mappings_v19
+                RENAME TO source_competition_id_mappings;
+            """
+        )
+
+    event_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_event_mappings)")
+    }
+    if "trust_state" not in event_columns:
+        connection.executescript(
+            """
+            CREATE TABLE source_event_mappings_v19 (
+                source TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                event_id TEXT NOT NULL REFERENCES events(id),
+                trust_state TEXT NOT NULL,
+                resolution_method TEXT,
+                resolver_version INTEGER NOT NULL,
+                sport TEXT,
+                last_verified_home_name TEXT,
+                last_verified_away_name TEXT,
+                last_verified_competition_name TEXT,
+                last_verified_country TEXT,
+                home_source_team_id TEXT,
+                away_source_team_id TEXT,
+                source_competition_id TEXT,
+                verified_at TEXT,
+                last_checked_at TEXT,
+                drift_detected_at TEXT,
+                created_at TEXT,
+                PRIMARY KEY (source, source_event_id)
+            );
+
+            INSERT INTO source_event_mappings_v19 (
+                source, source_event_id, event_id, trust_state,
+                resolution_method, resolver_version, sport, created_at
+            )
+            SELECT m.source, m.source_event_id, m.event_id, 'UNVERIFIED',
+                   'legacy', 1, e.sport, NULL
+            FROM source_event_mappings m
+            JOIN events e ON e.id = m.event_id;
+
+            DROP TABLE source_event_mappings;
+            ALTER TABLE source_event_mappings_v19 RENAME TO source_event_mappings;
+            """
+        )
+
+    # Existing API-Football id rows already identify the canonical namespace.
+    connection.execute(
+        """
+        UPDATE teams
+        SET reference_provider = 'api-football',
+            reference_provider_id = (
+                SELECT m.source_team_id FROM source_team_id_mappings m
+                WHERE m.source = 'api-football' AND m.sport = teams.sport
+                  AND m.team_id = teams.id
+                LIMIT 1
+            ),
+            identity_status = 'REFERENCE'
+        WHERE EXISTS (
+            SELECT 1 FROM source_team_id_mappings m
+            WHERE m.source = 'api-football' AND m.sport = teams.sport
+              AND m.team_id = teams.id
+        )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE competitions
+        SET reference_provider = 'api-football',
+            reference_provider_id = (
+                SELECT m.source_competition_id FROM source_competition_id_mappings m
+                WHERE m.source = 'api-football' AND m.sport = competitions.sport
+                  AND m.competition_id = competitions.id
+                LIMIT 1
+            ),
+            identity_status = 'REFERENCE'
+        WHERE EXISTS (
+            SELECT 1 FROM source_competition_id_mappings m
+            WHERE m.source = 'api-football' AND m.sport = competitions.sport
+              AND m.competition_id = competitions.id
+        )
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -1132,6 +1389,7 @@ MIGRATIONS: list[Migration] = [
     _migration_16_retention_cleanup_indexes,
     _migration_17_odds_snapshot_quote_time,
     _migration_18_source_id_mappings,
+    _migration_19_reference_identity_and_mapping_trust,
 ]
 
 

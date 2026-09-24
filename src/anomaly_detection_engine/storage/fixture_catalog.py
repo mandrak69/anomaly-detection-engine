@@ -1,5 +1,5 @@
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from sqlite3 import Connection, Row
 from uuid import uuid4
@@ -14,6 +14,35 @@ from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
+REFERENCE_PROVIDER_ID = "api-football"
+RESOLVER_VERSION = 2
+TRUST_VERIFIED = "VERIFIED"
+TRUST_UNVERIFIED = "UNVERIFIED"
+TRUST_SUSPECT = "SUSPECT"
+
+
+@dataclass(frozen=True)
+class _TeamResolution:
+    team: Team
+    confidence: float
+    method: str
+    trust_state: str
+
+
+@dataclass(frozen=True)
+class _CompetitionResolution:
+    canonical_name: str
+    competition_id: str
+    confidence: float
+    method: str
+    trust_state: str
+
+
+@dataclass(frozen=True)
+class _EventMapping:
+    event: Event
+    row: Row
+
 
 class FixtureCatalog:
     """Persistent, auto-growing canonical event/team/competition registry.
@@ -22,16 +51,18 @@ class FixtureCatalog:
     anything it doesn't already know), this resolves-or-creates: a team,
     competition, or event it hasn't seen before gets a new canonical row
     instead of being rejected. Every (source, sport, raw team name)
-    resolution is cached permanently in source_team_mappings (and every
-    (source, sport, raw league name) resolution in
-    source_competition_mappings) so it is never re-solved on a later run
-    -- that cache is what lets two different sources reporting the same
+    resolution is recorded in source_team_mappings (and every (source,
+    sport, raw league name) resolution in source_competition_mappings)
+    with an explicit trust state and resolver version. Only VERIFIED
+    mappings are fast paths; fuzzy-only links stay UNVERIFIED and
+    catastrophic provider-id drift becomes SUSPECT. That registry is what
+    lets two different sources reporting the same
     real match under different team-name spellings ("Man Utd" vs
     "Manchester United") or league names ("Premier League" vs "England
     Premier League") end up sharing one canonical Event, once that
     particular spelling has been resolved once (by exact/alias/fuzzy
-    match against the existing catalog, or simply replayed from a prior
-    run's mapping).
+    match against the existing catalog, a manually verified mapping, or
+    a mapping learned from an already-verified event).
 
     Implements the same match(...) -> EventMatchResult shape as
     EventMatcher, so OddsIngestionService can use either interchangeably
@@ -101,6 +132,7 @@ class FixtureCatalog:
         home_team_source_id: str | None = None,
         away_team_source_id: str | None = None,
         competition_source_id: str | None = None,
+        country: str | None = None,
     ) -> EventMatchResult:
         home_raw = home_team_raw.strip()
         away_raw = away_team_raw.strip()
@@ -125,57 +157,115 @@ class FixtureCatalog:
         # own implicit transaction for the writes below.
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            # Fast path: a fixture already resolved once via this exact
-            # (provider, source_event_id) pairing skips team/competition
-            # fuzzy resolution entirely on every later sighting -- see
-            # source_event_mappings (migration 10). Absent or never-seen
-            # source_event_id falls through to the existing resolution
-            # below exactly as it always has.
+            # Fast path only for a VERIFIED fixture mapping whose stored
+            # team/competition/country invariants still match. A recycled
+            # provider event id is marked SUSPECT and falls through without
+            # mutating the previously mapped event.
             if source_event_id is not None:
-                mapped_event = self._find_event_mapping(source_event_id)
-                if mapped_event is not None:
-                    # A stable source_event_id identifies the same
-                    # real-world fixture even after the provider reschedules
-                    # its kickoff -- team/competition identity is what the
-                    # fast path is confident about, not that start_time
-                    # never changes once cached. Sync it here rather than
-                    # returning a stale value, since signal expiry keys
-                    # directly off events.start_time (see
-                    # SignalRepository.expire_active_signals) -- a
-                    # postponed match's odds would otherwise expire on the
-                    # original, no-longer-real kickoff time.
-                    mapped_event = self._sync_event_start_time(mapped_event, start_time)
-                    self._connection.commit()
-                    return EventMatchResult(mapped_event, 100.0, "resolved")
+                mapping = self._find_event_mapping(source_event_id)
+                if mapping is not None and mapping.row["trust_state"] == TRUST_VERIFIED:
+                    if self._event_mapping_is_compatible(
+                        mapping,
+                        sport=sport,
+                        league=league.strip(),
+                        home_raw=home_raw,
+                        away_raw=away_raw,
+                        country=country,
+                        home_team_source_id=home_team_source_id,
+                        away_team_source_id=away_team_source_id,
+                        competition_source_id=competition_source_id,
+                    ):
+                        # A verified event is the strongest available context for
+                        # learning provider team/competition ids.  This is the
+                        # safe Sabah/Sabah Masazir path: identity comes from the
+                        # already-known fixture, not from fuzzy team-name matching.
+                        self._learn_identity_from_event_mapping(
+                            mapping.event,
+                            sport=sport,
+                            league=league.strip(),
+                            home_raw=home_raw,
+                            away_raw=away_raw,
+                            country=country,
+                            home_team_source_id=home_team_source_id,
+                            away_team_source_id=away_team_source_id,
+                            competition_source_id=competition_source_id,
+                        )
+                        mapped_event = self._sync_event_start_time(
+                            mapping.event, start_time
+                        )
+                        self._refresh_event_mapping(
+                            source_event_id,
+                            sport=sport,
+                            league=league.strip(),
+                            home_raw=home_raw,
+                            away_raw=away_raw,
+                            country=country,
+                            home_team_source_id=home_team_source_id,
+                            away_team_source_id=away_team_source_id,
+                            competition_source_id=competition_source_id,
+                        )
+                        self._connection.commit()
+                        return EventMatchResult(mapped_event, 100.0, "resolved")
 
-            home, home_confidence = self._resolve_team(
+                    self._mark_event_mapping_suspect(source_event_id)
+
+            # Competition first: it gives country/league context to the
+            # identity pipeline and prevents fuzzy comparison across two
+            # different, both-known countries.
+            competition = self._resolve_competition(
+                raw_league=league.strip(),
+                sport=sport,
+                source_competition_id=competition_source_id,
+                country=country,
+            )
+            home = self._resolve_team(
                 raw_name=home_raw, sport=sport, source_team_id=home_team_source_id
             )
-            away, away_confidence = self._resolve_team(
+            away = self._resolve_team(
                 raw_name=away_raw, sport=sport, source_team_id=away_team_source_id
-            )
-            canonical_league, competition_id = self._resolve_competition(
-                raw_league=league.strip(), sport=sport, source_competition_id=competition_source_id
             )
 
             event = self._resolve_event(
                 sport=sport,
-                league=canonical_league,
-                competition_id=competition_id,
-                home=home,
-                away=away,
+                league=competition.canonical_name,
+                competition_id=competition.competition_id,
+                home=home.team,
+                away=away.team,
                 start_time=start_time,
             )
 
             if source_event_id is not None:
-                self._save_event_mapping(source_event_id, event.id)
+                component_trust = (
+                    TRUST_VERIFIED
+                    if all(
+                        resolution.trust_state == TRUST_VERIFIED
+                        for resolution in (home, away, competition)
+                    )
+                    else TRUST_UNVERIFIED
+                )
+                self._save_event_mapping(
+                    source_event_id,
+                    event.id,
+                    trust_state=component_trust,
+                    resolution_method="component_resolution",
+                    sport=sport,
+                    league=league.strip(),
+                    home_raw=home_raw,
+                    away_raw=away_raw,
+                    country=country,
+                    home_team_source_id=home_team_source_id,
+                    away_team_source_id=away_team_source_id,
+                    competition_source_id=competition_source_id,
+                )
         except BaseException:
             self._connection.rollback()
             raise
         else:
             self._connection.commit()
 
-        return EventMatchResult(event, min(home_confidence, away_confidence), "resolved")
+        return EventMatchResult(
+            event, min(home.confidence, away.confidence, competition.confidence), "resolved"
+        )
 
     def list_events(self, *, sport: str | None = None) -> list[Event]:
         if sport is None:
@@ -186,11 +276,134 @@ class FixtureCatalog:
             ).fetchall()
         return [self._map_event_row(row) for row in rows]
 
+    def verify_team_mapping(
+        self,
+        *,
+        sport: str,
+        source_name: str,
+        canonical_team_id: str,
+        source_team_id: str | None = None,
+    ) -> None:
+        """Persists an explicit human-approved provider -> canonical mapping.
+
+        This is the operational escape hatch for cases such as Mozzart's
+        ``Westham Untd`` or ``Sabah Masazir``: the correction is data, not a
+        new global string-normalization rule.  Manual verification is allowed
+        to clear a SUSPECT id mapping because a human has deliberately chosen
+        the canonical target.
+        """
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            team = self._connection.execute(
+                "SELECT id FROM teams WHERE id = ? AND sport = ?",
+                (canonical_team_id, sport),
+            ).fetchone()
+            if team is None:
+                raise ValueError(
+                    f"Unknown canonical team {canonical_team_id!r} for sport {sport!r}"
+                )
+            now = to_utc_iso(datetime.now(UTC))
+            self._connection.execute(
+                """
+                INSERT INTO source_team_mappings (
+                    source, sport, source_team_name, team_id,
+                    resolution_method, confidence, created_at,
+                    trust_state, resolver_version
+                ) VALUES (?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
+                ON CONFLICT (source, sport, source_team_name) DO UPDATE SET
+                    team_id = excluded.team_id,
+                    resolution_method = 'manual', confidence = 100.0,
+                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
+                """,
+                (
+                    self._provider_id,
+                    sport,
+                    source_name.strip(),
+                    canonical_team_id,
+                    now,
+                    RESOLVER_VERSION,
+                ),
+            )
+            if source_team_id is not None:
+                self._save_team_id_mapping(
+                    source_team_id,
+                    sport,
+                    canonical_team_id,
+                    source_name.strip(),
+                    trust_state=TRUST_VERIFIED,
+                    resolution_method="manual",
+                    allow_suspect_override=True,
+                )
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
+    def verify_competition_mapping(
+        self,
+        *,
+        sport: str,
+        source_name: str,
+        canonical_competition_id: str,
+        source_competition_id: str | None = None,
+    ) -> None:
+        """Persists a human-approved competition mapping."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            competition = self._connection.execute(
+                "SELECT id FROM competitions WHERE id = ? AND sport = ?",
+                (canonical_competition_id, sport),
+            ).fetchone()
+            if competition is None:
+                raise ValueError(
+                    "Unknown canonical competition "
+                    f"{canonical_competition_id!r} for sport {sport!r}"
+                )
+            now = to_utc_iso(datetime.now(UTC))
+            self._connection.execute(
+                """
+                INSERT INTO source_competition_mappings (
+                    source, sport, source_competition_name, competition_id,
+                    resolution_method, confidence, created_at,
+                    trust_state, resolver_version
+                ) VALUES (?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
+                ON CONFLICT (source, sport, source_competition_name) DO UPDATE SET
+                    competition_id = excluded.competition_id,
+                    resolution_method = 'manual', confidence = 100.0,
+                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
+                """,
+                (
+                    self._provider_id,
+                    sport,
+                    source_name.strip(),
+                    canonical_competition_id,
+                    now,
+                    RESOLVER_VERSION,
+                ),
+            )
+            if source_competition_id is not None:
+                self._save_competition_id_mapping(
+                    source_competition_id,
+                    sport,
+                    canonical_competition_id,
+                    source_name.strip(),
+                    trust_state=TRUST_VERIFIED,
+                    resolution_method="manual",
+                    allow_suspect_override=True,
+                )
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
     # -- team resolution --------------------------------------------------
 
     def _resolve_team(
         self, *, raw_name: str, sport: str, source_team_id: str | None = None
-    ) -> tuple[Team, float]:
+    ) -> _TeamResolution:
+        source_id_is_suspect = False
         # ID fast path: a provider-supplied team id already resolved once
         # (see source_team_id_mappings, migration 18) skips fuzzy
         # matching entirely on every later sighting, the same way
@@ -202,36 +415,67 @@ class FixtureCatalog:
         # can't help with, since a changed raw_name is a cache miss there
         # by construction.
         if source_team_id is not None:
-            id_hit = self._find_team_by_source_id(source_team_id)
+            id_hit = self._find_team_by_source_id(source_team_id, sport)
             if id_hit is not None:
-                team, last_seen_raw_name = id_hit
-                if last_seen_raw_name is not None and not names_are_similar(
-                    last_seen_raw_name, raw_name
+                team, mapping = id_hit
+                baseline_name = (
+                    mapping["last_verified_raw_name"]
+                    or mapping["first_seen_raw_name"]
+                )
+                if (
+                    mapping["trust_state"] == TRUST_VERIFIED
+                    and baseline_name is not None
+                    and names_are_similar(
+                        baseline_name,
+                        raw_name,
+                        fuzzy_threshold=self._fuzzy_threshold,
+                    )
                 ):
-                    # The id is still trusted (a provider doesn't silently
-                    # swap identities without also renaming) -- this is
-                    # "log, don't fail", the same posture missing-country
-                    # handling and _map_fixture_status already use
-                    # elsewhere in this project, surfaced for a human to
-                    # notice a provider recycling an id across a season
-                    # boundary rather than treated as an error.
+                    self._save_team_id_mapping(
+                        source_team_id,
+                        sport,
+                        team.id,
+                        raw_name,
+                        trust_state=TRUST_VERIFIED,
+                        resolution_method="provider_id",
+                    )
+                    return _TeamResolution(
+                        team, 100.0, "provider_id", TRUST_VERIFIED
+                    )
+                if mapping["trust_state"] == TRUST_VERIFIED:
                     logger.warning(
                         "fixture_catalog.team_id.name_drift",
                         extra={
                             "source_team_id": source_team_id,
                             "team_id": team.id,
-                            "last_seen_raw_name": last_seen_raw_name,
+                            "last_verified_raw_name": baseline_name,
                             "raw_name": raw_name,
                         },
                     )
-                self._save_team_id_mapping(source_team_id, team.id, raw_name)
-                return team, 100.0
+                    self._mark_team_id_mapping_suspect(
+                        source_team_id, sport, raw_name
+                    )
+                    source_id_is_suspect = True
+                elif mapping["trust_state"] == TRUST_SUSPECT:
+                    source_id_is_suspect = True
 
         mapped = self._find_mapping(raw_name, sport)
         if mapped is not None:
+            mapped_trust = (
+                TRUST_SUSPECT if source_id_is_suspect else TRUST_VERIFIED
+            )
             if source_team_id is not None:
-                self._save_team_id_mapping(source_team_id, mapped.id, raw_name)
-            return mapped, 100.0
+                self._save_team_id_mapping(
+                    source_team_id,
+                    sport,
+                    mapped.id,
+                    raw_name,
+                    trust_state=mapped_trust,
+                    resolution_method="verified_name_mapping",
+                )
+            return _TeamResolution(
+                mapped, 100.0, "verified_name_mapping", mapped_trust
+            )
 
         existing = self._teams_for_sport(sport)
         normalizer = TeamNormalizer(
@@ -255,7 +499,11 @@ class FixtureCatalog:
                 "fixture_catalog.team.ambiguous_fuzzy_match",
                 extra={"raw_name": raw_name, "sport": sport, "score": result.confidence},
             )
-            team = self._create_team(canonical_name=result.raw_name, sport=sport)
+            team = self._create_team(
+                canonical_name=result.raw_name,
+                sport=sport,
+                source_team_id=source_team_id,
+            )
             confidence = result.confidence
         elif result.canonical_name is not None:
             # The alias/fuzzy target may not exist as a team row yet (e.g.
@@ -264,7 +512,9 @@ class FixtureCatalog:
             # that canonical form, not under the raw name, so later exact
             # matches on the canonical name itself resolve correctly too.
             team = existing.get(result.canonical_name) or self._create_team(
-                canonical_name=result.canonical_name, sport=sport
+                canonical_name=result.canonical_name,
+                sport=sport,
+                source_team_id=source_team_id,
             )
             confidence = result.confidence
         else:
@@ -276,8 +526,24 @@ class FixtureCatalog:
             # literal, unexpanded name ("UAE M23") and fail to fuzzy-match
             # it -- the same gap this mechanism exists to close, just
             # hitting whichever provider is seen second instead of first.
-            team = self._create_team(canonical_name=result.raw_name, sport=sport)
+            team = self._create_team(
+                canonical_name=result.raw_name,
+                sport=sport,
+                source_team_id=source_team_id,
+            )
             confidence = 100.0
+
+        trust_state = (
+            TRUST_SUSPECT
+            if source_id_is_suspect
+            else self._trust_for_method(result.method)
+        )
+        if (
+            self._provider_id == REFERENCE_PROVIDER_ID
+            and source_team_id is not None
+            and trust_state == TRUST_VERIFIED
+        ):
+            self._promote_team_to_reference(team.id, sport, source_team_id)
 
         # result.method -- "exact"/"alias"/"fuzzy"/"ambiguous"/"unknown" --
         # is stored alongside the mapping (migration 12), not just logged
@@ -288,11 +554,23 @@ class FixtureCatalog:
         # alias matches versus borderline fuzzy guesses meant re-deriving
         # it by re-running the matcher after the fact.
         self._save_mapping(
-            raw_name, sport, team.id, resolution_method=result.method, confidence=confidence
+            raw_name,
+            sport,
+            team.id,
+            resolution_method=result.method,
+            confidence=confidence,
+            trust_state=trust_state,
         )
         if source_team_id is not None:
-            self._save_team_id_mapping(source_team_id, team.id, raw_name)
-        return team, confidence
+            self._save_team_id_mapping(
+                source_team_id,
+                sport,
+                team.id,
+                raw_name,
+                trust_state=trust_state,
+                resolution_method=result.method,
+            )
+        return _TeamResolution(team, confidence, result.method, trust_state)
 
     def _find_mapping(self, raw_name: str, sport: str) -> Team | None:
         row = self._connection.execute(
@@ -300,6 +578,7 @@ class FixtureCatalog:
             SELECT t.* FROM source_team_mappings m
             JOIN teams t ON t.id = m.team_id
             WHERE m.source = ? AND m.sport = ? AND m.source_team_name = ?
+              AND m.trust_state = 'VERIFIED'
             """,
             (self._provider_id, sport, raw_name),
         ).fetchone()
@@ -313,13 +592,30 @@ class FixtureCatalog:
         *,
         resolution_method: str,
         confidence: float,
+        trust_state: str,
     ) -> None:
         self._connection.execute(
             """
-            INSERT OR IGNORE INTO source_team_mappings
+            INSERT INTO source_team_mappings
                 (source, sport, source_team_name, team_id,
-                 resolution_method, confidence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 resolution_method, confidence, created_at,
+                 trust_state, resolver_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_team_name) DO UPDATE SET
+                team_id = CASE
+                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    THEN source_team_mappings.team_id ELSE excluded.team_id END,
+                resolution_method = CASE
+                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    THEN source_team_mappings.resolution_method
+                    ELSE excluded.resolution_method END,
+                confidence = CASE
+                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    THEN source_team_mappings.confidence ELSE excluded.confidence END,
+                trust_state = CASE
+                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    THEN source_team_mappings.trust_state ELSE excluded.trust_state END,
+                resolver_version = excluded.resolver_version
             """,
             (
                 self._provider_id,
@@ -329,6 +625,8 @@ class FixtureCatalog:
                 resolution_method,
                 confidence,
                 to_utc_iso(datetime.now(UTC)),
+                trust_state,
+                RESOLVER_VERSION,
             ),
         )
 
@@ -338,11 +636,43 @@ class FixtureCatalog:
         ).fetchall()
         return {row["canonical_name"]: self._map_team_row(row) for row in rows}
 
-    def _create_team(self, *, canonical_name: str, sport: str) -> Team:
+    def _create_team(
+        self, *, canonical_name: str, sport: str, source_team_id: str | None = None
+    ) -> Team:
         team = Team(id=f"team-{uuid4().hex[:10]}", canonical_name=canonical_name)
+        reference_id_already_used = False
+        if source_team_id is not None:
+            reference_id_already_used = (
+                self._connection.execute(
+                    """
+                    SELECT 1 FROM teams
+                    WHERE reference_provider = ? AND sport = ?
+                      AND reference_provider_id = ?
+                    """,
+                    (REFERENCE_PROVIDER_ID, sport, source_team_id),
+                ).fetchone()
+                is not None
+            )
+        is_reference = (
+            self._provider_id == REFERENCE_PROVIDER_ID
+            and source_team_id is not None
+            and not reference_id_already_used
+        )
         self._connection.execute(
-            "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
-            (team.id, team.canonical_name, sport),
+            """
+            INSERT INTO teams (
+                id, canonical_name, sport, reference_provider,
+                reference_provider_id, identity_status
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team.id,
+                team.canonical_name,
+                sport,
+                REFERENCE_PROVIDER_ID if is_reference else None,
+                source_team_id if is_reference else None,
+                "REFERENCE" if is_reference else "PROVISIONAL",
+            ),
         )
         logger.info(
             "fixture_catalog.team.created",
@@ -350,51 +680,147 @@ class FixtureCatalog:
         )
         return team
 
-    def _find_team_by_source_id(self, source_team_id: str) -> tuple[Team, str | None] | None:
+    def _find_team_by_source_id(
+        self, source_team_id: str, sport: str
+    ) -> tuple[Team, Row] | None:
         row = self._connection.execute(
             """
-            SELECT t.*, m.last_seen_raw_name FROM source_team_id_mappings m
+            SELECT t.id AS canonical_team_id, t.canonical_name, m.*
+            FROM source_team_id_mappings m
             JOIN teams t ON t.id = m.team_id
-            WHERE m.source = ? AND m.source_team_id = ?
+            WHERE m.source = ? AND m.sport = ? AND m.source_team_id = ?
             """,
-            (self._provider_id, source_team_id),
+            (self._provider_id, sport, source_team_id),
         ).fetchone()
         if row is None:
             return None
-        return self._map_team_row(row), row["last_seen_raw_name"]
+        return Team(row["canonical_team_id"], row["canonical_name"]), row
 
-    def _save_team_id_mapping(self, source_team_id: str, team_id: str, raw_name: str) -> None:
-        # UPSERT rather than INSERT OR IGNORE (unlike _save_mapping
-        # above): last_seen_raw_name must be refreshed on every sighting
-        # of an already-mapped id, not just written once on first insert,
-        # or the drift check above would only ever compare against the
-        # id's very first sighting instead of its most recent one.
-        # team_id/created_at are deliberately excluded from the UPDATE
-        # clause -- an id, once mapped, always resolves to the same team
-        # (see _find_team_by_source_id's caller); only the "what name did
-        # we last see under this id" bookkeeping field changes.
+    def _save_team_id_mapping(
+        self,
+        source_team_id: str,
+        sport: str,
+        team_id: str,
+        raw_name: str,
+        *,
+        trust_state: str,
+        resolution_method: str,
+        allow_suspect_override: bool = False,
+    ) -> None:
+        now = to_utc_iso(datetime.now(UTC))
         self._connection.execute(
             """
             INSERT INTO source_team_id_mappings
-                (source, source_team_id, team_id, last_seen_raw_name, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (source, source_team_id)
-            DO UPDATE SET last_seen_raw_name = excluded.last_seen_raw_name
+                (source, sport, source_team_id, team_id,
+                 first_seen_raw_name, last_seen_raw_name, last_verified_raw_name,
+                 trust_state, resolution_method, resolver_version,
+                 verified_at, last_checked_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_team_id) DO UPDATE SET
+                last_seen_raw_name = excluded.last_seen_raw_name,
+                last_checked_at = excluded.last_checked_at,
+                team_id = CASE
+                    WHEN source_team_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    THEN source_team_id_mappings.team_id ELSE excluded.team_id END,
+                trust_state = CASE
+                    WHEN source_team_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    THEN source_team_id_mappings.trust_state ELSE excluded.trust_state END,
+                resolution_method = CASE
+                    WHEN source_team_id_mappings.trust_state IN ('VERIFIED', 'SUSPECT') AND NOT ?
+                    THEN source_team_id_mappings.resolution_method
+                    ELSE excluded.resolution_method END,
+                resolver_version = excluded.resolver_version,
+                last_verified_raw_name = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                         AND (source_team_id_mappings.trust_state != 'SUSPECT' OR ?)
+                    THEN excluded.last_verified_raw_name
+                    ELSE source_team_id_mappings.last_verified_raw_name END,
+                verified_at = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                         AND (source_team_id_mappings.trust_state != 'SUSPECT' OR ?)
+                    THEN excluded.verified_at
+                    ELSE source_team_id_mappings.verified_at END,
+                drift_detected_at = CASE WHEN ? THEN NULL
+                    ELSE source_team_id_mappings.drift_detected_at END
             """,
             (
                 self._provider_id,
+                sport,
                 source_team_id,
                 team_id,
                 raw_name,
-                to_utc_iso(datetime.now(UTC)),
+                raw_name,
+                raw_name if trust_state == TRUST_VERIFIED else None,
+                trust_state,
+                resolution_method,
+                RESOLVER_VERSION,
+                now if trust_state == TRUST_VERIFIED else None,
+                now,
+                now,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+            ),
+        )
+
+    def _mark_team_id_mapping_suspect(
+        self, source_team_id: str, sport: str, raw_name: str
+    ) -> None:
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute(
+            """
+            UPDATE source_team_id_mappings
+            SET trust_state = 'SUSPECT', last_seen_raw_name = ?,
+                last_checked_at = ?, drift_detected_at = ?
+            WHERE source = ? AND sport = ? AND source_team_id = ?
+            """,
+            (raw_name, now, now, self._provider_id, sport, source_team_id),
+        )
+
+    def _promote_team_to_reference(
+        self, team_id: str, sport: str, source_team_id: str
+    ) -> None:
+        self._connection.execute(
+            """
+            UPDATE teams
+            SET reference_provider = ?, reference_provider_id = ?,
+                identity_status = 'REFERENCE'
+            WHERE id = ? AND sport = ?
+              AND (reference_provider IS NULL OR reference_provider = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM teams existing
+                  WHERE existing.reference_provider = ?
+                    AND existing.sport = ?
+                    AND existing.reference_provider_id = ?
+                    AND existing.id != ?
+              )
+            """,
+            (
+                REFERENCE_PROVIDER_ID,
+                source_team_id,
+                team_id,
+                sport,
+                REFERENCE_PROVIDER_ID,
+                REFERENCE_PROVIDER_ID,
+                sport,
+                source_team_id,
+                team_id,
             ),
         )
 
     # -- competition resolution --------------------------------------------
 
     def _resolve_competition(
-        self, *, raw_league: str, sport: str, source_competition_id: str | None = None
-    ) -> tuple[str, str]:
+        self,
+        *,
+        raw_league: str,
+        sport: str,
+        source_competition_id: str | None = None,
+        country: str | None = None,
+    ) -> _CompetitionResolution:
         """Resolves a raw league/competition string to its canonical
         name and stable id, the same exact/alias/fuzzy pattern
         _resolve_team uses for team names. Without this, "Premier
@@ -411,35 +837,79 @@ class FixtureCatalog:
         identity on competition_id, not this string -- see that
         method's docstring for why.
         """
+        source_id_is_suspect = False
+
         # ID fast path -- mirrors _resolve_team's own source_team_id fast
         # path above; see that method's comment for the full reasoning
         # (source_competition_id_mappings, migration 18).
         if source_competition_id is not None:
-            id_hit = self._find_competition_by_source_id(source_competition_id)
+            id_hit = self._find_competition_by_source_id(source_competition_id, sport)
             if id_hit is not None:
-                canonical_name, competition_id, last_seen_raw_name = id_hit
-                if last_seen_raw_name is not None and not names_are_similar(
-                    last_seen_raw_name, raw_league
+                canonical_name, competition_id, mapping = id_hit
+                baseline_name = (
+                    mapping["last_verified_raw_name"]
+                    or mapping["first_seen_raw_name"]
+                )
+                if (
+                    mapping["trust_state"] == TRUST_VERIFIED
+                    and baseline_name is not None
+                    and names_are_similar(
+                        baseline_name,
+                        raw_league,
+                        fuzzy_threshold=self._fuzzy_threshold,
+                    )
                 ):
+                    self._save_competition_id_mapping(
+                        source_competition_id,
+                        sport,
+                        competition_id,
+                        raw_league,
+                        trust_state=TRUST_VERIFIED,
+                        resolution_method="provider_id",
+                    )
+                    return _CompetitionResolution(
+                        canonical_name,
+                        competition_id,
+                        100.0,
+                        "provider_id",
+                        TRUST_VERIFIED,
+                    )
+                if mapping["trust_state"] == TRUST_VERIFIED:
                     logger.warning(
                         "fixture_catalog.competition_id.name_drift",
                         extra={
                             "source_competition_id": source_competition_id,
                             "competition_id": competition_id,
-                            "last_seen_raw_name": last_seen_raw_name,
+                            "last_verified_raw_name": baseline_name,
                             "raw_league": raw_league,
                         },
                     )
-                self._save_competition_id_mapping(source_competition_id, competition_id, raw_league)
-                return canonical_name, competition_id
+                    self._mark_competition_id_mapping_suspect(
+                        source_competition_id, sport, raw_league
+                    )
+                    source_id_is_suspect = True
+                elif mapping["trust_state"] == TRUST_SUSPECT:
+                    source_id_is_suspect = True
 
         mapped = self._find_competition_mapping(raw_league, sport)
         if mapped is not None:
+            mapped_trust = (
+                TRUST_SUSPECT if source_id_is_suspect else TRUST_VERIFIED
+            )
             if source_competition_id is not None:
-                self._save_competition_id_mapping(source_competition_id, mapped[1], raw_league)
-            return mapped
+                self._save_competition_id_mapping(
+                    source_competition_id,
+                    sport,
+                    mapped[1],
+                    raw_league,
+                    trust_state=mapped_trust,
+                    resolution_method="verified_name_mapping",
+                )
+            return _CompetitionResolution(
+                mapped[0], mapped[1], 100.0, "verified_name_mapping", mapped_trust
+            )
 
-        existing = self._competitions_for_sport(sport)
+        existing = self._competitions_for_sport(sport, country)
         normalizer = TeamNormalizer(
             existing.keys(),
             aliases=self._league_aliases,
@@ -454,18 +924,45 @@ class FixtureCatalog:
                 extra={"raw_league": raw_league, "sport": sport, "score": result.confidence},
             )
             canonical_name = raw_league
-            competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+            competition_id = self._create_competition(
+                canonical_name=canonical_name,
+                sport=sport,
+                country=country,
+                source_competition_id=source_competition_id,
+            )
             confidence = result.confidence
         elif result.canonical_name is not None:
             canonical_name = result.canonical_name
             competition_id = existing.get(canonical_name) or self._create_competition(
-                canonical_name=canonical_name, sport=sport
+                canonical_name=canonical_name,
+                sport=sport,
+                country=country,
+                source_competition_id=source_competition_id,
             )
             confidence = result.confidence
         else:
             canonical_name = raw_league
-            competition_id = self._create_competition(canonical_name=canonical_name, sport=sport)
+            competition_id = self._create_competition(
+                canonical_name=canonical_name,
+                sport=sport,
+                country=country,
+                source_competition_id=source_competition_id,
+            )
             confidence = 100.0
+
+        trust_state = (
+            TRUST_SUSPECT
+            if source_id_is_suspect
+            else self._trust_for_method(result.method)
+        )
+        if (
+            self._provider_id == REFERENCE_PROVIDER_ID
+            and source_competition_id is not None
+            and trust_state == TRUST_VERIFIED
+        ):
+            self._promote_competition_to_reference(
+                competition_id, sport, source_competition_id, country
+            )
 
         # Same audit-trail reasoning as _resolve_team's own _save_mapping
         # call -- see that method's comment.
@@ -475,10 +972,20 @@ class FixtureCatalog:
             competition_id,
             resolution_method=result.method,
             confidence=confidence,
+            trust_state=trust_state,
         )
         if source_competition_id is not None:
-            self._save_competition_id_mapping(source_competition_id, competition_id, raw_league)
-        return canonical_name, competition_id
+            self._save_competition_id_mapping(
+                source_competition_id,
+                sport,
+                competition_id,
+                raw_league,
+                trust_state=trust_state,
+                resolution_method=result.method,
+            )
+        return _CompetitionResolution(
+            canonical_name, competition_id, confidence, result.method, trust_state
+        )
 
     def _find_competition_mapping(self, raw_league: str, sport: str) -> tuple[str, str] | None:
         row = self._connection.execute(
@@ -486,6 +993,7 @@ class FixtureCatalog:
             SELECT c.canonical_name, c.id FROM source_competition_mappings m
             JOIN competitions c ON c.id = m.competition_id
             WHERE m.source = ? AND m.sport = ? AND m.source_competition_name = ?
+              AND m.trust_state = 'VERIFIED'
             """,
             (self._provider_id, sport, raw_league),
         ).fetchone()
@@ -499,13 +1007,31 @@ class FixtureCatalog:
         *,
         resolution_method: str,
         confidence: float,
+        trust_state: str,
     ) -> None:
         self._connection.execute(
             """
-            INSERT OR IGNORE INTO source_competition_mappings
+            INSERT INTO source_competition_mappings
                 (source, sport, source_competition_name, competition_id,
-                 resolution_method, confidence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 resolution_method, confidence, created_at,
+                 trust_state, resolver_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_competition_name) DO UPDATE SET
+                competition_id = CASE
+                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    THEN source_competition_mappings.competition_id
+                    ELSE excluded.competition_id END,
+                resolution_method = CASE
+                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    THEN source_competition_mappings.resolution_method
+                    ELSE excluded.resolution_method END,
+                confidence = CASE
+                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    THEN source_competition_mappings.confidence ELSE excluded.confidence END,
+                trust_state = CASE
+                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    THEN source_competition_mappings.trust_state ELSE excluded.trust_state END,
+                resolver_version = excluded.resolver_version
             """,
             (
                 self._provider_id,
@@ -515,20 +1041,71 @@ class FixtureCatalog:
                 resolution_method,
                 confidence,
                 to_utc_iso(datetime.now(UTC)),
+                trust_state,
+                RESOLVER_VERSION,
             ),
         )
 
-    def _competitions_for_sport(self, sport: str) -> dict[str, str]:
-        rows = self._connection.execute(
-            "SELECT * FROM competitions WHERE sport = ?", (sport,)
-        ).fetchall()
+    def _competitions_for_sport(
+        self, sport: str, country: str | None
+    ) -> dict[str, str]:
+        if country is None:
+            rows = self._connection.execute(
+                "SELECT * FROM competitions WHERE sport = ?", (sport,)
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM competitions
+                WHERE sport = ? AND (country IS NULL OR country = ?)
+                """,
+                (sport, country),
+            ).fetchall()
         return {row["canonical_name"]: row["id"] for row in rows}
 
-    def _create_competition(self, *, canonical_name: str, sport: str) -> str:
+    def _create_competition(
+        self,
+        *,
+        canonical_name: str,
+        sport: str,
+        country: str | None,
+        source_competition_id: str | None = None,
+    ) -> str:
         competition_id = f"competition-{uuid4().hex[:10]}"
+        reference_id_already_used = False
+        if source_competition_id is not None:
+            reference_id_already_used = (
+                self._connection.execute(
+                    """
+                    SELECT 1 FROM competitions
+                    WHERE reference_provider = ? AND sport = ?
+                      AND reference_provider_id = ?
+                    """,
+                    (REFERENCE_PROVIDER_ID, sport, source_competition_id),
+                ).fetchone()
+                is not None
+            )
+        is_reference = (
+            self._provider_id == REFERENCE_PROVIDER_ID
+            and source_competition_id is not None
+            and not reference_id_already_used
+        )
         self._connection.execute(
-            "INSERT INTO competitions (id, canonical_name, sport) VALUES (?, ?, ?)",
-            (competition_id, canonical_name, sport),
+            """
+            INSERT INTO competitions (
+                id, canonical_name, sport, country, reference_provider,
+                reference_provider_id, identity_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                competition_id,
+                canonical_name,
+                sport,
+                country,
+                REFERENCE_PROVIDER_ID if is_reference else None,
+                source_competition_id if is_reference else None,
+                "REFERENCE" if is_reference else "PROVISIONAL",
+            ),
         )
         logger.info(
             "fixture_catalog.competition.created",
@@ -541,39 +1118,148 @@ class FixtureCatalog:
         return competition_id
 
     def _find_competition_by_source_id(
-        self, source_competition_id: str
-    ) -> tuple[str, str, str | None] | None:
+        self, source_competition_id: str, sport: str
+    ) -> tuple[str, str, Row] | None:
         row = self._connection.execute(
             """
-            SELECT c.canonical_name, c.id, m.last_seen_raw_name
+            SELECT c.canonical_name, c.id AS canonical_competition_id, m.*
             FROM source_competition_id_mappings m
             JOIN competitions c ON c.id = m.competition_id
-            WHERE m.source = ? AND m.source_competition_id = ?
+            WHERE m.source = ? AND m.sport = ? AND m.source_competition_id = ?
             """,
-            (self._provider_id, source_competition_id),
+            (self._provider_id, sport, source_competition_id),
         ).fetchone()
         if row is None:
             return None
-        return row["canonical_name"], row["id"], row["last_seen_raw_name"]
+        return row["canonical_name"], row["canonical_competition_id"], row
 
     def _save_competition_id_mapping(
-        self, source_competition_id: str, competition_id: str, raw_league: str
+        self,
+        source_competition_id: str,
+        sport: str,
+        competition_id: str,
+        raw_league: str,
+        *,
+        trust_state: str,
+        resolution_method: str,
+        allow_suspect_override: bool = False,
     ) -> None:
-        # Same UPSERT reasoning as _save_team_id_mapping above.
+        now = to_utc_iso(datetime.now(UTC))
         self._connection.execute(
             """
             INSERT INTO source_competition_id_mappings
-                (source, source_competition_id, competition_id, last_seen_raw_name, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (source, source_competition_id)
-            DO UPDATE SET last_seen_raw_name = excluded.last_seen_raw_name
+                (source, sport, source_competition_id, competition_id,
+                 first_seen_raw_name, last_seen_raw_name, last_verified_raw_name,
+                 trust_state, resolution_method, resolver_version,
+                 verified_at, last_checked_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_competition_id) DO UPDATE SET
+                last_seen_raw_name = excluded.last_seen_raw_name,
+                last_checked_at = excluded.last_checked_at,
+                competition_id = CASE
+                    WHEN source_competition_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    THEN source_competition_id_mappings.competition_id
+                    ELSE excluded.competition_id END,
+                trust_state = CASE
+                    WHEN source_competition_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    THEN source_competition_id_mappings.trust_state
+                    ELSE excluded.trust_state END,
+                resolution_method = CASE
+                    WHEN source_competition_id_mappings.trust_state
+                         IN ('VERIFIED', 'SUSPECT') AND NOT ?
+                    THEN source_competition_id_mappings.resolution_method
+                    ELSE excluded.resolution_method END,
+                resolver_version = excluded.resolver_version,
+                last_verified_raw_name = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                         AND (source_competition_id_mappings.trust_state != 'SUSPECT' OR ?)
+                    THEN excluded.last_verified_raw_name
+                    ELSE source_competition_id_mappings.last_verified_raw_name END,
+                verified_at = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                         AND (source_competition_id_mappings.trust_state != 'SUSPECT' OR ?)
+                    THEN excluded.verified_at
+                    ELSE source_competition_id_mappings.verified_at END,
+                drift_detected_at = CASE WHEN ? THEN NULL
+                    ELSE source_competition_id_mappings.drift_detected_at END
             """,
             (
                 self._provider_id,
+                sport,
                 source_competition_id,
                 competition_id,
                 raw_league,
-                to_utc_iso(datetime.now(UTC)),
+                raw_league,
+                raw_league if trust_state == TRUST_VERIFIED else None,
+                trust_state,
+                resolution_method,
+                RESOLVER_VERSION,
+                now if trust_state == TRUST_VERIFIED else None,
+                now,
+                now,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+                allow_suspect_override,
+            ),
+        )
+
+    def _mark_competition_id_mapping_suspect(
+        self, source_competition_id: str, sport: str, raw_league: str
+    ) -> None:
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute(
+            """
+            UPDATE source_competition_id_mappings
+            SET trust_state = 'SUSPECT', last_seen_raw_name = ?,
+                last_checked_at = ?, drift_detected_at = ?
+            WHERE source = ? AND sport = ? AND source_competition_id = ?
+            """,
+            (
+                raw_league,
+                now,
+                now,
+                self._provider_id,
+                sport,
+                source_competition_id,
+            ),
+        )
+
+    def _promote_competition_to_reference(
+        self,
+        competition_id: str,
+        sport: str,
+        source_competition_id: str,
+        country: str | None,
+    ) -> None:
+        self._connection.execute(
+            """
+            UPDATE competitions
+            SET reference_provider = ?, reference_provider_id = ?,
+                identity_status = 'REFERENCE', country = COALESCE(?, country)
+            WHERE id = ? AND sport = ?
+              AND (reference_provider IS NULL OR reference_provider = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM competitions existing
+                  WHERE existing.reference_provider = ?
+                    AND existing.sport = ?
+                    AND existing.reference_provider_id = ?
+                    AND existing.id != ?
+              )
+            """,
+            (
+                REFERENCE_PROVIDER_ID,
+                source_competition_id,
+                country,
+                competition_id,
+                sport,
+                REFERENCE_PROVIDER_ID,
+                REFERENCE_PROVIDER_ID,
+                sport,
+                source_competition_id,
+                competition_id,
             ),
         )
 
@@ -670,24 +1356,346 @@ class FixtureCatalog:
         )
         return replace(event, start_time=new_start_time)
 
-    def _find_event_mapping(self, source_event_id: str) -> Event | None:
+    def _find_event_mapping(self, source_event_id: str) -> _EventMapping | None:
         row = self._connection.execute(
             """
-            SELECT e.* FROM source_event_mappings m
+            SELECT e.*, m.source, m.source_event_id,
+                   m.trust_state, m.resolution_method, m.resolver_version,
+                   m.sport AS mapping_sport,
+                   m.last_verified_home_name, m.last_verified_away_name,
+                   m.last_verified_competition_name, m.last_verified_country,
+                   m.home_source_team_id, m.away_source_team_id,
+                   m.source_competition_id, m.verified_at,
+                   m.last_checked_at, m.drift_detected_at, m.created_at
+            FROM source_event_mappings m
             JOIN events e ON e.id = m.event_id
             WHERE m.source = ? AND m.source_event_id = ?
             """,
             (self._provider_id, source_event_id),
         ).fetchone()
-        return self._map_event_row(row) if row else None
+        return _EventMapping(self._map_event_row(row), row) if row else None
 
-    def _save_event_mapping(self, source_event_id: str, event_id: str) -> None:
+    def _save_event_mapping(
+        self,
+        source_event_id: str,
+        event_id: str,
+        *,
+        trust_state: str,
+        resolution_method: str,
+        sport: str,
+        league: str,
+        home_raw: str,
+        away_raw: str,
+        country: str | None,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+        competition_source_id: str | None,
+    ) -> None:
+        now = to_utc_iso(datetime.now(UTC))
         self._connection.execute(
             """
-            INSERT OR IGNORE INTO source_event_mappings (source, source_event_id, event_id)
-            VALUES (?, ?, ?)
+            INSERT INTO source_event_mappings (
+                source, source_event_id, event_id, trust_state,
+                resolution_method, resolver_version, sport,
+                last_verified_home_name, last_verified_away_name,
+                last_verified_competition_name, last_verified_country,
+                home_source_team_id, away_source_team_id,
+                source_competition_id, verified_at, last_checked_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, source_event_id) DO UPDATE SET
+                event_id = CASE
+                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    THEN source_event_mappings.event_id ELSE excluded.event_id END,
+                trust_state = CASE
+                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    THEN source_event_mappings.trust_state ELSE excluded.trust_state END,
+                resolution_method = CASE
+                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    THEN source_event_mappings.resolution_method
+                    ELSE excluded.resolution_method END,
+                resolver_version = excluded.resolver_version,
+                sport = excluded.sport,
+                last_verified_home_name = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                    THEN excluded.last_verified_home_name
+                    ELSE source_event_mappings.last_verified_home_name END,
+                last_verified_away_name = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                    THEN excluded.last_verified_away_name
+                    ELSE source_event_mappings.last_verified_away_name END,
+                last_verified_competition_name = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                    THEN excluded.last_verified_competition_name
+                    ELSE source_event_mappings.last_verified_competition_name END,
+                last_verified_country = CASE
+                    WHEN excluded.trust_state = 'VERIFIED'
+                    THEN excluded.last_verified_country
+                    ELSE source_event_mappings.last_verified_country END,
+                home_source_team_id = COALESCE(
+                    excluded.home_source_team_id,
+                    source_event_mappings.home_source_team_id
+                ),
+                away_source_team_id = COALESCE(
+                    excluded.away_source_team_id,
+                    source_event_mappings.away_source_team_id
+                ),
+                source_competition_id = COALESCE(
+                    excluded.source_competition_id,
+                    source_event_mappings.source_competition_id
+                ),
+                verified_at = CASE WHEN excluded.trust_state = 'VERIFIED'
+                    THEN excluded.verified_at ELSE source_event_mappings.verified_at END,
+                last_checked_at = excluded.last_checked_at
             """,
-            (self._provider_id, source_event_id, event_id),
+            (
+                self._provider_id,
+                source_event_id,
+                event_id,
+                trust_state,
+                resolution_method,
+                RESOLVER_VERSION,
+                sport,
+                home_raw if trust_state == TRUST_VERIFIED else None,
+                away_raw if trust_state == TRUST_VERIFIED else None,
+                league if trust_state == TRUST_VERIFIED else None,
+                country if trust_state == TRUST_VERIFIED else None,
+                home_team_source_id,
+                away_team_source_id,
+                competition_source_id,
+                now if trust_state == TRUST_VERIFIED else None,
+                now,
+                now,
+            ),
+        )
+
+    def _event_mapping_is_compatible(
+        self,
+        mapping: _EventMapping,
+        *,
+        sport: str,
+        league: str,
+        home_raw: str,
+        away_raw: str,
+        country: str | None,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+        competition_source_id: str | None,
+    ) -> bool:
+        row = mapping.row
+        if row["mapping_sport"] is not None and row["mapping_sport"] != sport:
+            return False
+
+        stored_pairs = (
+            (row["home_source_team_id"], home_team_source_id),
+            (row["away_source_team_id"], away_team_source_id),
+            (row["source_competition_id"], competition_source_id),
+        )
+        if any(stored and incoming and stored != incoming for stored, incoming in stored_pairs):
+            return False
+
+        name_pairs = (
+            (
+                row["last_verified_home_name"],
+                home_raw,
+                row["home_source_team_id"],
+                home_team_source_id,
+            ),
+            (
+                row["last_verified_away_name"],
+                away_raw,
+                row["away_source_team_id"],
+                away_team_source_id,
+            ),
+            (
+                row["last_verified_competition_name"],
+                league,
+                row["source_competition_id"],
+                competition_source_id,
+            ),
+        )
+        if any(
+            stored is not None
+            and not (stored_id is not None and stored_id == incoming_id)
+            and not names_are_similar(
+                stored, incoming, fuzzy_threshold=self._fuzzy_threshold
+            )
+            for stored, incoming, stored_id, incoming_id in name_pairs
+        ):
+            return False
+
+        stored_country = row["last_verified_country"]
+        if (
+            stored_country is not None
+            and country is not None
+            and stored_country.strip().casefold() != country.strip().casefold()
+        ):
+            return False
+
+        if home_team_source_id is not None:
+            home_id_hit = self._find_team_by_source_id(home_team_source_id, sport)
+            if (
+                home_id_hit is not None
+                and home_id_hit[1]["trust_state"] == TRUST_VERIFIED
+                and home_id_hit[0].id != mapping.event.home_team.id
+            ):
+                return False
+        if away_team_source_id is not None:
+            away_id_hit = self._find_team_by_source_id(away_team_source_id, sport)
+            if (
+                away_id_hit is not None
+                and away_id_hit[1]["trust_state"] == TRUST_VERIFIED
+                and away_id_hit[0].id != mapping.event.away_team.id
+            ):
+                return False
+        if competition_source_id is not None:
+            competition_id_hit = self._find_competition_by_source_id(
+                competition_source_id, sport
+            )
+            if (
+                competition_id_hit is not None
+                and competition_id_hit[2]["trust_state"] == TRUST_VERIFIED
+                and competition_id_hit[1] != mapping.event.competition_id
+            ):
+                return False
+
+        home_name_mapping = self._find_mapping(home_raw, sport)
+        if home_name_mapping is not None and home_name_mapping.id != mapping.event.home_team.id:
+            return False
+        away_name_mapping = self._find_mapping(away_raw, sport)
+        if away_name_mapping is not None and away_name_mapping.id != mapping.event.away_team.id:
+            return False
+        competition_name_mapping = self._find_competition_mapping(league, sport)
+        return not (
+            competition_name_mapping is not None
+            and competition_name_mapping[1] != mapping.event.competition_id
+        )
+
+    def _learn_identity_from_event_mapping(
+        self,
+        event: Event,
+        *,
+        sport: str,
+        league: str,
+        home_raw: str,
+        away_raw: str,
+        country: str | None,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+        competition_source_id: str | None,
+    ) -> None:
+        for raw_name, team, source_team_id in (
+            (home_raw, event.home_team, home_team_source_id),
+            (away_raw, event.away_team, away_team_source_id),
+        ):
+            self._save_mapping(
+                raw_name,
+                sport,
+                team.id,
+                resolution_method="provider_event_context",
+                confidence=100.0,
+                trust_state=TRUST_VERIFIED,
+            )
+            if source_team_id is not None:
+                self._save_team_id_mapping(
+                    source_team_id,
+                    sport,
+                    team.id,
+                    raw_name,
+                    trust_state=TRUST_VERIFIED,
+                    resolution_method="provider_event_context",
+                )
+                if self._provider_id == REFERENCE_PROVIDER_ID:
+                    self._promote_team_to_reference(team.id, sport, source_team_id)
+
+        self._save_competition_mapping(
+            league,
+            sport,
+            event.competition_id,
+            resolution_method="provider_event_context",
+            confidence=100.0,
+            trust_state=TRUST_VERIFIED,
+        )
+        if competition_source_id is not None:
+            self._save_competition_id_mapping(
+                competition_source_id,
+                sport,
+                event.competition_id,
+                league,
+                trust_state=TRUST_VERIFIED,
+                resolution_method="provider_event_context",
+            )
+            if self._provider_id == REFERENCE_PROVIDER_ID:
+                self._promote_competition_to_reference(
+                    event.competition_id,
+                    sport,
+                    competition_source_id,
+                    country,
+                )
+
+    def _refresh_event_mapping(
+        self,
+        source_event_id: str,
+        *,
+        sport: str,
+        league: str,
+        home_raw: str,
+        away_raw: str,
+        country: str | None,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+        competition_source_id: str | None,
+    ) -> None:
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute(
+            """
+            UPDATE source_event_mappings
+            SET resolver_version = ?, sport = ?,
+                last_verified_home_name = ?, last_verified_away_name = ?,
+                last_verified_competition_name = ?, last_verified_country = ?,
+                home_source_team_id = COALESCE(?, home_source_team_id),
+                away_source_team_id = COALESCE(?, away_source_team_id),
+                source_competition_id = COALESCE(?, source_competition_id),
+                verified_at = ?, last_checked_at = ?
+            WHERE source = ? AND source_event_id = ? AND trust_state = 'VERIFIED'
+            """,
+            (
+                RESOLVER_VERSION,
+                sport,
+                home_raw,
+                away_raw,
+                league,
+                country,
+                home_team_source_id,
+                away_team_source_id,
+                competition_source_id,
+                now,
+                now,
+                self._provider_id,
+                source_event_id,
+            ),
+        )
+
+    def _mark_event_mapping_suspect(self, source_event_id: str) -> None:
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute(
+            """
+            UPDATE source_event_mappings
+            SET trust_state = 'SUSPECT', last_checked_at = ?, drift_detected_at = ?
+            WHERE source = ? AND source_event_id = ?
+            """,
+            (now, now, self._provider_id, source_event_id),
+        )
+        logger.warning(
+            "fixture_catalog.event_id.identity_drift",
+            extra={"source_event_id": source_event_id},
+        )
+
+    @staticmethod
+    def _trust_for_method(method: str) -> str:
+        return (
+            TRUST_UNVERIFIED
+            if method in {"fuzzy", "ambiguous"}
+            else TRUST_VERIFIED
         )
 
     def _find_event(

@@ -44,10 +44,10 @@ def parse_the_odds_api_response(
     sport_key (e.g. "soccer_epl") is the-odds-api's own stable slug for
     the competition -- unlike every other source in this project, no
     numeric team/league id exists upstream at all (confirmed: an event
-    here has no id field beyond the whole fixture's own "id", already
-    unused, and no per-team id whatsoever), but sport_key is itself a
+    here has no per-team id whatsoever), but sport_key is itself a
     genuine stable identifier, just a slug rather than a number; see
-    RawEventOdds.source_competition_id. In practice both call sites below
+    RawEventOdds.source_competition_id.  The event-level ``id`` is kept
+    separately as RawEventOdds.source_event_id. In practice both call sites below
     already pass the same value for this and for league_fallback, but the
     two are conceptually distinct (one is a display-name fallback, this
     one is an identifier) and kept as separate parameters. No team ids
@@ -107,6 +107,9 @@ def parse_the_odds_api_response(
                     # (e.g. "bet365") -- see RawEventOdds.source_id for
                     # why this must not be derived from the display name.
                     source_id=bookmaker.get("key"),
+                    source_event_id=(
+                        str(event["id"]) if event.get("id") is not None else None
+                    ),
                     source_competition_id=sport_key,
                 )
             )

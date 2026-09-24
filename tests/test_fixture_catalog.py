@@ -52,7 +52,7 @@ def test_same_source_same_spelling_reuses_cached_mapping_and_event():
     assert teams == 2  # Partizan + Crvena Zvezda, not duplicated
 
 
-def test_source_event_id_is_cached_and_reused_on_a_later_sighting():
+def test_source_event_id_with_catastrophic_identity_drift_is_marked_suspect():
     connection = make_connection()
     catalog = FixtureCatalog(connection, provider_id="api-football")
 
@@ -65,21 +65,27 @@ def test_source_event_id_is_cached_and_reused_on_a_later_sighting():
     ).fetchone()["n"]
     assert mappings == 1
 
-    # Even with different (wrong-on-purpose) team names/start_time, the
-    # cached source_event_id mapping wins outright -- this is exactly
-    # the fast path's point: a fixture already resolved once is trusted
-    # without re-running fuzzy team/competition resolution at all.
+    original_start = first.event.start_time
     second = catalog.match(
         sport="football", league="L", home_team_raw="Some Other Name",
         away_team_raw="Yet Another Name", start_time=T0 + timedelta(days=30),
         source_event_id="12345",
     )
 
-    assert second.event.id == first.event.id
-    assert second.confidence == 100.0
-    # No new team rows created for "Some Other Name"/"Yet Another Name".
-    teams = connection.execute("SELECT COUNT(*) AS n FROM teams").fetchone()["n"]
-    assert teams == 2
+    assert second.event.id != first.event.id
+    row = connection.execute(
+        """
+        SELECT trust_state, drift_detected_at FROM source_event_mappings
+        WHERE source = 'api-football' AND source_event_id = '12345'
+        """
+    ).fetchone()
+    assert row["trust_state"] == "SUSPECT"
+    assert row["drift_detected_at"] is not None
+    # A recycled id must not reschedule/mutate the old fixture.
+    stored = connection.execute(
+        "SELECT start_time FROM events WHERE id = ?", (first.event.id,)
+    ).fetchone()
+    assert datetime.fromisoformat(stored["start_time"]) == original_start
 
 
 def test_source_event_id_fast_path_syncs_a_rescheduled_kickoff():
@@ -210,15 +216,15 @@ def test_team_source_id_hit_skips_fuzzy_matching_entirely():
     )
 
     second = catalog.match(
-        sport="football", league="L", home_team_raw="Completely Different Spelling",
-        away_team_raw="Also Totally Different", start_time=T0 + timedelta(days=1),
+        sport="football", league="L", home_team_raw="PARTIZAN",
+        away_team_raw="Crvena   Zvezda", start_time=T0 + timedelta(days=1),
         home_team_source_id="435", away_team_source_id="451",
     )
 
     assert second.event.home_team.id == first.event.home_team.id
     assert second.event.away_team.id == first.event.away_team.id
     assert second.confidence == 100.0
-    # No new team rows for the wildly different spellings -- the id hit
+    # No new team rows for harmless spelling drift -- the id hit
     # short-circuited before TeamNormalizer ever ran.
     teams = connection.execute("SELECT COUNT(*) AS n FROM teams").fetchone()["n"]
     assert teams == 2
@@ -248,11 +254,7 @@ def test_team_source_id_is_saved_after_a_name_based_resolution():
     }
 
 
-def test_team_source_id_hit_with_drifted_name_still_trusts_the_id(caplog):
-    # A provider recycling a numeric id across a season boundary onto a
-    # genuinely different name is still trusted -- see
-    # fixture_catalog.team_id.name_drift -- but must be logged so a human
-    # notices, not silently merged with no trace.
+def test_team_source_id_catastrophic_drift_becomes_suspect(caplog):
     connection = make_connection()
     catalog = FixtureCatalog(connection, provider_id="api-football")
 
@@ -269,10 +271,21 @@ def test_team_source_id_hit_with_drifted_name_still_trusts_the_id(caplog):
             home_team_source_id="435", away_team_source_id="451",
         )
 
-    assert second.event.home_team.id == first.event.home_team.id
+    assert second.event.home_team.id != first.event.home_team.id
     assert any(
         record.message == "fixture_catalog.team_id.name_drift" for record in caplog.records
     )
+    row = connection.execute(
+        """
+        SELECT trust_state, last_seen_raw_name, last_verified_raw_name, drift_detected_at
+        FROM source_team_id_mappings
+        WHERE source = 'api-football' AND sport = 'football' AND source_team_id = '435'
+        """
+    ).fetchone()
+    assert row["trust_state"] == "SUSPECT"
+    assert row["last_seen_raw_name"] == "A Totally Unrelated Name"
+    assert row["last_verified_raw_name"] == "Partizan"
+    assert row["drift_detected_at"] is not None
 
 
 def test_no_team_source_id_falls_back_to_normal_resolution():
@@ -301,7 +314,7 @@ def test_competition_source_id_hit_skips_fuzzy_matching_entirely():
     )
 
     second = catalog.match(
-        sport="football", league="A Completely Different League Name",
+        sport="football", league="LIGA   PROFESIONAL ARGENTINA",
         home_team_raw="Some Other Team", away_team_raw="Yet Another Team",
         start_time=T0 + timedelta(days=1), competition_source_id="128",
     )
@@ -330,7 +343,7 @@ def test_competition_source_id_is_saved_after_a_name_based_resolution():
     assert row["last_seen_raw_name"] == "Liga Profesional Argentina"
 
 
-def test_competition_source_id_hit_with_drifted_name_still_trusts_the_id(caplog):
+def test_competition_source_id_catastrophic_drift_becomes_suspect(caplog):
     connection = make_connection()
     catalog = FixtureCatalog(connection, provider_id="api-football")
 
@@ -340,7 +353,7 @@ def test_competition_source_id_hit_with_drifted_name_still_trusts_the_id(caplog)
     )
 
     with caplog.at_level("WARNING"):
-        catalog.match(
+        second = catalog.match(
             sport="football", league="A Totally Unrelated League Name",
             home_team_raw="River Plate", away_team_raw="Boca Juniors",
             start_time=T0 + timedelta(days=200), competition_source_id="128",
@@ -350,6 +363,222 @@ def test_competition_source_id_hit_with_drifted_name_still_trusts_the_id(caplog)
         record.message == "fixture_catalog.competition_id.name_drift"
         for record in caplog.records
     )
+    row = connection.execute(
+        """
+        SELECT trust_state, last_seen_raw_name, last_verified_raw_name, drift_detected_at
+        FROM source_competition_id_mappings
+        WHERE source = 'api-football' AND sport = 'football'
+          AND source_competition_id = '128'
+        """
+    ).fetchone()
+    assert row["trust_state"] == "SUSPECT"
+    assert row["last_seen_raw_name"] == "A Totally Unrelated League Name"
+    assert row["last_verified_raw_name"] == "Liga Profesional Argentina"
+    assert row["drift_detected_at"] is not None
+    first_competition_id = connection.execute(
+        "SELECT reference_provider_id, id FROM competitions WHERE reference_provider_id = '128'"
+    ).fetchone()["id"]
+    assert second.event.competition_id != first_competition_id
+
+
+def test_fuzzy_only_team_id_mapping_stays_unverified():
+    connection = make_connection()
+    seed = FixtureCatalog(connection, provider_id="api-football", fuzzy_threshold=80.0)
+    seed.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Manchester United",
+        away_team_raw="Liverpool",
+        start_time=T0,
+        home_team_source_id="33",
+        away_team_source_id="40",
+    )
+
+    provider = FixtureCatalog(connection, provider_id="mozzart", fuzzy_threshold=80.0)
+    result = provider.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Manchester Utd",
+        away_team_raw="Liverpool",
+        start_time=T0 + timedelta(days=1),
+        home_team_source_id="9001",
+        away_team_source_id="9002",
+    )
+
+    assert result.event.home_team.canonical_name == "Manchester United"
+    row = connection.execute(
+        """
+        SELECT trust_state, resolution_method, resolver_version
+        FROM source_team_id_mappings
+        WHERE source = 'mozzart' AND sport = 'football' AND source_team_id = '9001'
+        """
+    ).fetchone()
+    assert row["trust_state"] == "UNVERIFIED"
+    assert row["resolution_method"] == "fuzzy"
+    assert row["resolver_version"] == 2
+
+
+def test_verified_event_context_learns_sabah_masazir_provider_alias():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    canonical = reference.match(
+        sport="football",
+        league="Azerbaijan - Premyer Liqa",
+        home_team_raw="Sabah",
+        away_team_raw="Qarabag",
+        start_time=T0,
+        source_event_id="af-1",
+        home_team_source_id="100",
+        away_team_source_id="101",
+        competition_source_id="200",
+        country="Azerbaijan",
+    )
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    first = mozzart.match(
+        sport="football",
+        league="Azerbaijan - Premyer Liqa",
+        home_team_raw="Sabah",
+        away_team_raw="Qarabag",
+        start_time=T0,
+        source_event_id="m-1",
+        home_team_source_id="900",
+        away_team_source_id="901",
+        competition_source_id="902",
+        country="Azerbaijan",
+    )
+    second = mozzart.match(
+        sport="football",
+        league="Azerbaijan - Premyer Liqa",
+        home_team_raw="Sabah Masazir",
+        away_team_raw="Qarabag",
+        start_time=T0 + timedelta(minutes=5),
+        source_event_id="m-1",
+        home_team_source_id="900",
+        away_team_source_id="901",
+        competition_source_id="902",
+        country="Azerbaijan",
+    )
+
+    assert canonical.event is not None
+    assert first.event.id == canonical.event.id
+    assert second.event.id == canonical.event.id
+    row = connection.execute(
+        """
+        SELECT m.team_id, m.trust_state, m.resolution_method
+        FROM source_team_mappings m
+        WHERE m.source = 'mozzart' AND m.sport = 'football'
+          AND m.source_team_name = 'Sabah Masazir'
+        """
+    ).fetchone()
+    assert row["team_id"] == canonical.event.home_team.id
+    assert row["trust_state"] == "VERIFIED"
+    assert row["resolution_method"] == "provider_event_context"
+
+
+def test_manual_provider_mapping_overrides_a_suspect_id():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    canonical = reference.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="West Ham United",
+        away_team_raw="Liverpool",
+        start_time=T0,
+        home_team_source_id="48",
+        away_team_source_id="40",
+    )
+    assert canonical.event is not None
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    provisional = mozzart.match(
+        sport="football",
+        league="Other",
+        home_team_raw="Unrelated Placeholder",
+        away_team_raw="Everton",
+        start_time=T0 + timedelta(days=1),
+        home_team_source_id="777",
+    )
+    assert provisional.event is not None
+    connection.execute(
+        """
+        UPDATE source_team_id_mappings SET trust_state = 'SUSPECT'
+        WHERE source = 'mozzart' AND sport = 'football' AND source_team_id = '777'
+        """
+    )
+    connection.commit()
+
+    mozzart.verify_team_mapping(
+        sport="football",
+        source_name="Westham Untd",
+        source_team_id="777",
+        canonical_team_id=canonical.event.home_team.id,
+    )
+
+    mapped = mozzart.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Westham Untd",
+        away_team_raw="Chelsea",
+        start_time=T0 + timedelta(days=2),
+        home_team_source_id="777",
+    )
+    assert mapped.event.home_team.id == canonical.event.home_team.id
+    row = connection.execute(
+        """
+        SELECT trust_state, resolution_method FROM source_team_id_mappings
+        WHERE source = 'mozzart' AND sport = 'football' AND source_team_id = '777'
+        """
+    ).fetchone()
+    assert row["trust_state"] == "VERIFIED"
+    assert row["resolution_method"] == "manual"
+
+
+def test_api_football_entities_are_reference_backed_and_others_are_provisional():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+    result = api.match(
+        sport="football",
+        league="Argentina - Liga Profesional",
+        home_team_raw="River Plate",
+        away_team_raw="Boca Juniors",
+        start_time=T0,
+        home_team_source_id="435",
+        away_team_source_id="451",
+        competition_source_id="128",
+        country="Argentina",
+    )
+    assert result.event is not None
+
+    team = connection.execute(
+        "SELECT * FROM teams WHERE id = ?", (result.event.home_team.id,)
+    ).fetchone()
+    competition = connection.execute(
+        "SELECT * FROM competitions WHERE id = ?", (result.event.competition_id,)
+    ).fetchone()
+    assert (team["reference_provider"], team["reference_provider_id"]) == (
+        "api-football",
+        "435",
+    )
+    assert team["identity_status"] == "REFERENCE"
+    assert competition["reference_provider_id"] == "128"
+    assert competition["identity_status"] == "REFERENCE"
+    assert competition["country"] == "Argentina"
+
+    other = FixtureCatalog(connection, provider_id="mozzart")
+    other_result = other.match(
+        sport="football",
+        league="Unknown Local League",
+        home_team_raw="Unknown Local Club",
+        away_team_raw="Another Local Club",
+        start_time=T0 + timedelta(days=1),
+        home_team_source_id="local-1",
+    )
+    provisional = connection.execute(
+        "SELECT identity_status FROM teams WHERE id = ?",
+        (other_result.event.home_team.id,),
+    ).fetchone()
+    assert provisional["identity_status"] == "PROVISIONAL"
 
 
 def test_case_and_whitespace_variant_spelling_reuses_the_existing_team():

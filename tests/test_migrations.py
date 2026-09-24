@@ -18,6 +18,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_15_signal_peak_edge_percent,
     _migration_16_retention_cleanup_indexes,
     _migration_17_odds_snapshot_quote_time,
+    _migration_19_reference_identity_and_mapping_trust,
 )
 
 
@@ -947,3 +948,110 @@ def test_migration_17_is_safe_to_re_run():
         "SELECT quote_time FROM odds_snapshots WHERE event_id = 'e1'"
     ).fetchone()
     assert row["quote_time"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_migration_19_preserves_rows_and_adds_reference_and_trust_metadata():
+    connection = make_connection()
+    for migration in MIGRATIONS[:18]:
+        migration(connection)
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES ('team-1', 'Sabah', 'football')"
+    )
+    connection.execute(
+        """
+        INSERT INTO competitions (id, canonical_name, sport)
+        VALUES ('competition-1', 'Premyer Liqa', 'football')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO events (
+            id, sport, league, competition_id, home_team_id, away_team_id, start_time
+        ) VALUES (
+            'event-1', 'football', 'Premyer Liqa', 'competition-1',
+            'team-1', 'team-1', '2026-01-01T00:00:00+00:00'
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO source_team_mappings (
+            source, sport, source_team_name, team_id,
+            resolution_method, confidence, created_at
+        ) VALUES ('mozzart', 'football', 'Sabah Masazir', 'team-1',
+                  'fuzzy', 88.0, '2026-01-01T00:00:00+00:00')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO source_team_id_mappings (
+            source, source_team_id, team_id, last_seen_raw_name, created_at
+        ) VALUES ('api-football', '100', 'team-1', 'Sabah',
+                  '2026-01-01T00:00:00+00:00')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO source_competition_id_mappings (
+            source, source_competition_id, competition_id, last_seen_raw_name, created_at
+        ) VALUES ('api-football', '200', 'competition-1', 'Premyer Liqa',
+                  '2026-01-01T00:00:00+00:00')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO source_event_mappings (source, source_event_id, event_id)
+        VALUES ('api-football', '300', 'event-1')
+        """
+    )
+    connection.commit()
+
+    _migration_19_reference_identity_and_mapping_trust(connection)
+
+    team = connection.execute("SELECT * FROM teams WHERE id = 'team-1'").fetchone()
+    assert team["identity_status"] == "REFERENCE"
+    assert team["reference_provider"] == "api-football"
+    assert team["reference_provider_id"] == "100"
+
+    fuzzy = connection.execute(
+        """
+        SELECT trust_state, resolver_version FROM source_team_mappings
+        WHERE source = 'mozzart' AND source_team_name = 'Sabah Masazir'
+        """
+    ).fetchone()
+    assert fuzzy["trust_state"] == "UNVERIFIED"
+    assert fuzzy["resolver_version"] == 1
+
+    id_mapping = connection.execute(
+        """
+        SELECT sport, trust_state, last_verified_raw_name
+        FROM source_team_id_mappings
+        WHERE source = 'api-football' AND source_team_id = '100'
+        """
+    ).fetchone()
+    assert id_mapping["sport"] == "football"
+    assert id_mapping["trust_state"] == "VERIFIED"
+    assert id_mapping["last_verified_raw_name"] == "Sabah"
+
+    event_mapping = connection.execute(
+        """
+        SELECT trust_state, resolver_version FROM source_event_mappings
+        WHERE source_event_id = '300'
+        """
+    ).fetchone()
+    assert event_mapping["trust_state"] == "UNVERIFIED"
+    assert event_mapping["resolver_version"] == 1
+
+
+def test_migration_19_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:18]:
+        migration(connection)
+
+    _migration_19_reference_identity_and_mapping_trust(connection)
+    _migration_19_reference_identity_and_mapping_trust(connection)
+
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_team_id_mappings)")
+    }
+    assert {"sport", "trust_state", "resolver_version", "last_verified_raw_name"} <= columns

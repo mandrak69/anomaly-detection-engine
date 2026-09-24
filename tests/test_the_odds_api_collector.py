@@ -102,6 +102,7 @@ def test_raw_event_odds_carries_the_sport_key_as_source_competition_id():
     )
     raw = collector.collect().records[0]
 
+    assert raw.source_event_id == "abc123"
     assert raw.source_competition_id == "soccer_epl"
     # No numeric team ids exist upstream at all for this source.
     assert raw.source_home_team_id is None
