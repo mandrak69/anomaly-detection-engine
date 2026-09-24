@@ -23,6 +23,7 @@ def football_event(
     home="FK Partizan",
     away="FK Crvena Zvezda",
     league="Super Liga",
+    region=None,
     start_time_ms=1787904000000,
     sport_name="Fudbal",
     include_match_winner=True,
@@ -42,17 +43,17 @@ def football_event(
         positions.append(
             {"index": 1, "groups": [group("Ukupno golova", sels, over_under=totals_line)]}
         )
-    return {
-        "header": {
-            "eventId": event_id,
-            "sport": {"name": sport_name},
-            "league": {"name": league},
-            "startTime": start_time_ms,
-            "rivals": [home, away],
-            "state": "ACTIVE",
-        },
-        "positions": positions,
+    header = {
+        "eventId": event_id,
+        "sport": {"name": sport_name},
+        "league": {"name": league},
+        "startTime": start_time_ms,
+        "rivals": [home, away],
+        "state": "ACTIVE",
     }
+    if region is not None:
+        header["region"] = {"name": region}
+    return {"header": header, "positions": positions}
 
 
 def drop_capture(capture_dir, events, filename="meridianbet.json"):
@@ -114,6 +115,40 @@ def test_maps_a_clean_event_into_two_market_records(tmp_path):
     totals = next(r for r in result if r.market.market_type == MarketType.TOTALS)
     assert totals.market.line == Decimal("2.5")
     assert totals.odds == {"UNDER": Decimal("2.01"), "OVER": Decimal("1.63")}
+
+
+def test_same_league_name_in_two_regions_does_not_collide(tmp_path):
+    # Regression test: meridianbet.com's own header.league.name alone is
+    # not a safe competition identity -- many regions name a division the
+    # exact same generic thing ("Premier Liga", "Liga Rezervi", ...), and
+    # meridianbet reports both under the identical bare name with no
+    # other disambiguation in that field. Verified live against a real
+    # capture: a "Premier Liga" bucket populated this way silently mixed
+    # England, Scotland, Wales, Russia, Canada, and the Dominican
+    # Republic together. header.region.name is present on every real
+    # captured event and must be folded in.
+    drop_capture(tmp_path, [
+        football_event(event_id=1, home="Arsenal", away="Chelsea",
+                        league="Premier Liga", region="Engleska"),
+        football_event(event_id=2, home="Celtic", away="Rangers",
+                        league="Premier Liga", region="Škotska"),
+    ])
+
+    collector = MeridianbetFileCollector(tmp_path)
+    result = collector.collect().records
+
+    leagues_by_event = {r.source_event_id: r.league for r in result}
+    assert leagues_by_event["1"] == "Engleska - Premier Liga"
+    assert leagues_by_event["2"] == "Škotska - Premier Liga"
+
+
+def test_missing_region_falls_back_to_the_bare_league_name(tmp_path):
+    drop_capture(tmp_path, [football_event(league="Liga Šampiona", region=None)])
+
+    collector = MeridianbetFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert {r.league for r in result} == {"Liga Šampiona"}
 
 
 def test_accepts_the_flat_payload_events_envelope_shape(tmp_path):

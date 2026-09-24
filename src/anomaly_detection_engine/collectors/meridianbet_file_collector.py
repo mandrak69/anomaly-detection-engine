@@ -68,6 +68,30 @@ def parse_meridianbet_response(
     return result
 
 
+def _qualified_league_name(header: dict[str, Any]) -> str:
+    """meridianbet.com's own `header.league.name` alone is not a safe
+    competition identity -- many regions/countries name a division the
+    exact same generic thing ("Premier Liga", "Liga Rezervi", "Kup", ...),
+    and meridianbet reports both under the identical bare name with no
+    other disambiguation in this field. Verified live against a real
+    capture: a "Premier Liga" bucket populated this way silently mixed
+    England, Scotland, Wales, Russia, Canada, and the Dominican Republic
+    together. `header.region.name` (present on every real captured event
+    -- see this project's own test fixtures and manual-capture-sources.md)
+    is what every event actually carries its own region/country on, same
+    idea as api-football's `league.country` (see that collector's own
+    `_qualified_league_name` for the sibling fix). Raises the same
+    KeyError _map_event already catches if `league.name` itself is
+    missing; a missing/blank region is not fatal and just leaves the bare
+    name in place rather than inventing one.
+    """
+    name = header["league"]["name"]
+    region = header.get("region", {}).get("name")
+    if not region:
+        return str(name)
+    return f"{region} - {name}"
+
+
 def _map_event(
     event: dict[str, Any], observed_at: datetime, source_name: str
 ) -> list[RawEventOdds]:
@@ -84,7 +108,7 @@ def _map_event(
         common = {
             "source": source_name,
             "sport": sport,
-            "league": header["league"]["name"],
+            "league": _qualified_league_name(header),
             "home_team": rivals[0],
             "away_team": rivals[1],
             "start_time": datetime.fromtimestamp(header["startTime"] / 1000, tz=UTC),
