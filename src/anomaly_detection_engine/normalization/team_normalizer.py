@@ -1,8 +1,11 @@
+import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from rapidfuzz import fuzz, process
+
+_DIGIT_RUN = re.compile(r"\d+")
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,25 @@ def _comparison_key(name: str) -> str:
     (e.g. German "ß" casefolds to "ss", matching "SS").
     """
     return unicodedata.normalize("NFKC", " ".join(name.split())).casefold()
+
+
+def _digit_tokens(comparison_key: str) -> tuple[str, ...]:
+    """The digit runs in a _comparison_key'd string, in order -- e.g.
+    "3. division - girone 2" -> ("3", "2"). token_sort_ratio scores two
+    otherwise-identical strings that differ only in one embedded number
+    as near-100 (a single-character edit out of a long string), even
+    though that number is almost always the whole reason two names are
+    different real entities, not a spelling variant of each other --
+    verified live: "Engleska 1" (EPL) and "Engleska 3" (English League
+    One, a completely different division) scored well above this
+    project's fuzzy_threshold this way, along with 3. Division - Girone
+    2/3/4/5/6 (different regional sub-groups of the same tier) and
+    U19/U21 age-group leagues. Comparing digit runs as a precondition
+    for fuzzy candidacy (see normalize()) closes this the same way
+    _comparison_key's own normalization closes case/whitespace/Unicode
+    mismatches -- a name with no digits at all (most team/league names)
+    is unaffected, since two empty tuples always compare equal."""
+    return tuple(_DIGIT_RUN.findall(comparison_key))
 
 
 class TeamNormalizer:
@@ -128,7 +150,31 @@ class TeamNormalizer:
         # (no processor is passed here), so without this, "Real Madrid"
         # vs "real madrid" would score well below 100 on case alone, on
         # top of whatever the real spelling difference contributes.
-        canonical_keys = list(self._canonical_name_by_key.keys())
+        # When the raw name itself contains digits, only candidates whose
+        # digit runs match it exactly are eligible for fuzzy comparison
+        # at all -- see _digit_tokens' own docstring for why (a differing
+        # embedded number is almost always a different real entity, not a
+        # spelling variant, and token_sort_ratio alone can't tell the
+        # difference). A brand-new name whose number no existing
+        # candidate shares correctly falls through to "unknown" below
+        # rather than fuzzy-matching a wrong, differently-numbered
+        # existing entity.
+        #
+        # Only restricts candidates when the *raw* name has a number to
+        # be specific about -- a digit-less raw name (e.g. a reserve-team
+        # marker like "Man Utd Res", with no number of its own) must
+        # still be free to fuzzy-match a numbered candidate like
+        # "Manchester United U21" and land in the existing ambiguous/
+        # fuzzy handling below, exactly as before this check existed.
+        candidate_digits = _digit_tokens(candidate_key)
+        if candidate_digits:
+            canonical_keys = [
+                key
+                for key in self._canonical_name_by_key
+                if _digit_tokens(key) == candidate_digits
+            ]
+        else:
+            canonical_keys = list(self._canonical_name_by_key.keys())
         matches = process.extract(
             candidate_key,
             canonical_keys,

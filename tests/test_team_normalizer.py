@@ -242,6 +242,53 @@ def test_case_and_whitespace_differences_do_not_affect_fuzzy_score():
     assert upper.method == "fuzzy"
 
 
+def test_differing_embedded_number_does_not_falsely_merge_league_tiers():
+    # Regression test: token_sort_ratio scores "Engleska 1" (EPL) vs
+    # "Engleska 3" (English League One, a completely different division)
+    # at 90+ (a single-character edit out of a short string), well above
+    # a typical fuzzy_threshold, purely because only the trailing digit
+    # differs -- verified live against a real Mozzart capture: League
+    # One/Two/National League matches were silently attributed to the
+    # EPL competition this way, along with several countries' 2nd/3rd
+    # divisions merging into their 1st.
+    normalizer = TeamNormalizer(["Engleska 1"], fuzzy_threshold=85)
+
+    result = normalizer.normalize("Engleska 3")
+
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_differing_girone_group_number_does_not_falsely_merge():
+    normalizer = TeamNormalizer(["3. Division - Girone 2"], fuzzy_threshold=85)
+
+    result = normalizer.normalize("3. Division - Girone 3")
+
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_matching_embedded_number_still_fuzzy_matches_normally():
+    # The digit-run check is a precondition, not a replacement for the
+    # existing scorer -- two names sharing the same embedded number still
+    # fuzzy-match exactly as before.
+    normalizer = TeamNormalizer(["Manchester United 2"], fuzzy_threshold=70)
+
+    result = normalizer.normalize("Manchester Utd 2")
+
+    assert result.canonical_name == "Manchester United 2"
+    assert result.method == "fuzzy"
+
+
+def test_name_with_no_digits_is_unaffected_by_the_digit_check():
+    normalizer = TeamNormalizer(["Manchester United"], fuzzy_threshold=70)
+
+    result = normalizer.normalize("Manchester Utd")
+
+    assert result.canonical_name == "Manchester United"
+    assert result.method == "fuzzy"
+
+
 def test_clear_winner_is_not_treated_as_ambiguous():
     # Sanity check for the ambiguity margin itself: a huge gap between
     # best and second-best (unlike the tied case above) must still
