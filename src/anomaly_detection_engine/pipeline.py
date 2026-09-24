@@ -166,21 +166,27 @@ LEAGUE_ALIASES = {
     # to Meridianbet's "La Liga" (Spain) if it had been. Every entry below
     # was confirmed by cross-referencing real fixtures on both sides.
     #
-    # api-football's own bare "Premier League"/"Serie A" turned out to be
-    # Kazakhstan+Ghana and Brazil respectively (see api_football_collector.
-    # _qualified_league_name, added once this was found), not England/
-    # Italy -- so these two alias to the largest *other* clean, unambiguous
-    # bucket that real fixture-checking confirmed instead: the-odds-api's
-    # own "EPL" and Meridianbet's own "Serija A" (34 events vs Mozzart's
-    # 10 for the same competition -- picked as the anchor purely by
-    # size). Re-target to an api-football bucket instead, later, once one
-    # actually reports a fixture under the real England/Italy
-    # country-qualified name.
-    "Premier Liga": "EPL",  # Meridianbet, EPL
-    "Engleska 1": "EPL",  # Mozzart, EPL
-    "Italija 1": "Serija A",  # Mozzart, Italy's top flight
-    "MLS Liga": "Major League Soccer",  # Meridianbet -- majority-genuine bucket, cleaned separately
-    "SAD - MLS": "Major League Soccer",  # Mozzart
+    # API-Football's bare "Premier League"/"Serie A" names are ambiguous
+    # across countries, so canonical targets use its country-qualified
+    # spelling. If
+    # API-Football has not been ingested yet the other provider creates a
+    # provisional row under this exact name; the later reference sighting
+    # promotes that row instead of creating a parallel league.
+    "EPL": "England - Premier League",
+    "Premier Liga": "England - Premier League",
+    "Engleska - Premier Liga": "England - Premier League",
+    "Engleska 1": "England - Premier League",
+    "Serija A": "Italy - Serie A",
+    "Italija 1": "Italy - Serie A",
+    "MLS Liga": "USA - Major League Soccer",
+    "SAD - MLS Liga": "USA - Major League Soccer",
+    "SAD - MLS": "USA - Major League Soccer",
+    "Major League Soccer": "USA - Major League Soccer",
+    "Liga Nacija": "UEFA Nations League",
+    "Liga nacija (A) - Evropa": "UEFA Nations League",
+    "Liga nacija (B) - Evropa": "UEFA Nations League",
+    "Liga nacija (C) - Evropa": "UEFA Nations League",
+    "Liga nacija (D) - Evropa": "UEFA Nations League",
 }
 
 # Demo dataset uses fixed calendar timestamps rather than live polling, so

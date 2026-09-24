@@ -6,6 +6,28 @@ from dataclasses import dataclass
 from rapidfuzz import fuzz, process
 
 _DIGIT_RUN = re.compile(r"\d+")
+_WORD = re.compile(r"[\w]+", re.UNICODE)
+_AGE_TOKEN = re.compile(r"^[um](\d+)$")
+
+_RESERVE_TOKENS = {
+    "b",
+    "ii",
+    "res",
+    "reserve",
+    "reserves",
+    "youth",
+    "academy",
+}
+_WOMEN_TOKENS = {
+    "w",
+    "women",
+    "womens",
+    "female",
+    "femenino",
+    "feminino",
+    "zene",
+    "žene",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +78,37 @@ def _digit_tokens(comparison_key: str) -> tuple[str, ...]:
     return tuple(_DIGIT_RUN.findall(comparison_key))
 
 
+def _semantic_qualifiers(comparison_key: str) -> frozenset[str]:
+    """Identity-bearing suffixes which fuzzy matching must not erase.
+
+    ``M21`` and ``U21`` intentionally normalize to the same age qualifier:
+    providers use the Serbian ``M`` (men's) and English ``U`` (under)
+    spellings for the same youth side.  Reserve/women markers and trailing
+    league group letters are different real entities and must match on both
+    sides of a fuzzy comparison.
+    """
+    words = _WORD.findall(comparison_key)
+    qualifiers: set[str] = set()
+    for word in words:
+        age = _AGE_TOKEN.fullmatch(word)
+        if age:
+            qualifiers.add(f"age:{age.group(1)}")
+        elif word in _RESERVE_TOKENS:
+            qualifiers.add("reserve")
+        elif word in _WOMEN_TOKENS:
+            qualifiers.add("women")
+
+    if words and words[-1] in {"a", "b", "c", "d"}:
+        qualifiers.add(f"group:{words[-1]}")
+    return frozenset(qualifiers)
+
+
+def _qualifiers_are_compatible(a: str, b: str) -> bool:
+    return _digit_tokens(a) == _digit_tokens(b) and _semantic_qualifiers(
+        a
+    ) == _semantic_qualifiers(b)
+
+
 def names_are_similar(a: str, b: str, *, fuzzy_threshold: float = 85.0) -> bool:
     """True when two raw names are close enough to plausibly be the same
     real-world team/competition, by the same normalization/digit-guard/
@@ -74,7 +127,7 @@ def names_are_similar(a: str, b: str, *, fuzzy_threshold: float = 85.0) -> bool:
     key_a, key_b = _comparison_key(a), _comparison_key(b)
     if key_a == key_b:
         return True
-    if _digit_tokens(key_a) != _digit_tokens(key_b):
+    if not _qualifiers_are_compatible(key_a, key_b):
         return False
     return fuzz.token_sort_ratio(key_a, key_b) >= fuzzy_threshold
 
@@ -183,21 +236,18 @@ class TeamNormalizer:
         # rather than fuzzy-matching a wrong, differently-numbered
         # existing entity.
         #
-        # Only restricts candidates when the *raw* name has a number to
-        # be specific about -- a digit-less raw name (e.g. a reserve-team
-        # marker like "Man Utd Res", with no number of its own) must
-        # still be free to fuzzy-match a numbered candidate like
-        # "Manchester United U21" and land in the existing ambiguous/
-        # fuzzy handling below, exactly as before this check existed.
+        # Qualifier compatibility is symmetric.  A senior/raw name with no
+        # number must not match a U21 candidate merely because it happened
+        # to be ingested second; likewise Barcelona and Barcelona B, or a
+        # women's and men's competition, are distinct identities.
         candidate_digits = _digit_tokens(candidate_key)
-        if candidate_digits:
-            canonical_keys = [
-                key
-                for key in self._canonical_name_by_key
-                if _digit_tokens(key) == candidate_digits
-            ]
-        else:
-            canonical_keys = list(self._canonical_name_by_key.keys())
+        candidate_qualifiers = _semantic_qualifiers(candidate_key)
+        canonical_keys = [
+            key
+            for key in self._canonical_name_by_key
+            if _digit_tokens(key) == candidate_digits
+            and _semantic_qualifiers(key) == candidate_qualifiers
+        ]
         matches = process.extract(
             candidate_key,
             canonical_keys,

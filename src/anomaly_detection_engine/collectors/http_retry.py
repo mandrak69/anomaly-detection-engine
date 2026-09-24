@@ -44,7 +44,7 @@ def _retry_after_seconds(headers: object) -> float | None:
         return None
     if parsed.tzinfo is None:
         return None
-    return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+    return float(max(0.0, (parsed - datetime.now(UTC)).total_seconds()))
 
 
 def _redact_url(url: str) -> str:

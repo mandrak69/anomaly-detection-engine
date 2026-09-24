@@ -1370,6 +1370,259 @@ def _migration_19_reference_identity_and_mapping_trust(
     )
 
 
+def _migration_20_contextual_fixture_identity(connection: sqlite3.Connection) -> None:
+    """Makes identity mappings contextual and fails closed on legacy conflicts.
+
+    A display name is not a globally unique team identifier: two countries can
+    both contain a club called ``United`` and senior/reserve teams frequently
+    differ by only one short qualifier.  Team names therefore become a
+    non-unique lookup attribute, while provider ids and observed competition
+    membership carry identity.  Name mappings are scoped to a canonical
+    competition and competition-name mappings to a normalized country key.
+
+    Existing rows cannot be assigned a trustworthy context retroactively, so
+    they are copied with an empty context.  Runtime resolution only reuses such
+    a global row when it was explicitly verified by a human; ordinary future
+    sightings rebuild contextual mappings from evidence.
+    """
+    connection.execute("DROP INDEX IF EXISTS uq_teams_name_sport")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_teams_name_sport
+            ON teams(canonical_name, sport)
+        """
+    )
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS team_competitions (
+            team_id TEXT NOT NULL REFERENCES teams(id),
+            competition_id TEXT NOT NULL REFERENCES competitions(id),
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (team_id, competition_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_team_competitions_competition
+            ON team_competitions(competition_id, team_id);
+        """
+    )
+    now = "1970-01-01T00:00:00+00:00"
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO team_competitions (
+            team_id, competition_id, first_seen_at, last_seen_at
+        )
+        SELECT home_team_id, competition_id, ?, ? FROM events
+        UNION
+        SELECT away_team_id, competition_id, ?, ? FROM events
+        """,
+        (now, now, now, now),
+    )
+
+    team_mapping_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_team_mappings)")
+    }
+    if "competition_id" not in team_mapping_columns:
+        connection.executescript(
+            """
+            CREATE TABLE source_team_mappings_v20 (
+                source TEXT NOT NULL,
+                sport TEXT NOT NULL,
+                source_team_name TEXT NOT NULL,
+                competition_id TEXT NOT NULL DEFAULT '',
+                team_id TEXT NOT NULL REFERENCES teams(id),
+                resolution_method TEXT,
+                confidence REAL,
+                created_at TEXT,
+                trust_state TEXT NOT NULL DEFAULT 'UNVERIFIED',
+                resolver_version INTEGER,
+                PRIMARY KEY (source, sport, source_team_name, competition_id)
+            );
+
+            INSERT INTO source_team_mappings_v20 (
+                source, sport, source_team_name, competition_id, team_id,
+                resolution_method, confidence, created_at, trust_state,
+                resolver_version
+            )
+            SELECT source, sport, source_team_name, '', team_id,
+                   resolution_method, confidence, created_at, trust_state,
+                   resolver_version
+            FROM source_team_mappings;
+
+            DROP TABLE source_team_mappings;
+            ALTER TABLE source_team_mappings_v20 RENAME TO source_team_mappings;
+            """
+        )
+
+    competition_mapping_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(source_competition_mappings)")
+    }
+    if "country_key" not in competition_mapping_columns:
+        connection.executescript(
+            """
+            CREATE TABLE source_competition_mappings_v20 (
+                source TEXT NOT NULL,
+                sport TEXT NOT NULL,
+                source_competition_name TEXT NOT NULL,
+                country_key TEXT NOT NULL DEFAULT '',
+                competition_id TEXT NOT NULL REFERENCES competitions(id),
+                resolution_method TEXT,
+                confidence REAL,
+                created_at TEXT,
+                trust_state TEXT NOT NULL DEFAULT 'UNVERIFIED',
+                resolver_version INTEGER,
+                PRIMARY KEY (source, sport, source_competition_name, country_key)
+            );
+
+            INSERT INTO source_competition_mappings_v20 (
+                source, sport, source_competition_name, country_key,
+                competition_id, resolution_method, confidence, created_at,
+                trust_state, resolver_version
+            )
+            SELECT source, sport, source_competition_name, '', competition_id,
+                   resolution_method, confidence, created_at, trust_state,
+                   resolver_version
+            FROM source_competition_mappings;
+
+            DROP TABLE source_competition_mappings;
+            ALTER TABLE source_competition_mappings_v20
+                RENAME TO source_competition_mappings;
+            """
+        )
+
+    _add_column_if_missing(connection, "events", "start_time_provider", "TEXT")
+    _add_column_if_missing(connection, "events", "reference_provider", "TEXT")
+    _add_column_if_missing(connection, "events", "reference_provider_id", "TEXT")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_events_reference_identity
+            ON events(reference_provider, reference_provider_id)
+            WHERE reference_provider IS NOT NULL
+              AND reference_provider_id IS NOT NULL
+        """
+    )
+
+    # Multiple reference ids attached to one event are irreconcilable without
+    # the original payload. Quarantine them before assigning kickoff authority.
+    conflicting_event_ids = connection.execute(
+        """
+        SELECT event_id
+        FROM source_event_mappings
+        WHERE source = 'api-football' AND trust_state = 'VERIFIED'
+        GROUP BY event_id
+        HAVING COUNT(DISTINCT source_event_id) > 1
+        """
+    ).fetchall()
+    for row in conflicting_event_ids:
+        connection.execute(
+            """
+            UPDATE source_event_mappings
+            SET trust_state = 'SUSPECT'
+            WHERE source = 'api-football' AND event_id = ?
+            """,
+            (row[0],),
+        )
+        connection.execute(
+            """
+            UPDATE events
+            SET reference_provider = NULL,
+                reference_provider_id = NULL,
+                start_time_provider = NULL
+            WHERE id = ?
+            """,
+            (row[0],),
+        )
+
+    # Preserve canonical kickoff authority for already-verified API fixture
+    # mappings.  Rows left UNVERIFIED by migration 19 intentionally do not
+    # claim authority merely because an old cache row exists.
+    connection.execute(
+        """
+        UPDATE events
+        SET reference_provider = 'api-football',
+            reference_provider_id = (
+                SELECT m.source_event_id
+                FROM source_event_mappings m
+                WHERE m.source = 'api-football'
+                  AND m.event_id = events.id
+                  AND m.trust_state = 'VERIFIED'
+                LIMIT 1
+            ),
+            start_time_provider = 'api-football'
+        WHERE EXISTS (
+            SELECT 1 FROM source_event_mappings m
+            WHERE m.source = 'api-football'
+              AND m.event_id = events.id
+              AND m.trust_state = 'VERIFIED'
+        )
+        """
+    )
+
+    # A fuzzy/ambiguous legacy row was never strong enough to be a verified
+    # identity.  Migration 19 intentionally preserved API-Football rows as
+    # trusted, but that also promoted historical fuzzy mistakes; correct that
+    # before the contextual resolver starts using the database.
+    for table in ("source_team_mappings", "source_competition_mappings"):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET trust_state = 'UNVERIFIED'
+            WHERE resolution_method IN ('fuzzy', 'ambiguous')
+            """
+        )
+
+    # More than one reference-provider id pointing at one canonical entity is
+    # proof of a name collision, not corroboration.  It cannot be split safely
+    # without the original fixture context, so quarantine it for review.
+    conflicting_team_ids = connection.execute(
+        """
+        SELECT team_id
+        FROM source_team_id_mappings
+        WHERE source = 'api-football'
+        GROUP BY team_id
+        HAVING COUNT(DISTINCT source_team_id) > 1
+        """
+    ).fetchall()
+    for row in conflicting_team_ids:
+        connection.execute(
+            """
+            UPDATE source_team_id_mappings
+            SET trust_state = 'SUSPECT'
+            WHERE source = 'api-football' AND team_id = ?
+            """,
+            (row[0],),
+        )
+        connection.execute(
+            "UPDATE teams SET identity_status = 'CONFLICT' WHERE id = ?",
+            (row[0],),
+        )
+
+    conflicting_competition_ids = connection.execute(
+        """
+        SELECT competition_id
+        FROM source_competition_id_mappings
+        WHERE source = 'api-football'
+        GROUP BY competition_id
+        HAVING COUNT(DISTINCT source_competition_id) > 1
+        """
+    ).fetchall()
+    for row in conflicting_competition_ids:
+        connection.execute(
+            """
+            UPDATE source_competition_id_mappings
+            SET trust_state = 'SUSPECT'
+            WHERE source = 'api-football' AND competition_id = ?
+            """,
+            (row[0],),
+        )
+        connection.execute(
+            "UPDATE competitions SET identity_status = 'CONFLICT' WHERE id = ?",
+            (row[0],),
+        )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -1390,6 +1643,7 @@ MIGRATIONS: list[Migration] = [
     _migration_17_odds_snapshot_quote_time,
     _migration_18_source_id_mappings,
     _migration_19_reference_identity_and_mapping_trust,
+    _migration_20_contextual_fixture_identity,
 ]
 
 

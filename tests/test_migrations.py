@@ -19,6 +19,7 @@ from anomaly_detection_engine.storage.migrations import (
     _migration_16_retention_cleanup_indexes,
     _migration_17_odds_snapshot_quote_time,
     _migration_19_reference_identity_and_mapping_trust,
+    _migration_20_contextual_fixture_identity,
 )
 
 
@@ -1055,3 +1056,130 @@ def test_migration_19_is_safe_to_re_run():
         row[1] for row in connection.execute("PRAGMA table_info(source_team_id_mappings)")
     }
     assert {"sport", "trust_state", "resolver_version", "last_verified_raw_name"} <= columns
+
+
+def test_migration_20_contextualizes_names_and_quarantines_reference_conflicts():
+    connection = make_connection()
+    for migration in MIGRATIONS[:19]:
+        migration(connection)
+    connection.execute(
+        """
+        INSERT INTO teams (
+            id, canonical_name, sport, reference_provider,
+            reference_provider_id, identity_status
+        ) VALUES ('team-1', 'United', 'football', 'api-football', '111', 'REFERENCE')
+        """
+    )
+    for source_id in ("111", "222"):
+        connection.execute(
+            """
+            INSERT INTO source_team_id_mappings (
+                source, sport, source_team_id, team_id, first_seen_raw_name,
+                last_seen_raw_name, last_verified_raw_name, trust_state,
+                resolution_method, resolver_version
+            ) VALUES (
+                'api-football', 'football', ?, 'team-1', 'United', 'United',
+                'United', 'VERIFIED', 'exact', 2
+            )
+            """,
+            (source_id,),
+        )
+    connection.execute(
+        """
+        INSERT INTO source_team_mappings (
+            source, sport, source_team_name, team_id, resolution_method,
+            confidence, trust_state, resolver_version
+        ) VALUES (
+            'api-football', 'football', 'Utd', 'team-1', 'fuzzy',
+            88.0, 'VERIFIED', 2
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO competitions (id, canonical_name, sport)
+        VALUES ('competition-1', 'Test League', 'football')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO events (
+            id, sport, league, competition_id, home_team_id, away_team_id,
+            start_time
+        ) VALUES (
+            'event-1', 'football', 'Test League', 'competition-1',
+            'team-1', 'team-1', '2026-01-01T00:00:00+00:00'
+        )
+        """
+    )
+    for source_event_id in ("event-api-1", "event-api-2"):
+        connection.execute(
+            """
+            INSERT INTO source_event_mappings (
+                source, source_event_id, event_id, trust_state,
+                resolution_method, resolver_version
+            ) VALUES (
+                'api-football', ?, 'event-1', 'VERIFIED', 'provider_id', 2
+            )
+            """,
+            (source_event_id,),
+        )
+    connection.commit()
+
+    _migration_20_contextual_fixture_identity(connection)
+
+    team = connection.execute("SELECT identity_status FROM teams WHERE id = 'team-1'").fetchone()
+    assert team["identity_status"] == "CONFLICT"
+    states = connection.execute(
+        """
+        SELECT DISTINCT trust_state FROM source_team_id_mappings
+        WHERE team_id = 'team-1'
+        """
+    ).fetchall()
+    assert {row["trust_state"] for row in states} == {"SUSPECT"}
+    fuzzy = connection.execute(
+        """
+        SELECT competition_id, trust_state FROM source_team_mappings
+        WHERE source_team_name = 'Utd'
+        """
+    ).fetchone()
+    assert fuzzy["competition_id"] == ""
+    assert fuzzy["trust_state"] == "UNVERIFIED"
+    event_states = connection.execute(
+        """
+        SELECT DISTINCT trust_state FROM source_event_mappings
+        WHERE event_id = 'event-1'
+        """
+    ).fetchall()
+    assert {row["trust_state"] for row in event_states} == {"SUSPECT"}
+    event = connection.execute(
+        """
+        SELECT reference_provider, reference_provider_id, start_time_provider
+        FROM events WHERE id = 'event-1'
+        """
+    ).fetchone()
+    assert tuple(event) == (None, None, None)
+
+    # Display names are no longer identity keys.
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES ('team-2', 'United', 'football')"
+    )
+
+
+def test_migration_20_is_safe_to_re_run():
+    connection = make_connection()
+    for migration in MIGRATIONS[:19]:
+        migration(connection)
+
+    _migration_20_contextual_fixture_identity(connection)
+    _migration_20_contextual_fixture_identity(connection)
+
+    team_mapping_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_team_mappings)")
+    }
+    competition_mapping_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(source_competition_mappings)")
+    }
+    assert "competition_id" in team_mapping_columns
+    assert "country_key" in competition_mapping_columns

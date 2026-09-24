@@ -405,7 +405,10 @@ def test_fuzzy_only_team_id_mapping_stays_unverified():
         away_team_source_id="9002",
     )
 
-    assert result.event.home_team.canonical_name == "Manchester United"
+    # A fuzzy-only name is audit evidence, not permission to put this
+    # provider's odds onto the existing reference team/event.
+    assert result.event.home_team.canonical_name == "Manchester Utd"
+    assert result.event.home_team.id != seed.list_events()[0].home_team.id
     row = connection.execute(
         """
         SELECT trust_state, resolution_method, resolver_version
@@ -415,7 +418,7 @@ def test_fuzzy_only_team_id_mapping_stays_unverified():
     ).fetchone()
     assert row["trust_state"] == "UNVERIFIED"
     assert row["resolution_method"] == "fuzzy"
-    assert row["resolver_version"] == 2
+    assert row["resolver_version"] == 3
 
 
 def test_verified_event_context_learns_sabah_masazir_provider_alias():
@@ -581,6 +584,138 @@ def test_api_football_entities_are_reference_backed_and_others_are_provisional()
     assert provisional["identity_status"] == "PROVISIONAL"
 
 
+def test_same_team_name_with_two_api_ids_in_different_countries_stays_distinct():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+
+    first = api.match(
+        sport="football", league="Country A - Premier League", country="Country A",
+        home_team_raw="United", away_team_raw="City A", start_time=T0,
+        source_event_id="event-a", home_team_source_id="111",
+        away_team_source_id="112", competition_source_id="league-a",
+    )
+    second = api.match(
+        sport="football", league="Country B - Premier League", country="Country B",
+        home_team_raw="United", away_team_raw="City B", start_time=T0,
+        source_event_id="event-b", home_team_source_id="222",
+        away_team_source_id="223", competition_source_id="league-b",
+    )
+
+    assert first.event.home_team.id != second.event.home_team.id
+    rows = connection.execute(
+        """
+        SELECT reference_provider_id FROM teams
+        WHERE canonical_name = 'United' ORDER BY reference_provider_id
+        """
+    ).fetchall()
+    assert [row["reference_provider_id"] for row in rows] == ["111", "222"]
+
+
+def test_reference_id_prevents_same_name_collision_inside_one_competition():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+
+    first = api.match(
+        sport="football", league="L", home_team_raw="United",
+        away_team_raw="Opponent A", start_time=T0,
+        home_team_source_id="111", away_team_source_id="112",
+    )
+    second = api.match(
+        sport="football", league="L", home_team_raw="United",
+        away_team_raw="Opponent B", start_time=T0 + timedelta(days=1),
+        home_team_source_id="222", away_team_source_id="223",
+    )
+
+    assert first.event.home_team.id != second.event.home_team.id
+
+
+def test_same_raw_league_name_in_two_countries_has_contextual_mappings():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+
+    first = api.match(
+        sport="football", league="Premier League", country="Country A",
+        home_team_raw="A1", away_team_raw="A2", start_time=T0,
+        competition_source_id="101",
+    )
+    second = api.match(
+        sport="football", league="Premier League", country="Country B",
+        home_team_raw="B1", away_team_raw="B2", start_time=T0,
+        competition_source_id="202",
+    )
+
+    assert first.event.competition_id != second.event.competition_id
+    mappings = connection.execute(
+        """
+        SELECT country_key, competition_id
+        FROM source_competition_mappings
+        WHERE source = 'api-football' AND source_competition_name = 'Premier League'
+        ORDER BY country_key
+        """
+    ).fetchall()
+    assert len(mappings) == 2
+    assert mappings[0]["competition_id"] != mappings[1]["competition_id"]
+
+
+def test_cold_start_fixture_context_learns_one_unrelated_team_spelling():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+    reference = api.match(
+        sport="football", league="Azerbaijan - Premyer Liqa", country="Azerbaijan",
+        home_team_raw="Sabah", away_team_raw="Qarabag", start_time=T0,
+        source_event_id="af-1", home_team_source_id="10",
+        away_team_source_id="11", competition_source_id="100",
+    )
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    other = mozzart.match(
+        sport="football", league="Azerbaijan - Premyer Liqa", country="Azerbaijan",
+        home_team_raw="Sabah Masazir", away_team_raw="Qarabag", start_time=T0,
+        source_event_id="m-1", home_team_source_id="20",
+        away_team_source_id="21", competition_source_id="200",
+    )
+
+    assert other.event.id == reference.event.id
+    row = connection.execute(
+        """
+        SELECT trust_state, resolution_method FROM source_team_mappings
+        WHERE source = 'mozzart' AND source_team_name = 'Sabah Masazir'
+        """
+    ).fetchone()
+    assert (row["trust_state"], row["resolution_method"]) == (
+        "VERIFIED", "provider_event_context"
+    )
+
+
+def test_reference_provider_owns_canonical_kickoff_time():
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+    reference = api.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0, source_event_id="af-1",
+    )
+
+    other = FixtureCatalog(connection, provider_id="mozzart")
+    non_authoritative = other.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0 + timedelta(minutes=10), source_event_id="m-1",
+    )
+    assert non_authoritative.event.id == reference.event.id
+    assert non_authoritative.event.start_time == T0
+
+    moved = api.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0 + timedelta(minutes=15), source_event_id="af-1",
+    )
+    assert moved.event.start_time == T0 + timedelta(minutes=15)
+
+    ignored = other.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0 + timedelta(minutes=20), source_event_id="m-1",
+    )
+    assert ignored.event.start_time == T0 + timedelta(minutes=15)
+
+
 def test_case_and_whitespace_variant_spelling_reuses_the_existing_team():
     # A different provider (or the same one, on a bad day) reporting the
     # same real team under different case/whitespace must not create a
@@ -728,7 +863,7 @@ def test_dissimilar_spelling_below_threshold_creates_a_separate_team():
     )
     result = catalog.match(
         sport="football", league="L", home_team_raw="Utd of Manchester",
-        away_team_raw="Liverpool", start_time=T0 + timedelta(minutes=10),
+        away_team_raw="Arsenal", start_time=T0 + timedelta(days=1),
     )
 
     assert result.event.home_team.canonical_name == "Utd of Manchester"
@@ -827,7 +962,7 @@ def test_fuzzy_match_records_fuzzy_resolution_method_and_its_real_score():
     )
     catalog.match(
         sport="football", league="L", home_team_raw="Manchester Utd",
-        away_team_raw="Liverpool", start_time=T0 + timedelta(minutes=10),
+        away_team_raw="Arsenal", start_time=T0 + timedelta(days=1),
     )
 
     row = mapping_row(
@@ -879,6 +1014,19 @@ def test_ambiguous_match_records_ambiguous_resolution_method_and_its_real_score(
     connection.execute(
         "INSERT INTO teams (id, canonical_name, sport) VALUES (?, ?, ?)",
         ("team-b", "Real City Rovers Sporting Club", "football"),
+    )
+    connection.execute(
+        "INSERT INTO competitions (id, canonical_name, sport) VALUES (?, ?, ?)",
+        ("competition-l", "L", "football"),
+    )
+    connection.execute(
+        """
+        INSERT INTO team_competitions (team_id, competition_id, first_seen_at, last_seen_at)
+        VALUES ('team-a', 'competition-l', '2026-09-01T00:00:00+00:00',
+                '2026-09-01T00:00:00+00:00'),
+               ('team-b', 'competition-l', '2026-09-01T00:00:00+00:00',
+                '2026-09-01T00:00:00+00:00')
+        """
     )
     connection.commit()
     catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)
@@ -1021,7 +1169,7 @@ def test_event_identity_survives_a_competition_rename_via_competition_id():
     assert second.event.competition_id == first.event.competition_id
 
 
-def test_fuzzy_league_match_merges_a_similar_spelling():
+def test_fuzzy_league_match_stays_separate_until_verified():
     connection = make_connection()
     catalog = FixtureCatalog(connection, provider_id="src-a", fuzzy_threshold=80.0)
 
@@ -1034,11 +1182,11 @@ def test_fuzzy_league_match_merges_a_similar_spelling():
         away_team_raw="D", start_time=T0,
     )
 
-    assert result.event.league == "Premier League"
+    assert result.event.league == "Premier Leage"
     competitions = connection.execute(
         "SELECT COUNT(*) AS n FROM competitions WHERE sport = 'football'"
     ).fetchone()["n"]
-    assert competitions == 1
+    assert competitions == 2
 
 
 def competition_mapping_row(connection, *, provider_id: str, sport: str, raw_league: str):

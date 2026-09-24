@@ -15,10 +15,52 @@ from anomaly_detection_engine.storage.time_utils import to_utc_iso
 logger = logging.getLogger(__name__)
 
 REFERENCE_PROVIDER_ID = "api-football"
-RESOLVER_VERSION = 2
+RESOLVER_VERSION = 3
 TRUST_VERIFIED = "VERIFIED"
 TRUST_UNVERIFIED = "UNVERIFIED"
 TRUST_SUSPECT = "SUSPECT"
+
+_COUNTRY_ALIASES = {
+    "engleska": "England",
+    "skotska": "Scotland",
+    "škotska": "Scotland",
+    "vels": "Wales",
+    "italija": "Italy",
+    "spanija": "Spain",
+    "španija": "Spain",
+    "nemacka": "Germany",
+    "nemačka": "Germany",
+    "francuska": "France",
+    "holandija": "Netherlands",
+    "portugalija": "Portugal",
+    "grcka": "Greece",
+    "grčka": "Greece",
+    "turska": "Turkey",
+    "srbija": "Serbia",
+    "hrvatska": "Croatia",
+    "madjarska": "Hungary",
+    "mađarska": "Hungary",
+    "ceska": "Czech Republic",
+    "češka": "Czech Republic",
+    "sad": "USA",
+    "sjedinjene americke drzave": "USA",
+    "sjedinjene američke države": "USA",
+    "juzna koreja": "South Korea",
+    "južna koreja": "South Korea",
+    "severna irska": "Northern Ireland",
+}
+
+
+def _canonical_country(country: str | None) -> str | None:
+    if country is None or not country.strip():
+        return None
+    cleaned = " ".join(country.split())
+    return _COUNTRY_ALIASES.get(cleaned.casefold(), cleaned)
+
+
+def _country_key(country: str | None) -> str:
+    canonical = _canonical_country(country)
+    return canonical.casefold() if canonical is not None else ""
 
 
 @dataclass(frozen=True)
@@ -60,8 +102,8 @@ class FixtureCatalog:
     real match under different team-name spellings ("Man Utd" vs
     "Manchester United") or league names ("Premier League" vs "England
     Premier League") end up sharing one canonical Event, once that
-    particular spelling has been resolved once (by exact/alias/fuzzy
-    match against the existing catalog, a manually verified mapping, or
+    particular spelling has been resolved once (by exact/alias match,
+    joint fixture context, a manually verified mapping, or
     a mapping learned from an already-verified event).
 
     Implements the same match(...) -> EventMatchResult shape as
@@ -90,13 +132,12 @@ class FixtureCatalog:
     resolution blocks on SQLite's writer lock instead of racing through
     the same "does this already exist" check and creating a duplicate.
 
-    Trade-off: a raw name that fuzzy-matches below fuzzy_threshold, or
-    whose top two candidates score within fuzzy_ambiguity_margin of each
-    other (see TeamNormalizer), becomes a brand-new canonical team rather
-    than being merged into an existing one. That is the conservative
-    choice -- a harmless near-duplicate team is better than silently
-    merging two different real teams because a threshold was set too
-    loose, or guessing between two candidates that were both plausible.
+    Trade-off: a raw name supported only by fuzzy similarity becomes a
+    provisional canonical team rather than being merged into an existing
+    one. Fuzzy scores can rank whole-fixture candidates, but only unique
+    competition/time/opponent context may turn that evidence into a
+    verified mapping. A harmless near-duplicate is better than silently
+    merging two different real teams or senior/reserve squads.
     """
 
     def __init__(
@@ -136,6 +177,7 @@ class FixtureCatalog:
     ) -> EventMatchResult:
         home_raw = home_team_raw.strip()
         away_raw = away_team_raw.strip()
+        canonical_country = _canonical_country(country)
 
         if not home_raw or not away_raw:
             return EventMatchResult(None, 0.0, "missing-team-name")
@@ -170,7 +212,7 @@ class FixtureCatalog:
                         league=league.strip(),
                         home_raw=home_raw,
                         away_raw=away_raw,
-                        country=country,
+                        country=canonical_country,
                         home_team_source_id=home_team_source_id,
                         away_team_source_id=away_team_source_id,
                         competition_source_id=competition_source_id,
@@ -185,13 +227,15 @@ class FixtureCatalog:
                             league=league.strip(),
                             home_raw=home_raw,
                             away_raw=away_raw,
-                            country=country,
+                            country=canonical_country,
                             home_team_source_id=home_team_source_id,
                             away_team_source_id=away_team_source_id,
                             competition_source_id=competition_source_id,
                         )
                         mapped_event = self._sync_event_start_time(
-                            mapping.event, start_time
+                            mapping.event,
+                            start_time,
+                            source_event_id=source_event_id,
                         )
                         self._refresh_event_mapping(
                             source_event_id,
@@ -199,7 +243,7 @@ class FixtureCatalog:
                             league=league.strip(),
                             home_raw=home_raw,
                             away_raw=away_raw,
-                            country=country,
+                            country=canonical_country,
                             home_team_source_id=home_team_source_id,
                             away_team_source_id=away_team_source_id,
                             competition_source_id=competition_source_id,
@@ -216,14 +260,70 @@ class FixtureCatalog:
                 raw_league=league.strip(),
                 sport=sport,
                 source_competition_id=competition_source_id,
-                country=country,
+                country=canonical_country,
             )
+
+            contextual_match = self._match_existing_event_by_context(
+                sport=sport,
+                competition=competition,
+                home_raw=home_raw,
+                away_raw=away_raw,
+                start_time=start_time,
+                home_team_source_id=home_team_source_id,
+                away_team_source_id=away_team_source_id,
+            )
+            if contextual_match is not None:
+                event, confidence = contextual_match
+                self._learn_identity_from_event_context(
+                    event,
+                    sport=sport,
+                    competition_id=competition.competition_id,
+                    league=league.strip(),
+                    home_raw=home_raw,
+                    away_raw=away_raw,
+                    country=canonical_country,
+                    home_team_source_id=home_team_source_id,
+                    away_team_source_id=away_team_source_id,
+                    competition_source_id=competition_source_id,
+                )
+                event = self._sync_event_start_time(
+                    event,
+                    start_time,
+                    source_event_id=source_event_id,
+                )
+                self._promote_event_to_reference(event.id, source_event_id)
+                if source_event_id is not None:
+                    self._save_event_mapping(
+                        source_event_id,
+                        event.id,
+                        trust_state=TRUST_VERIFIED,
+                        resolution_method="fixture_context",
+                        sport=sport,
+                        league=league.strip(),
+                        home_raw=home_raw,
+                        away_raw=away_raw,
+                        country=canonical_country,
+                        home_team_source_id=home_team_source_id,
+                        away_team_source_id=away_team_source_id,
+                        competition_source_id=competition_source_id,
+                    )
+                self._connection.commit()
+                return EventMatchResult(event, confidence, "resolved-by-fixture-context")
+
             home = self._resolve_team(
-                raw_name=home_raw, sport=sport, source_team_id=home_team_source_id
+                raw_name=home_raw,
+                sport=sport,
+                competition_id=competition.competition_id,
+                source_team_id=home_team_source_id,
             )
             away = self._resolve_team(
-                raw_name=away_raw, sport=sport, source_team_id=away_team_source_id
+                raw_name=away_raw,
+                sport=sport,
+                competition_id=competition.competition_id,
+                source_team_id=away_team_source_id,
             )
+            self._record_team_competition(home.team.id, competition.competition_id)
+            self._record_team_competition(away.team.id, competition.competition_id)
 
             event = self._resolve_event(
                 sport=sport,
@@ -232,15 +332,15 @@ class FixtureCatalog:
                 home=home.team,
                 away=away.team,
                 start_time=start_time,
+                source_event_id=source_event_id,
             )
 
             if source_event_id is not None:
                 component_trust = (
                     TRUST_VERIFIED
-                    if all(
-                        resolution.trust_state == TRUST_VERIFIED
-                        for resolution in (home, away, competition)
-                    )
+                    if home.trust_state == TRUST_VERIFIED
+                    and away.trust_state == TRUST_VERIFIED
+                    and competition.trust_state == TRUST_VERIFIED
                     else TRUST_UNVERIFIED
                 )
                 self._save_event_mapping(
@@ -252,7 +352,7 @@ class FixtureCatalog:
                     league=league.strip(),
                     home_raw=home_raw,
                     away_raw=away_raw,
-                    country=country,
+                    country=canonical_country,
                     home_team_source_id=home_team_source_id,
                     away_team_source_id=away_team_source_id,
                     competition_source_id=competition_source_id,
@@ -283,6 +383,7 @@ class FixtureCatalog:
         source_name: str,
         canonical_team_id: str,
         source_team_id: str | None = None,
+        competition_id: str | None = None,
     ) -> None:
         """Persists an explicit human-approved provider -> canonical mapping.
 
@@ -306,11 +407,12 @@ class FixtureCatalog:
             self._connection.execute(
                 """
                 INSERT INTO source_team_mappings (
-                    source, sport, source_team_name, team_id,
+                    source, sport, source_team_name, competition_id, team_id,
                     resolution_method, confidence, created_at,
                     trust_state, resolver_version
-                ) VALUES (?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
-                ON CONFLICT (source, sport, source_team_name) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
+                ON CONFLICT (source, sport, source_team_name, competition_id)
+                DO UPDATE SET
                     team_id = excluded.team_id,
                     resolution_method = 'manual', confidence = 100.0,
                     trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
@@ -319,6 +421,7 @@ class FixtureCatalog:
                     self._provider_id,
                     sport,
                     source_name.strip(),
+                    competition_id or "",
                     canonical_team_id,
                     now,
                     RESOLVER_VERSION,
@@ -334,6 +437,8 @@ class FixtureCatalog:
                     resolution_method="manual",
                     allow_suspect_override=True,
                 )
+            if competition_id is not None:
+                self._record_team_competition(canonical_team_id, competition_id)
         except BaseException:
             self._connection.rollback()
             raise
@@ -347,6 +452,7 @@ class FixtureCatalog:
         source_name: str,
         canonical_competition_id: str,
         source_competition_id: str | None = None,
+        country: str | None = None,
     ) -> None:
         """Persists a human-approved competition mapping."""
         self._connection.execute("BEGIN IMMEDIATE")
@@ -364,11 +470,12 @@ class FixtureCatalog:
             self._connection.execute(
                 """
                 INSERT INTO source_competition_mappings (
-                    source, sport, source_competition_name, competition_id,
+                    source, sport, source_competition_name, country_key, competition_id,
                     resolution_method, confidence, created_at,
                     trust_state, resolver_version
-                ) VALUES (?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
-                ON CONFLICT (source, sport, source_competition_name) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, 'manual', 100.0, ?, 'VERIFIED', ?)
+                ON CONFLICT (source, sport, source_competition_name, country_key)
+                DO UPDATE SET
                     competition_id = excluded.competition_id,
                     resolution_method = 'manual', confidence = 100.0,
                     trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
@@ -377,6 +484,7 @@ class FixtureCatalog:
                     self._provider_id,
                     sport,
                     source_name.strip(),
+                    _country_key(country),
                     canonical_competition_id,
                     now,
                     RESOLVER_VERSION,
@@ -401,7 +509,12 @@ class FixtureCatalog:
     # -- team resolution --------------------------------------------------
 
     def _resolve_team(
-        self, *, raw_name: str, sport: str, source_team_id: str | None = None
+        self,
+        *,
+        raw_name: str,
+        sport: str,
+        competition_id: str,
+        source_team_id: str | None = None,
     ) -> _TeamResolution:
         source_id_is_suspect = False
         # ID fast path: a provider-supplied team id already resolved once
@@ -459,7 +572,14 @@ class FixtureCatalog:
                 elif mapping["trust_state"] == TRUST_SUSPECT:
                     source_id_is_suspect = True
 
-        mapped = self._find_mapping(raw_name, sport)
+        mapped = self._find_mapping(raw_name, sport, competition_id)
+        if (
+            mapped is not None
+            and self._provider_id == REFERENCE_PROVIDER_ID
+            and source_team_id is not None
+            and self._team_has_different_reference_id(mapped.id, source_team_id)
+        ):
+            mapped = None
         if mapped is not None:
             mapped_trust = (
                 TRUST_SUSPECT if source_id_is_suspect else TRUST_VERIFIED
@@ -477,7 +597,37 @@ class FixtureCatalog:
                 mapped, 100.0, "verified_name_mapping", mapped_trust
             )
 
-        existing = self._teams_for_sport(sport)
+        global_match = self._find_global_exact_team(
+            raw_name=raw_name,
+            sport=sport,
+            competition_id=competition_id,
+            source_team_id=source_team_id,
+        )
+        if global_match is not None:
+            team, method = global_match
+            if self._provider_id == REFERENCE_PROVIDER_ID and source_team_id is not None:
+                self._promote_team_to_reference(team.id, sport, source_team_id)
+            self._save_mapping(
+                raw_name,
+                sport,
+                competition_id,
+                team.id,
+                resolution_method=method,
+                confidence=100.0,
+                trust_state=TRUST_VERIFIED,
+            )
+            if source_team_id is not None:
+                self._save_team_id_mapping(
+                    source_team_id,
+                    sport,
+                    team.id,
+                    raw_name,
+                    trust_state=TRUST_VERIFIED,
+                    resolution_method=method,
+                )
+            return _TeamResolution(team, 100.0, method, TRUST_VERIFIED)
+
+        existing = self._teams_for_competition(sport, competition_id)
         normalizer = TeamNormalizer(
             existing.keys(),
             aliases=self._aliases,
@@ -487,7 +637,7 @@ class FixtureCatalog:
         )
         result = normalizer.normalize(raw_name)
 
-        if result.method == "ambiguous":
+        if result.method in {"ambiguous", "fuzzy"}:
             # Two existing teams scored too close together to safely pick
             # one (see TeamNormalizer) -- the conservative choice is the
             # same as "unknown": a new team under the (token-expanded --
@@ -495,8 +645,9 @@ class FixtureCatalog:
             # into either candidate. Logged distinctly since this is
             # exactly the kind of borderline call worth a human noticing,
             # unlike a routine first-sighting.
-            logger.warning(
-                "fixture_catalog.team.ambiguous_fuzzy_match",
+            log = logger.warning if result.method == "ambiguous" else logger.info
+            log(
+                "fixture_catalog.team.untrusted_similarity",
                 extra={"raw_name": raw_name, "sport": sport, "score": result.confidence},
             )
             team = self._create_team(
@@ -511,11 +662,26 @@ class FixtureCatalog:
             # like "Man Utd" -> "Manchester United") -- create it under
             # that canonical form, not under the raw name, so later exact
             # matches on the canonical name itself resolve correctly too.
-            team = existing.get(result.canonical_name) or self._create_team(
-                canonical_name=result.canonical_name,
-                sport=sport,
-                source_team_id=source_team_id,
-            )
+            candidate_team = existing.get(result.canonical_name)
+            if (
+                candidate_team is not None
+                and self._provider_id == REFERENCE_PROVIDER_ID
+                and source_team_id is not None
+                and self._team_has_different_reference_id(
+                    candidate_team.id, source_team_id
+                )
+            ):
+                # A reference-provider id is stronger than an identical
+                # display name.  Two API ids called "United" are two teams
+                # until explicit fixture/manual evidence says otherwise.
+                candidate_team = None
+            if candidate_team is None:
+                candidate_team = self._create_team(
+                    canonical_name=result.canonical_name,
+                    sport=sport,
+                    source_team_id=source_team_id,
+                )
+            team = candidate_team
             confidence = result.confidence
         else:
             # result.raw_name, not the raw_name argument: token expansion
@@ -556,6 +722,7 @@ class FixtureCatalog:
         self._save_mapping(
             raw_name,
             sport,
+            competition_id,
             team.id,
             resolution_method=result.method,
             confidence=confidence,
@@ -572,15 +739,23 @@ class FixtureCatalog:
             )
         return _TeamResolution(team, confidence, result.method, trust_state)
 
-    def _find_mapping(self, raw_name: str, sport: str) -> Team | None:
+    def _find_mapping(
+        self, raw_name: str, sport: str, competition_id: str
+    ) -> Team | None:
         row = self._connection.execute(
             """
             SELECT t.* FROM source_team_mappings m
             JOIN teams t ON t.id = m.team_id
             WHERE m.source = ? AND m.sport = ? AND m.source_team_name = ?
               AND m.trust_state = 'VERIFIED'
+              AND (
+                    m.competition_id = ?
+                    OR (m.competition_id = '' AND m.resolution_method = 'manual')
+                  )
+            ORDER BY CASE WHEN m.competition_id = ? THEN 0 ELSE 1 END
+            LIMIT 1
             """,
-            (self._provider_id, sport, raw_name),
+            (self._provider_id, sport, raw_name, competition_id, competition_id),
         ).fetchone()
         return self._map_team_row(row) if row else None
 
@@ -588,6 +763,7 @@ class FixtureCatalog:
         self,
         raw_name: str,
         sport: str,
+        competition_id: str,
         team_id: str,
         *,
         resolution_method: str,
@@ -597,11 +773,11 @@ class FixtureCatalog:
         self._connection.execute(
             """
             INSERT INTO source_team_mappings
-                (source, sport, source_team_name, team_id,
+                (source, sport, source_team_name, competition_id, team_id,
                  resolution_method, confidence, created_at,
                  trust_state, resolver_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (source, sport, source_team_name) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_team_name, competition_id) DO UPDATE SET
                 team_id = CASE
                     WHEN source_team_mappings.trust_state = 'VERIFIED'
                     THEN source_team_mappings.team_id ELSE excluded.team_id END,
@@ -621,6 +797,7 @@ class FixtureCatalog:
                 self._provider_id,
                 sport,
                 raw_name,
+                competition_id,
                 team_id,
                 resolution_method,
                 confidence,
@@ -630,11 +807,111 @@ class FixtureCatalog:
             ),
         )
 
-    def _teams_for_sport(self, sport: str) -> dict[str, Team]:
+    def _teams_for_competition(
+        self, sport: str, competition_id: str
+    ) -> dict[str, Team]:
+        rows = self._connection.execute(
+            """
+            SELECT t.* FROM teams t
+            JOIN team_competitions tc ON tc.team_id = t.id
+            WHERE t.sport = ? AND tc.competition_id = ?
+            """,
+            (sport, competition_id),
+        ).fetchall()
+        return {row["canonical_name"]: self._map_team_row(row) for row in rows}
+
+    def _find_global_exact_team(
+        self,
+        *,
+        raw_name: str,
+        sport: str,
+        competition_id: str,
+        source_team_id: str | None,
+    ) -> tuple[Team, str] | None:
         rows = self._connection.execute(
             "SELECT * FROM teams WHERE sport = ?", (sport,)
         ).fetchall()
-        return {row["canonical_name"]: self._map_team_row(row) for row in rows}
+        if not rows:
+            return None
+        normalizer = TeamNormalizer(
+            [row["canonical_name"] for row in rows],
+            aliases=self._aliases,
+            token_aliases=self._token_aliases,
+            fuzzy_threshold=self._fuzzy_threshold,
+            ambiguity_margin=self._fuzzy_ambiguity_margin,
+        )
+        result = normalizer.normalize(raw_name)
+        # An exact, globally-unique display name may connect the same club
+        # across league/cup competitions (subject to country compatibility).
+        # A configured alias is only evidence inside the current competition
+        # or a unique fixture context; never make it a global identity rule.
+        if result.method != "exact" or result.canonical_name is None:
+            return None
+        target_key = " ".join(result.canonical_name.split()).casefold()
+        candidates = [
+            row
+            for row in rows
+            if " ".join(row["canonical_name"].split()).casefold() == target_key
+        ]
+        if len(candidates) != 1:
+            return None
+        row = candidates[0]
+        if (
+            self._provider_id == REFERENCE_PROVIDER_ID
+            and source_team_id is not None
+            and self._team_has_different_reference_id(row["id"], source_team_id)
+        ):
+            return None
+        if not self._team_country_is_compatible(row["id"], competition_id):
+            return None
+        return self._map_team_row(row), result.method
+
+    def _team_country_is_compatible(
+        self, team_id: str, competition_id: str
+    ) -> bool:
+        current = self._connection.execute(
+            "SELECT country FROM competitions WHERE id = ?", (competition_id,)
+        ).fetchone()
+        if current is None or current["country"] is None:
+            return True
+        known_rows = self._connection.execute(
+            """
+            SELECT DISTINCT c.country
+            FROM team_competitions tc
+            JOIN competitions c ON c.id = tc.competition_id
+            WHERE tc.team_id = ? AND c.country IS NOT NULL
+            """,
+            (team_id,),
+        ).fetchall()
+        if not known_rows:
+            return True
+        current_key = _country_key(current["country"])
+        return any(_country_key(row["country"]) == current_key for row in known_rows)
+
+    def _team_has_different_reference_id(
+        self, team_id: str, source_team_id: str
+    ) -> bool:
+        row = self._connection.execute(
+            """
+            SELECT reference_provider_id FROM teams
+            WHERE id = ? AND reference_provider = ?
+            """,
+            (team_id, REFERENCE_PROVIDER_ID),
+        ).fetchone()
+        return row is not None and row["reference_provider_id"] != source_team_id
+
+    def _record_team_competition(self, team_id: str, competition_id: str) -> None:
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute(
+            """
+            INSERT INTO team_competitions (
+                team_id, competition_id, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (team_id, competition_id) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at
+            """,
+            (team_id, competition_id, now, now),
+        )
 
     def _create_team(
         self, *, canonical_name: str, sport: str, source_team_id: str | None = None
@@ -789,7 +1066,10 @@ class FixtureCatalog:
             SET reference_provider = ?, reference_provider_id = ?,
                 identity_status = 'REFERENCE'
             WHERE id = ? AND sport = ?
-              AND (reference_provider IS NULL OR reference_provider = ?)
+              AND (
+                    reference_provider IS NULL
+                    OR (reference_provider = ? AND reference_provider_id = ?)
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM teams existing
                   WHERE existing.reference_provider = ?
@@ -804,6 +1084,7 @@ class FixtureCatalog:
                 team_id,
                 sport,
                 REFERENCE_PROVIDER_ID,
+                source_team_id,
                 REFERENCE_PROVIDER_ID,
                 sport,
                 source_team_id,
@@ -837,6 +1118,7 @@ class FixtureCatalog:
         identity on competition_id, not this string -- see that
         method's docstring for why.
         """
+        country = _canonical_country(country)
         source_id_is_suspect = False
 
         # ID fast path -- mirrors _resolve_team's own source_team_id fast
@@ -891,7 +1173,16 @@ class FixtureCatalog:
                 elif mapping["trust_state"] == TRUST_SUSPECT:
                     source_id_is_suspect = True
 
-        mapped = self._find_competition_mapping(raw_league, sport)
+        mapped = self._find_competition_mapping(raw_league, sport, country)
+        if (
+            mapped is not None
+            and self._provider_id == REFERENCE_PROVIDER_ID
+            and source_competition_id is not None
+            and self._competition_has_different_reference_id(
+                mapped[1], source_competition_id
+            )
+        ):
+            mapped = None
         if mapped is not None:
             mapped_trust = (
                 TRUST_SUSPECT if source_id_is_suspect else TRUST_VERIFIED
@@ -918,9 +1209,10 @@ class FixtureCatalog:
         )
         result = normalizer.normalize(raw_league)
 
-        if result.method == "ambiguous":
-            logger.warning(
-                "fixture_catalog.competition.ambiguous_fuzzy_match",
+        if result.method in {"ambiguous", "fuzzy"}:
+            log = logger.warning if result.method == "ambiguous" else logger.info
+            log(
+                "fixture_catalog.competition.untrusted_similarity",
                 extra={"raw_league": raw_league, "sport": sport, "score": result.confidence},
             )
             canonical_name = raw_league
@@ -933,12 +1225,24 @@ class FixtureCatalog:
             confidence = result.confidence
         elif result.canonical_name is not None:
             canonical_name = result.canonical_name
-            competition_id = existing.get(canonical_name) or self._create_competition(
-                canonical_name=canonical_name,
-                sport=sport,
-                country=country,
-                source_competition_id=source_competition_id,
-            )
+            candidate_competition_id = existing.get(canonical_name)
+            if (
+                candidate_competition_id is not None
+                and self._provider_id == REFERENCE_PROVIDER_ID
+                and source_competition_id is not None
+                and self._competition_has_different_reference_id(
+                    candidate_competition_id, source_competition_id
+                )
+            ):
+                candidate_competition_id = None
+            if candidate_competition_id is None:
+                candidate_competition_id = self._create_competition(
+                    canonical_name=canonical_name,
+                    sport=sport,
+                    country=country,
+                    source_competition_id=source_competition_id,
+                )
+            competition_id = candidate_competition_id
             confidence = result.confidence
         else:
             canonical_name = raw_league
@@ -969,6 +1273,7 @@ class FixtureCatalog:
         self._save_competition_mapping(
             raw_league,
             sport,
+            country,
             competition_id,
             resolution_method=result.method,
             confidence=confidence,
@@ -987,15 +1292,29 @@ class FixtureCatalog:
             canonical_name, competition_id, confidence, result.method, trust_state
         )
 
-    def _find_competition_mapping(self, raw_league: str, sport: str) -> tuple[str, str] | None:
+    def _find_competition_mapping(
+        self, raw_league: str, sport: str, country: str | None
+    ) -> tuple[str, str] | None:
         row = self._connection.execute(
             """
             SELECT c.canonical_name, c.id FROM source_competition_mappings m
             JOIN competitions c ON c.id = m.competition_id
             WHERE m.source = ? AND m.sport = ? AND m.source_competition_name = ?
               AND m.trust_state = 'VERIFIED'
+              AND (
+                    m.country_key = ?
+                    OR (m.country_key = '' AND m.resolution_method = 'manual')
+                  )
+            ORDER BY CASE WHEN m.country_key = ? THEN 0 ELSE 1 END
+            LIMIT 1
             """,
-            (self._provider_id, sport, raw_league),
+            (
+                self._provider_id,
+                sport,
+                raw_league,
+                _country_key(country),
+                _country_key(country),
+            ),
         ).fetchone()
         return (row["canonical_name"], row["id"]) if row else None
 
@@ -1003,6 +1322,7 @@ class FixtureCatalog:
         self,
         raw_league: str,
         sport: str,
+        country: str | None,
         competition_id: str,
         *,
         resolution_method: str,
@@ -1012,11 +1332,12 @@ class FixtureCatalog:
         self._connection.execute(
             """
             INSERT INTO source_competition_mappings
-                (source, sport, source_competition_name, competition_id,
+                (source, sport, source_competition_name, country_key, competition_id,
                  resolution_method, confidence, created_at,
                  trust_state, resolver_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (source, sport, source_competition_name) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, sport, source_competition_name, country_key)
+            DO UPDATE SET
                 competition_id = CASE
                     WHEN source_competition_mappings.trust_state = 'VERIFIED'
                     THEN source_competition_mappings.competition_id
@@ -1037,6 +1358,7 @@ class FixtureCatalog:
                 self._provider_id,
                 sport,
                 raw_league,
+                _country_key(country),
                 competition_id,
                 resolution_method,
                 confidence,
@@ -1062,6 +1384,18 @@ class FixtureCatalog:
                 (sport, country),
             ).fetchall()
         return {row["canonical_name"]: row["id"] for row in rows}
+
+    def _competition_has_different_reference_id(
+        self, competition_id: str, source_competition_id: str
+    ) -> bool:
+        row = self._connection.execute(
+            """
+            SELECT reference_provider_id FROM competitions
+            WHERE id = ? AND reference_provider = ?
+            """,
+            (competition_id, REFERENCE_PROVIDER_ID),
+        ).fetchone()
+        return row is not None and row["reference_provider_id"] != source_competition_id
 
     def _create_competition(
         self,
@@ -1240,7 +1574,10 @@ class FixtureCatalog:
             SET reference_provider = ?, reference_provider_id = ?,
                 identity_status = 'REFERENCE', country = COALESCE(?, country)
             WHERE id = ? AND sport = ?
-              AND (reference_provider IS NULL OR reference_provider = ?)
+              AND (
+                    reference_provider IS NULL
+                    OR (reference_provider = ? AND reference_provider_id = ?)
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM competitions existing
                   WHERE existing.reference_provider = ?
@@ -1256,6 +1593,7 @@ class FixtureCatalog:
                 competition_id,
                 sport,
                 REFERENCE_PROVIDER_ID,
+                source_competition_id,
                 REFERENCE_PROVIDER_ID,
                 sport,
                 source_competition_id,
@@ -1264,6 +1602,125 @@ class FixtureCatalog:
         )
 
     # -- event resolution --------------------------------------------------
+
+    def _match_existing_event_by_context(
+        self,
+        *,
+        sport: str,
+        competition: _CompetitionResolution,
+        home_raw: str,
+        away_raw: str,
+        start_time: datetime,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+    ) -> tuple[Event, float] | None:
+        """Matches a fixture as one unit before resolving isolated teams.
+
+        Competition, kickoff, home side and away side are joint evidence.
+        This is what makes a first-ever ``Sabah Masazir`` sighting resolvable
+        against an existing API fixture without first poisoning a global team
+        name cache.  Home/away order is intentional; a reversed feed is a
+        conflict to review, not something silently folded together.
+        """
+        if competition.trust_state != TRUST_VERIFIED:
+            return None
+
+        lower = to_utc_iso(start_time - self._start_time_tolerance)
+        upper = to_utc_iso(start_time + self._start_time_tolerance)
+        rows = self._connection.execute(
+            """
+            SELECT * FROM events
+            WHERE competition_id = ? AND start_time BETWEEN ? AND ?
+            ORDER BY ABS(julianday(start_time) - julianday(?))
+            """,
+            (
+                competition.competition_id,
+                lower,
+                upper,
+                to_utc_iso(start_time),
+            ),
+        ).fetchall()
+
+        scored: list[tuple[float, Event]] = []
+        for row in rows:
+            event = self._map_event_row(row)
+            home_score = self._team_evidence_score(
+                raw_name=home_raw,
+                candidate=event.home_team,
+                sport=sport,
+                source_team_id=home_team_source_id,
+            )
+            away_score = self._team_evidence_score(
+                raw_name=away_raw,
+                candidate=event.away_team,
+                sport=sport,
+                source_team_id=away_team_source_id,
+            )
+            if home_score < 0 or away_score < 0:
+                continue
+            if home_score == 0.0 and away_score == 0.0:
+                continue
+            if 0.0 in {home_score, away_score}:
+                # One exact side plus competition+kickoff+home/away position
+                # identifies the other side of a unique fixture even when its
+                # spelling shares no useful characters (Sabah Masazir/Sabah).
+                if max(home_score, away_score) < 100.0:
+                    continue
+                combined_score = 90.0
+            else:
+                if min(home_score, away_score) < self._fuzzy_threshold:
+                    continue
+                combined_score = (home_score + away_score) / 2.0
+            if max(home_score, away_score) < 100.0 and combined_score < 90.0:
+                # Two merely-fuzzy names are not enough to connect odds to a
+                # reference event, even when the time happens to line up.
+                continue
+            scored.append((combined_score, event))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if (
+            len(scored) > 1
+            and scored[0][0] - scored[1][0] < self._fuzzy_ambiguity_margin
+        ):
+            logger.warning(
+                "fixture_catalog.event.ambiguous_fixture_context",
+                extra={
+                    "competition_id": competition.competition_id,
+                    "home_raw": home_raw,
+                    "away_raw": away_raw,
+                    "candidate_count": len(scored),
+                },
+            )
+            return None
+        return scored[0][1], scored[0][0]
+
+    def _team_evidence_score(
+        self,
+        *,
+        raw_name: str,
+        candidate: Team,
+        sport: str,
+        source_team_id: str | None,
+    ) -> float:
+        if source_team_id is not None:
+            id_hit = self._find_team_by_source_id(source_team_id, sport)
+            if id_hit is not None:
+                if id_hit[1]["trust_state"] != TRUST_VERIFIED:
+                    return 0.0
+                return 100.0 if id_hit[0].id == candidate.id else -1.0
+
+        result = TeamNormalizer(
+            [candidate.canonical_name],
+            aliases=self._aliases,
+            token_aliases=self._token_aliases,
+            fuzzy_threshold=self._fuzzy_threshold,
+            ambiguity_margin=self._fuzzy_ambiguity_margin,
+        ).normalize(raw_name)
+        if result.canonical_name != candidate.canonical_name:
+            return 0.0
+        return result.confidence
 
     def _resolve_event(
         self,
@@ -1274,6 +1731,7 @@ class FixtureCatalog:
         home: Team,
         away: Team,
         start_time: datetime,
+        source_event_id: str | None,
     ) -> Event:
         existing = self._find_event(
             competition_id=competition_id,
@@ -1288,7 +1746,11 @@ class FixtureCatalog:
             # provider moving a match by 15 minutes, say), and signal
             # expiry keys off events.start_time -- see
             # _sync_event_start_time.
-            return self._sync_event_start_time(existing, start_time)
+            synced = self._sync_event_start_time(
+                existing, start_time, source_event_id=source_event_id
+            )
+            self._promote_event_to_reference(synced.id, source_event_id)
+            return synced
 
         event = Event(
             id=f"event-{uuid4().hex[:10]}",
@@ -1299,11 +1761,25 @@ class FixtureCatalog:
             away_team=away,
             start_time=start_time,
         )
+        is_reference_event = False
+        if self._provider_id == REFERENCE_PROVIDER_ID and source_event_id is not None:
+            is_reference_event = (
+                self._connection.execute(
+                    """
+                    SELECT 1 FROM events
+                    WHERE reference_provider = ? AND reference_provider_id = ?
+                    """,
+                    (REFERENCE_PROVIDER_ID, source_event_id),
+                ).fetchone()
+                is None
+            )
         self._connection.execute(
             """
-            INSERT INTO events
-                (id, sport, league, competition_id, home_team_id, away_team_id, start_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO events (
+                id, sport, league, competition_id, home_team_id, away_team_id,
+                start_time, start_time_provider, reference_provider,
+                reference_provider_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.id,
@@ -1313,6 +1789,17 @@ class FixtureCatalog:
                 home.id,
                 away.id,
                 to_utc_iso(event.start_time),
+                self._provider_id,
+                (
+                    REFERENCE_PROVIDER_ID
+                    if is_reference_event
+                    else None
+                ),
+                (
+                    source_event_id
+                    if is_reference_event
+                    else None
+                ),
             ),
         )
         logger.info(
@@ -1321,7 +1808,13 @@ class FixtureCatalog:
         )
         return event
 
-    def _sync_event_start_time(self, event: Event, new_start_time: datetime) -> Event:
+    def _sync_event_start_time(
+        self,
+        event: Event,
+        new_start_time: datetime,
+        *,
+        source_event_id: str | None,
+    ) -> Event:
         """Updates an already-resolved event's start_time in place when a
         later sighting reports a different one -- a provider genuinely
         rescheduling a fixture's kickoff, not corrected retroactively
@@ -1341,9 +1834,52 @@ class FixtureCatalog:
         if to_utc_iso(event.start_time) == to_utc_iso(new_start_time):
             return event
 
+        authority = self._connection.execute(
+            """
+            SELECT start_time_provider, reference_provider
+            FROM events WHERE id = ?
+            """,
+            (event.id,),
+        ).fetchone()
+        if authority is not None:
+            reference_provider = authority["reference_provider"]
+            start_time_provider = authority["start_time_provider"]
+            may_update = (
+                self._provider_id == REFERENCE_PROVIDER_ID
+                or (
+                    reference_provider is None
+                    and (start_time_provider is None or start_time_provider == self._provider_id)
+                )
+                or reference_provider == self._provider_id
+            )
+            if not may_update:
+                logger.info(
+                    "fixture_catalog.event.start_time_ignored_non_authoritative",
+                    extra={
+                        "event_id": event.id,
+                        "provider_id": self._provider_id,
+                        "reference_provider": reference_provider,
+                    },
+                )
+                return event
+
         self._connection.execute(
-            "UPDATE events SET start_time = ? WHERE id = ?",
-            (to_utc_iso(new_start_time), event.id),
+            """
+            UPDATE events
+            SET start_time = ?, start_time_provider = ?,
+                reference_provider = CASE WHEN ? THEN ? ELSE reference_provider END,
+                reference_provider_id = CASE WHEN ? THEN ? ELSE reference_provider_id END
+            WHERE id = ?
+            """,
+            (
+                to_utc_iso(new_start_time),
+                self._provider_id,
+                self._provider_id == REFERENCE_PROVIDER_ID and source_event_id is not None,
+                REFERENCE_PROVIDER_ID,
+                self._provider_id == REFERENCE_PROVIDER_ID and source_event_id is not None,
+                source_event_id,
+                event.id,
+            ),
         )
         logger.info(
             "fixture_catalog.event.start_time_rescheduled",
@@ -1355,6 +1891,37 @@ class FixtureCatalog:
             },
         )
         return replace(event, start_time=new_start_time)
+
+    def _promote_event_to_reference(
+        self, event_id: str, source_event_id: str | None
+    ) -> None:
+        if self._provider_id != REFERENCE_PROVIDER_ID or source_event_id is None:
+            return
+        self._connection.execute(
+            """
+            UPDATE events
+            SET reference_provider = ?, reference_provider_id = ?,
+                start_time_provider = ?
+            WHERE id = ?
+              AND (reference_provider IS NULL OR reference_provider = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM events existing
+                  WHERE existing.reference_provider = ?
+                    AND existing.reference_provider_id = ?
+                    AND existing.id != ?
+              )
+            """,
+            (
+                REFERENCE_PROVIDER_ID,
+                source_event_id,
+                REFERENCE_PROVIDER_ID,
+                event_id,
+                REFERENCE_PROVIDER_ID,
+                REFERENCE_PROVIDER_ID,
+                source_event_id,
+                event_id,
+            ),
+        )
 
     def _find_event_mapping(self, source_event_id: str) -> _EventMapping | None:
         row = self._connection.execute(
@@ -1527,7 +2094,7 @@ class FixtureCatalog:
         if (
             stored_country is not None
             and country is not None
-            and stored_country.strip().casefold() != country.strip().casefold()
+            and _country_key(stored_country) != _country_key(country)
         ):
             return False
 
@@ -1558,13 +2125,19 @@ class FixtureCatalog:
             ):
                 return False
 
-        home_name_mapping = self._find_mapping(home_raw, sport)
+        home_name_mapping = self._find_mapping(
+            home_raw, sport, mapping.event.competition_id
+        )
         if home_name_mapping is not None and home_name_mapping.id != mapping.event.home_team.id:
             return False
-        away_name_mapping = self._find_mapping(away_raw, sport)
+        away_name_mapping = self._find_mapping(
+            away_raw, sport, mapping.event.competition_id
+        )
         if away_name_mapping is not None and away_name_mapping.id != mapping.event.away_team.id:
             return False
-        competition_name_mapping = self._find_competition_mapping(league, sport)
+        competition_name_mapping = self._find_competition_mapping(
+            league, sport, country
+        )
         return not (
             competition_name_mapping is not None
             and competition_name_mapping[1] != mapping.event.competition_id
@@ -1583,6 +2156,33 @@ class FixtureCatalog:
         away_team_source_id: str | None,
         competition_source_id: str | None,
     ) -> None:
+        self._learn_identity_from_event_context(
+            event,
+            sport=sport,
+            competition_id=event.competition_id,
+            league=league,
+            home_raw=home_raw,
+            away_raw=away_raw,
+            country=country,
+            home_team_source_id=home_team_source_id,
+            away_team_source_id=away_team_source_id,
+            competition_source_id=competition_source_id,
+        )
+
+    def _learn_identity_from_event_context(
+        self,
+        event: Event,
+        *,
+        sport: str,
+        competition_id: str,
+        league: str,
+        home_raw: str,
+        away_raw: str,
+        country: str | None,
+        home_team_source_id: str | None,
+        away_team_source_id: str | None,
+        competition_source_id: str | None,
+    ) -> None:
         for raw_name, team, source_team_id in (
             (home_raw, event.home_team, home_team_source_id),
             (away_raw, event.away_team, away_team_source_id),
@@ -1590,6 +2190,7 @@ class FixtureCatalog:
             self._save_mapping(
                 raw_name,
                 sport,
+                competition_id,
                 team.id,
                 resolution_method="provider_event_context",
                 confidence=100.0,
@@ -1606,10 +2207,12 @@ class FixtureCatalog:
                 )
                 if self._provider_id == REFERENCE_PROVIDER_ID:
                     self._promote_team_to_reference(team.id, sport, source_team_id)
+            self._record_team_competition(team.id, competition_id)
 
         self._save_competition_mapping(
             league,
             sport,
+            country,
             event.competition_id,
             resolution_method="provider_event_context",
             confidence=100.0,
@@ -1720,17 +2323,28 @@ class FixtureCatalog:
         # plain, differently-offset text.
         lower = to_utc_iso(start_time - self._start_time_tolerance)
         upper = to_utc_iso(start_time + self._start_time_tolerance)
-        row = self._connection.execute(
+        rows = self._connection.execute(
             """
             SELECT * FROM events
             WHERE competition_id = ? AND home_team_id = ? AND away_team_id = ?
               AND start_time BETWEEN ? AND ?
             ORDER BY ABS(julianday(start_time) - julianday(?))
-            LIMIT 1
+            LIMIT 2
             """,
             (competition_id, home_team_id, away_team_id, lower, upper, to_utc_iso(start_time)),
-        ).fetchone()
-        return self._map_event_row(row) if row else None
+        ).fetchall()
+        if len(rows) > 1:
+            logger.warning(
+                "fixture_catalog.event.ambiguous_exact_candidates",
+                extra={
+                    "competition_id": competition_id,
+                    "home_team_id": home_team_id,
+                    "away_team_id": away_team_id,
+                    "start_time": to_utc_iso(start_time),
+                },
+            )
+            return None
+        return self._map_event_row(rows[0]) if rows else None
 
     def _map_team_row(self, row: Row) -> Team:
         return Team(id=row["id"], canonical_name=row["canonical_name"])

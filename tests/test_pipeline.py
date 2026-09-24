@@ -111,6 +111,44 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
     assert mozzart_result.event.id == meridianbet_result.event.id
 
 
+def test_country_qualified_epl_names_unify_all_three_providers():
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-09-27T15:00:00+00:00")
+
+    def catalog(provider_id):
+        return FixtureCatalog(
+            connection,
+            provider_id=provider_id,
+            aliases=pipeline.ALIASES,
+            token_aliases=pipeline.TOKEN_ALIASES,
+            league_aliases=pipeline.LEAGUE_ALIASES,
+        )
+
+    api = catalog("api-football").match(
+        sport="football", league="England - Premier League", country="England",
+        home_team_raw="Arsenal", away_team_raw="Liverpool", start_time=start_time,
+        source_event_id="af-1", home_team_source_id="42",
+        away_team_source_id="40", competition_source_id="39",
+    )
+    odds_api = catalog("the-odds-api").match(
+        sport="football", league="EPL",
+        home_team_raw="Arsenal", away_team_raw="Liverpool", start_time=start_time,
+        source_event_id="toa-1", competition_source_id="soccer_epl",
+    )
+    meridian = catalog("meridianbet").match(
+        sport="football", league="Engleska - Premier Liga", country="Engleska",
+        home_team_raw="Arsenal FC", away_team_raw="Liverpool", start_time=start_time,
+        source_event_id="m-1", home_team_source_id="420355",
+        away_team_source_id="263461", competition_source_id="2505",
+    )
+
+    assert {api.event.id, odds_api.event.id, meridian.event.id} == {api.event.id}
+    assert api.event.league == "England - Premier League"
+    assert connection.execute("SELECT COUNT(*) FROM competitions").fetchone()[0] == 1
+
+
 def test_club_suffix_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider matching gap found live:
     # Meridianbet reports "Arsenal FC" and "Lille OSC" for a Champions
@@ -331,11 +369,9 @@ def test_mls_league_alias_unifies_two_providers_same_match():
     # pipeline.LEAGUE_ALIASES explicitly said so. Each entry was verified
     # against real fixtures on both sides before being added, not just
     # guessed from the league name alone -- see LEAGUE_ALIASES' own
-    # comment for why that distinction matters (it's also why the EPL and
-    # Serie A entries below alias to the-odds-api's "EPL" and
-    # Meridianbet's "Serija A" instead of an api-football bucket:
-    # api-football's own bare "Premier League"/"Serie A" turned out to be
-    # Kazakhstan/Ghana and Brazil respectively, not England/Italy).
+    # comment for why that distinction matters. EPL and Serie A aliases use
+    # API-Football's country-qualified names; its bare league names are not
+    # globally unique and must not be treated as England/Italy by default.
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -373,9 +409,8 @@ def test_mls_league_alias_unifies_two_providers_same_match():
 
 
 def test_epl_league_alias_unifies_the_odds_api_and_meridianbet():
-    # the-odds-api's own "EPL" already covers the same real matches, with
-    # no api-football equivalent currently valid (see LEAGUE_ALIASES'
-    # comment) -- Meridianbet's "Premier Liga" aliases to it directly.
+    # Both provider spellings resolve to API-Football's country-qualified
+    # canonical league name even when the reference feed arrives later.
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -413,9 +448,8 @@ def test_epl_league_alias_unifies_the_odds_api_and_meridianbet():
 
 
 def test_serie_a_league_alias_unifies_meridianbet_and_mozzart():
-    # Meridianbet's own "Serija A" (34 events, the larger of the two) is
-    # the anchor for Italy's Serie A, with no api-football equivalent
-    # currently valid -- Mozzart's "Italija 1" aliases to it directly.
+    # Both provider spellings resolve to API-Football's country-qualified
+    # canonical league name even when the reference feed arrives later.
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)

@@ -1,3 +1,5 @@
+import pytest
+
 from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
 
 
@@ -38,13 +40,9 @@ def test_unknown_team_below_threshold():
     assert result.method == "unknown"
 
 
-def test_ambiguous_fuzzy_match_is_not_resolved():
-    # "Manchester United Res" scores 89.5 against "Manchester United" and
-    # 85.7 against "Manchester United U21" (verified via
-    # rapidfuzz.fuzz.token_sort_ratio) -- both above threshold, and close
-    # enough (3.8 apart) to trip the default 5.0 ambiguity_margin. Not a
-    # clear winner. Silently picking the top result here risks merging a
-    # reserve/youth team into the first team.
+def test_reserve_qualifier_is_not_fuzzily_merged_into_senior_or_u21():
+    # Qualifiers are identity-bearing, so this is rejected before a fuzzy
+    # scorer can turn the short "Res" suffix into an apparent close match.
     normalizer = TeamNormalizer(
         ["Manchester United", "Manchester United U21"],
         fuzzy_threshold=80,
@@ -53,7 +51,36 @@ def test_ambiguous_fuzzy_match_is_not_resolved():
     result = normalizer.normalize("Manchester United Res")
 
     assert result.canonical_name is None
-    assert result.method == "ambiguous"
+    assert result.method == "unknown"
+    assert result.confidence == 0
+
+
+@pytest.mark.parametrize(
+    ("raw_name", "existing_name"),
+    [
+        ("Manchester United", "Manchester United U21"),
+        ("Manchester United U21", "Manchester United"),
+        ("Barcelona", "Barcelona B"),
+        ("Barcelona B", "Barcelona"),
+        ("Chelsea", "Chelsea W"),
+        ("Premier League", "Premier League 2"),
+        ("Bundesliga", "2. Bundesliga"),
+    ],
+)
+def test_identity_qualifiers_are_symmetric(raw_name, existing_name):
+    result = TeamNormalizer([existing_name], fuzzy_threshold=80).normalize(raw_name)
+
+    assert result.canonical_name is None
+    assert result.method == "unknown"
+
+
+def test_m21_and_u21_remain_compatible_provider_spellings():
+    result = TeamNormalizer(["United Arab Emirates M23"], fuzzy_threshold=80).normalize(
+        "United Arab Emirates U23"
+    )
+
+    assert result.canonical_name == "United Arab Emirates M23"
+    assert result.method == "fuzzy"
 
 
 def test_short_shared_token_does_not_falsely_merge_unrelated_teams():
