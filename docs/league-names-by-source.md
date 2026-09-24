@@ -9,10 +9,10 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | 1st League - RS | 1st League - RS |
 | 2. Division - Group 2 | 2. Division - Group 2 |
 | 3. Division - Girone 2 | 3. Division - Girone 2 |
-| 3. Division - Girone 3 | 3. Division - Girone 2 |
-| 3. Division - Girone 4 | 3. Division - Girone 2 |
-| 3. Division - Girone 5 | 3. Division - Girone 2 |
-| 3. Division - Girone 6 | 3. Division - Girone 2 |
+| 3. Division - Girone 3 | 3. Division - Girone 3 |
+| 3. Division - Girone 4 | 3. Division - Girone 4 |
+| 3. Division - Girone 5 | 3. Division - Girone 5 |
+| 3. Division - Girone 6 | 3. Division - Girone 6 |
 | A Lyga | A Lyga |
 | Africa Cup of Nations - Qualification | Africa Cup of Nations - Qualification |
 | Allsvenskan | Allsvenskan |
@@ -32,7 +32,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Elitettan | Elitettan |
 | Eredivisie | Eredivisie |
 | Erovnuli Liga | Erovnuli Liga |
-| Erovnuli Liga 2 | Erovnuli Liga |
+| Erovnuli Liga 2 | Erovnuli Liga 2 |
 | Esiliiga A | Esiliiga A |
 | Esiliiga B | Esiliiga B |
 | Ettan - Norra | Ettan - Norra |
@@ -77,10 +77,10 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Regionalliga - SudWest | Paulista - U20 |
 | Reserve League | Reserve League |
 | Second League | Second League |
-| Second League - Group 1 | Second League - Group 2 |
+| Second League - Group 1 | Second League - Group 1 |
 | Second League - Group 2 | Second League - Group 2 |
-| Second League - Group 3 | Second League - Group 2 |
-| Serie A | Serie B |
+| Second League - Group 3 | Second League - Group 3 |
+| Serie A | Serie A |
 | Serie B | Serie B |
 | Super League | Major League Soccer |
 | Super Liga | Super Liga |
@@ -107,7 +107,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 
 | Sirovo ime | Kanonsko ime |
 |---|---|
-| 2. Bundesliga | Bundesliga |
+| 2. Bundesliga | 2. Bundesliga |
 | 2. Liga | Liga 2 |
 | 3. Liga | Liga 3 |
 | A Liga - Žene | A Liga - Žene |
@@ -137,7 +137,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Damallsvenskan | Damallsvenskan |
 | DFB Kup | DFB Kup |
 | Divizija 2 Play-Off | Divizija 2 Play-Off |
-| Divizije 1 Play-Off | Divizija 2 Play-Off |
+| Divizije 1 Play-Off | Divizije 1 Play-Off |
 | Druga Divizija | Druga Divizija |
 | Druga Liga | Druga Liga |
 | Druga Liga Eerste Divizija | Druga Liga Eerste Divizija |
@@ -186,7 +186,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Kup Predsednika | Predsednicki Kup |
 | Kup Rija | Kup Rija |
 | La Liga | La Liga |
-| La Liga 2 | La Liga |
+| La Liga 2 | La Liga 2 |
 | Landesliga | Landesliga |
 | Liga 1 | Liga 1 |
 | Liga 2 | Liga 2 |
@@ -233,7 +233,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Primera Nacional | Primera Nacional |
 | Primera RFEF | Primera RFEF |
 | Primera Serija A | Primera Serija A |
-| Primera Serija B | Primera Serija A |
+| Primera Serija B | Primera Serija B |
 | Profesionalna Liga | Liga Profesional |
 | Profesionalna Razvojna Liga | Profesionalna Razvojna Liga |
 | Prva Divizija | Prva Divizija |
@@ -249,11 +249,11 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Segunda B Nacional | Segunda B Nacional |
 | Segunda RFEF | Segunda RFEF |
 | Serija A | Serija A |
-| Serija B | Serija A |
-| Serija C | Serija A |
+| Serija B | Serija B |
+| Serija C | Serija C |
 | Serija C Grupa A | Serija C Grupa A |
-| Serija C Grupa B | Serija C Grupa A |
-| Serija C Grupa C | Serija C Grupa A |
+| Serija C Grupa B | Serija C Grupa B |
+| Serija C Grupa C | Serija C Grupa C |
 | Severna Liga 1. Divizija | Severna Liga 1. Divizija |
 | Severna Premier Liga | Severna Premier Liga |
 | Shilong Premier Liga | Shilong Premier Liga |
@@ -270,7 +270,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | U19 Kup | U19 Kup |
 | U19 Liga | U19 Liga |
 | U20 Liga | U20 Liga |
-| U21 Liga | U19 Liga |
+| U21 Liga | U21 Liga |
 | UEFA Europa Cup Women's | UEFA Europa Cup Women's |
 | United Soccer Liga | United Soccer Liga |
 | Urugvajski Kup | Urugvajski Kup |
@@ -288,7 +288,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | ASEAN Kup | ASEAN Kup |
 | Austrija 3 Istok | Austrija 3 Istok |
 | Azijske igre M23 | Azijske igre M23 |
-| Azijske Igre W | Azijske igre M23 |
+| Azijske Igre W | Azijske Igre W |
 | Brazil 2 | Brazil 2 |
 | Brazil Kup Rio | Brazil Kup Rio |
 | CONCACAF  -  LIGA  NACIJA  B | CONCACAF Liga Nacija |
@@ -302,9 +302,9 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Ekvador Kup | Ekvador Kup |
 | El Salvador 1 - Apertura | El Salvador 1 - Apertura |
 | Engleska 1 | Engleska 1 |
-| Engleska 3 | Engleska 1 |
-| Engleska 4 | Engleska 1 |
-| Engleska 5 | Engleska 1 |
+| Engleska 3 | Engleska 3 |
+| Engleska 4 | Engleska 4 |
+| Engleska 5 | Engleska 5 |
 | Engleska 6 - Jug | Engleska 6 - Jug |
 | Engleska 6 - Sever | Engleska 6 - Sever |
 | Engleska EFL Trofej | Engleska EFL Trofej |
@@ -314,7 +314,7 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Evropsko prvenstvo M21 (q) | Evropsko prvenstvo M21 (q) |
 | Finska 2 | Finska 2 |
 | Francuska 1 | Francuska 1 |
-| Francuska 3 | Francuska 1 |
+| Francuska 3 | Francuska 3 |
 | Gulf Kup | Gulf Kup |
 | Gvatemala 1 - Apertura | Gvatemala 1 - Apertura |
 | Holandija 2 | Holandija 2 |
@@ -324,10 +324,10 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Indija Šilong 2 | Indija Šilong 2 |
 | Italija 1 | Italija 1 |
 | Italija 3 A | Italija 3 A |
-| Italija 3 B | Italija 3 A |
-| Italija 3 C | Italija 3 A |
+| Italija 3 B | Italija 3 B |
+| Italija 3 C | Italija 3 C |
 | Izrael 2 | Izrael 2 |
-| Izrael 3 | Izrael 2 |
+| Izrael 3 | Izrael 3 |
 | Japan 2 | Japan 2 |
 | Kanada 1 | Kanada 1 |
 | Kina M20 | Kina M20 |
@@ -335,15 +335,15 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Kup Evrope W | Kup Evrope W |
 | Liga Nacija | Liga Nacija |
 | Liga nacija (A) - Evropa | Liga nacija (A) - Evropa |
-| Liga nacija (B) - Evropa | Liga nacija (A) - Evropa |
-| Liga nacija (C) - Evropa | Liga nacija (A) - Evropa |
-| Liga nacija (D) - Evropa | Liga nacija (A) - Evropa |
+| Liga nacija (B) - Evropa | Liga nacija (B) - Evropa |
+| Liga nacija (C) - Evropa | Liga nacija (C) - Evropa |
+| Liga nacija (D) - Evropa | Liga nacija (D) - Evropa |
 | Liga šampiona | Liga Šampiona |
 | Liga šampiona W | Liga Šampiona |
 | Makedonija 1 | Makedonija 1 |
 | Maroko 1 | Maroko 1 |
 | Meksiko 1 - Apertura | Meksiko 1 - Apertura |
-| Meksiko 2 - Apertura | Meksiko 1 - Apertura |
+| Meksiko 2 - Apertura | Meksiko 2 - Apertura |
 | Međunarodne prijateljske | Međunarodne prijateljske |
 | Nemačka 1 | Nemačka 1 |
 | Nigerija 1 | Nigerija 1 |
@@ -356,11 +356,11 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | SAD - MLS | SAD - MLS |
 | SAD 2 - USL | SAD 2 - USL |
 | Severna Irska 1 | Severna Irska 1 |
-| Severna Irska 2 | Severna Irska 1 |
+| Severna Irska 2 | Severna Irska 2 |
 | Slovačka 2 | Slovačka 2 |
 | Slovenija 2 | Slovenija 2 |
 | Srbija 1 MozzartBet | Srbija 1 MozzartBet |
-| Srbija 2 MozzartBet | Srbija 1 MozzartBet |
+| Srbija 2 MozzartBet | Srbija 2 MozzartBet |
 | Svetsko prvenstvo W20 | Svetsko prvenstvo W20 |
 | Urugvaj 1 - Klausura | Paragvaj 1 - Klausura |
 | Urugvaj Kup | Urugvajski Kup |
@@ -370,8 +370,8 @@ Generisano iz source_competition_mappings -- osnova za buduci LEAGUE_ALIASES rad
 | Škotska 2 | Škotska 2 |
 | Škotska Čelendž Kup | Škotska Čelendž Kup |
 | Španija 1 | Španija 1 |
-| Španija 2 | Španija 1 |
-| Španija 3 | Španija 1 |
+| Španija 2 | Španija 2 |
+| Španija 3 | Španija 3 |
 | Švedska 1 W | Švedska 1 W |
 | Švedska 3 - Jug | Švedska 3 - Jug |
 | Švedska 3 - Sever | Švedska 3 - Sever |

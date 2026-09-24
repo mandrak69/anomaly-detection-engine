@@ -67,6 +67,44 @@ events in the database matching them by direct forensic evidence at fix
 time -- their cache row was still corrected (so a *future* sighting
 resolves correctly), but no `events` row needed repointing.
 
+## Round 2: single-letter suffix collisions (Serie A/B, Liga nacija A-D, ...)
+
+Same `token_sort_ratio` weakness, but triggered by a single **letter**
+instead of a digit (e.g. `"Serie A"` vs `"Serie B"` scores 85.7 --
+verified live). `_digit_tokens()`'s regex only catches digit runs, so
+this needed a separate forensic pass; it was **not** fixed at the code
+level.
+
+**Why not the same code fix as digits**: a single letter is not always a
+meaningful identifier the way a tier/group number always is. `"France
+M21"` (mozzart, Serbian "muska"/men's) and `"France U21"` (English
+"Under") are the *same real entity* under two languages' abbreviation
+conventions -- 22 such team-level cases were found (`M21`/`U21` national
+youth sides) and are **already correctly merged**, relying on this exact
+fuzzy mechanism. A blanket "digit-style" letter-equality requirement
+would have un-merged all 22 of them -- a regression, not a fix. Letters
+need case-by-case judgment; digits don't.
+
+Confirmed via forensic evidence (12 raw names, 102 events, same
+start_time + already-correct-team-names matching method as Round 1):
+
+- api-football: `Serie A` (Italy's *top* division) was merged into `Serie
+  B` (second division) -- the single api-football-sourced fix in this
+  round; everything else here is meridianbet/mozzart.
+- meridianbet: `Serija B`, `Serija C`, `Serija C Grupa B`, `Serija C
+  Grupa C`, `Primera Serija B`
+- mozzart: `Liga nacija (B/C/D) - Evropa` (UEFA Nations League leagues B,
+  C, D all merged into league A), `Italija 3 B`, `Italija 3 C`, `Azijske
+  Igre W` (the Asian Games *women's* tournament, merged into the men's
+  U23 one -- found while investigating this round, see below)
+
+**One pre-existing merge confirmed correct, not touched**: `Azijske Igre
+U23` (meridianbet) and `Azijske igre M23` (mozzart, the older/legacy row
+that happens to hold the canonical spelling) are the same real
+tournament under the M/U convention difference described above --
+already fuzzy-merged correctly (score 93.75), left as-is. Only the
+*women's* variant sharing that same bucket was the actual bug.
+
 ## Left unresolved
 
 **78 events** across the same buckets showed `UNKNOWN` in the forensic
