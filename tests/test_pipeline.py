@@ -111,17 +111,21 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
     assert mozzart_result.event.id == meridianbet_result.event.id
 
 
-def test_epl_league_alias_unifies_two_providers_same_match():
+def test_mls_league_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider gap found live: Mozzart
-    # reports the EPL as "Engleska 1" (Serbian for "England 1") and
-    # Meridianbet reports it as "Premier Liga" -- neither string shares
-    # enough characters with api-football's own "Premier League" for
+    # reports MLS as "SAD - MLS" (Serbian for "USA - MLS") and
+    # Meridianbet reports it as "MLS Liga" -- neither string shares
+    # enough characters with api-football's own "Major League Soccer" for
     # token_sort_ratio to ever bridge them, so the same real fixture
-    # resolved to two (three, counting the-odds-api's "EPL") separate
-    # canonical events until pipeline.LEAGUE_ALIASES explicitly said so.
-    # Each entry was verified against real fixtures on both sides before
-    # being added, not just guessed from the league name alone -- see
-    # LEAGUE_ALIASES' own comment for why that distinction matters.
+    # resolved to two separate canonical events until
+    # pipeline.LEAGUE_ALIASES explicitly said so. Each entry was verified
+    # against real fixtures on both sides before being added, not just
+    # guessed from the league name alone -- see LEAGUE_ALIASES' own
+    # comment for why that distinction matters (it's also why an EPL/
+    # "Premier League" and Serie A/"Serija A" version of this same test
+    # doesn't exist: api-football's own bare "Premier League"/"Serie A"
+    # buckets turned out to be Kazakhstan/Ghana and Brazil respectively,
+    # not England/Italy, so there was nothing valid to alias those to).
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -143,13 +147,13 @@ def test_epl_league_alias_unifies_two_providers_same_match():
     )
 
     mozzart_result = mozzart_catalog.match(
-        sport="football", league="Engleska 1",
-        home_team_raw="Arsenal", away_team_raw="Leeds",
+        sport="football", league="SAD - MLS",
+        home_team_raw="Inter Miami", away_team_raw="Orlando City SC",
         start_time=start_time,
     )
     meridianbet_result = meridianbet_catalog.match(
-        sport="football", league="Premier Liga",
-        home_team_raw="Arsenal", away_team_raw="Leeds",
+        sport="football", league="MLS Liga",
+        home_team_raw="Inter Miami", away_team_raw="Orlando City SC",
         start_time=start_time,
     )
 

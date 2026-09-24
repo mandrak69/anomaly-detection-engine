@@ -90,13 +90,20 @@ LEAGUE_ALIASES = {
     # own top flight under api-football) could have been wrongly aliased
     # to Meridianbet's "La Liga" (Spain) if it had been. Every entry below
     # was confirmed by cross-referencing real fixtures on both sides.
-    "Premier Liga": "Premier League",  # Meridianbet, EPL
-    "Engleska 1": "Premier League",  # Mozzart, EPL
-    "EPL": "Premier League",  # the-odds-api, EPL
-    "MLS Liga": "Major League Soccer",  # Meridianbet
+    #
+    # "Premier League" and "Serie A"/"Serija A"/"Italija 1" were both
+    # removed after the same check caught them too, post-merge: before
+    # api_football_collector.py folded league.country into the league
+    # name (see that collector's _qualified_league_name), api-football's
+    # own bare "Premier League" bucket turned out to hold only
+    # Kazakhstan/Ghana fixtures (zero England ones), and its "Serie A"
+    # bucket turned out to be Brazil's Campeonato Serie A, not Italy's --
+    # so Meridianbet's/Mozzart's genuinely English/Italian data had
+    # nothing valid to alias to yet. Re-add once api-football actually
+    # reports a fixture under "England - Premier League" / "Italy -
+    # Serie A" (or whatever its real country string turns out to be).
+    "MLS Liga": "Major League Soccer",  # Meridianbet -- majority-genuine bucket, cleaned separately
     "SAD - MLS": "Major League Soccer",  # Mozzart
-    "Serija A": "Serie A",  # Meridianbet, Italy's top flight
-    "Italija 1": "Serie A",  # Mozzart, Italy's top flight
 }
 
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
