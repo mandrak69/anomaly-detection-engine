@@ -175,34 +175,46 @@ Dominican Republic fixtures alongside genuine EPL ones. Merging into it
 now would have propagated that contamination into the EPL anchor.
 Deliberately stopped here rather than compounding it -- see below.
 
+## Round 4: Meridianbet had the identical bug, plus the EPL/MLS merges completed
+
+Confirmed straight after Round 3: `meridianbet_file_collector.py` only
+ever extracted `header.league.name`, discarding `header.region.name` --
+present on every real captured event alongside it (`{"regionId": 14,
+"regionName": "Argentina", ...}` at the league-group level, and
+`header.region: {"name": "Argentina", ...}` on the event itself). Same
+consequence as api-football: `Premier Liga`'s 62 events mixed England
+(20), Scotland (12), Wales (8), Russia (16), Canada (5), and the
+Dominican Republic (1) under one bucket, all because those countries
+also call their own top flight some "Premier League" equivalent.
+
+**Code fix**: `meridianbet_file_collector._qualified_league_name()`
+prefixes `f"{region} - {name}"` the same way the api-football fix does.
+Covered by `test_same_league_name_in_two_regions_does_not_collide` and
+`test_missing_region_falls_back_to_the_bare_league_name`.
+
+**Data fix**: `MLS Liga` (meridianbet's own MLS bucket) was checked the
+same way and found already clean -- all 33 events genuinely MLS/USL
+Championship-adjacent, no contamination. `Premier Liga`'s 42 non-England
+events were split into five new competitions (`Scotland - Premier Liga`,
+`Wales - Premier Liga`, `Russia - Premier Liga`, `Canada - Premier
+Liga`, `Dominican Republic - Premier Liga`); its 20 England events were
+matched against `EPL` by start_time + team identity (all 20 had an
+unambiguous match) and merged in directly, closing out the retroactive
+merge Round 2 had deliberately deferred.
+
+**EPL and MLS retroactive merges, completed**: EPL's 20 Meridianbet
+events merged into `EPL` (the-odds-api's own bucket, unchanged 30-event
+count since merging adds odds to existing events rather than creating
+new ones). MLS Liga's 33 events split into 1 genuine duplicate (merged)
+and 32 distinct fixtures the anchor didn't have yet (plain competition_id
+repoint, no event deleted) -- `Major League Soccer` grew from 44 to 76
+events. Both merges used the same `odds_snapshots` dedup + `events`
+delete method as Serie A's Round 3 merge, plus repointing
+`source_event_mappings` (the fast-path source_event_id cache -- a second
+foreign key this kind of merge always needs beyond what a first glance
+suggests, easy to forget).
+
 ## Left unresolved
-
-**Meridianbet's own league naming likely has the same country-blindness
-bug api-football had, not yet fixed.** Discovered while checking EPL
-merge candidates: Meridianbet's "Premier Liga" bucket (62 events) holds
-genuine EPL fixtures (Arsenal, Chelsea, Aston Villa, Manchester United,
-...) mixed with Scotland (Celtic, Rangers, Aberdeen, Hibernian, ...),
-Wales (Barry Town, Cardiff Metropolitan, The New Saints, ...), Russia
-(CSKA Moscow, Zenit, Spartak Moscow, ...), Canada (Vancouver FC, Cavalry
-FC, Pacific FC, ...), and the Dominican Republic (Salcedo FC, Cibao FC).
-Every one of those countries also genuinely calls its own top flight
-"Premier League"-equivalent, the same pattern as api-football's bug.
-`meridianbet_file_collector.py` needs the same kind of investigation
-`api_football_collector.py` got in Round 3 -- check whether Meridianbet's
-own response includes a country field this collector is discarding, the
-same way api-football's did.
-
-**EPL and MLS retroactive event merges were not done**, specifically
-because of the above -- merging Mozzart's/Meridianbet's EPL events into
-the-odds-api's "EPL" anchor now would pull "Premier Liga"'s
-non-English contamination in via the same alias. Serie A's merge went
-ahead because Meridianbet's "Serija A" bucket was checked and is clean
-(all 34 events genuinely Italian). Once Meridianbet's collector-level fix
-(if one is needed) lands and "Premier Liga"/"MLS Liga" are re-verified
-clean, the same merge procedure used for Serie A (match by start_time +
-team identity, migrate `odds_snapshots` deduping exact collisions,
-repoint `source_event_mappings`, delete the duplicate `events` row) can
-run for EPL and MLS too.
 
 **78 events** across the same buckets showed `UNKNOWN` in the forensic
 sweep -- no `raw_payloads` row was found whose `start_time` and team
