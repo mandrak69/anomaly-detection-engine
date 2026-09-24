@@ -163,7 +163,7 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     assert three_way.source == "Bet365"
     assert three_way.source_id == "8"
     assert three_way.sport == "football"
-    assert three_way.league == "Liga Profesional Argentina"
+    assert three_way.league == "Argentina - Liga Profesional Argentina"
     assert three_way.home_team == "River Plate"
     assert three_way.away_team == "Boca Juniors"
     assert three_way.odds == {
@@ -185,6 +185,55 @@ def test_raw_event_odds_carries_the_fixture_id_as_source_event_id():
     )
     result = collector.collect().records
     assert all(record.source_event_id == "1493120" for record in result)
+
+
+def test_same_league_name_in_two_countries_does_not_collide():
+    # Regression test: api-football's own league.name alone is not a
+    # safe competition identity -- verified live that a bare "Premier
+    # League" bucket silently mixed Kazakhstan and Ghana fixtures
+    # together (zero England fixtures ever actually landed in it despite
+    # the name) since nothing distinguished them. league.country is
+    # present on every real api-football league response (see this
+    # file's own fixtures) and must be folded in.
+    fixtures = copy.deepcopy(SAMPLE_FIXTURES_RESPONSE)
+    fixtures["response"][0]["league"] = {
+        "id": 1, "name": "Premier League", "country": "Kazakhstan", "season": 2026,
+    }
+    odds = copy.deepcopy(SAMPLE_ODDS_RESPONSE)
+    odds["response"][0]["league"] = {
+        "id": 1, "name": "Premier League", "country": "Kazakhstan", "season": 2026,
+    }
+    kazakhstan_result = parse_api_football_response(
+        json.dumps(fixtures), json.dumps(odds),
+        observed_at=datetime.fromisoformat("2026-09-07T12:30:00+00:00"),
+    )
+
+    fixtures["response"][0]["league"]["country"] = "Ghana"
+    odds["response"][0]["league"]["country"] = "Ghana"
+    ghana_result = parse_api_football_response(
+        json.dumps(fixtures), json.dumps(odds),
+        observed_at=datetime.fromisoformat("2026-09-07T12:30:00+00:00"),
+    )
+
+    kazakhstan_leagues = {r.league for r in kazakhstan_result}
+    ghana_leagues = {r.league for r in ghana_result}
+    assert kazakhstan_leagues == {"Kazakhstan - Premier League"}
+    assert ghana_leagues == {"Ghana - Premier League"}
+    assert kazakhstan_leagues != ghana_leagues
+
+
+def test_missing_country_falls_back_to_the_bare_league_name():
+    fixtures = copy.deepcopy(SAMPLE_FIXTURES_RESPONSE)
+    fixtures["response"][0]["league"] = {"id": 1, "name": "UEFA Champions League"}
+    odds = copy.deepcopy(SAMPLE_ODDS_RESPONSE)
+    odds["response"][0]["league"] = {"id": 1, "name": "UEFA Champions League"}
+
+    result = parse_api_football_response(
+        json.dumps(fixtures), json.dumps(odds),
+        observed_at=datetime.fromisoformat("2026-09-07T12:30:00+00:00"),
+    )
+
+    assert {r.league for r in result} == {"UEFA Champions League"}
 
 
 def test_missing_fixture_status_yields_no_lifecycle():

@@ -109,6 +109,39 @@ def parse_api_football_response(
     return _parse_envelopes(fixtures_data, odds_data, observed_at)
 
 
+def _qualified_league_name(league: dict[str, Any]) -> str | None:
+    """api-football's own `league.name` alone is not a safe competition
+    identity -- many countries name their top flight the exact same
+    generic thing ("Premier League", "Championship", "Cup", "First
+    Division", "Super League", ...), and api-football's `league` object
+    reports both under the identical bare name with no other
+    disambiguation in this field. Verified live: a "Premier League"
+    bucket populated this way silently mixed Kazakhstan and Ghana
+    fixtures together -- with zero England fixtures ever actually
+    resolving to it despite the name -- since nothing here told them
+    apart. Prefixing with `league.country` (present on every real
+    api-football league response; see this project's own test fixtures)
+    is what every other source in this project already does implicitly
+    by writing the country into the league name itself (Mozzart's
+    "Engleska 1", Meridianbet's "Premier Liga" both include a country
+    marker) -- this brings api-football in line with that, rather than
+    leaving it the one source whose league identity depends on a name
+    collision never happening.
+
+    Returns None (skip this fixture, same as a missing name today) if
+    api-football sent no name at all. A missing/blank country is not
+    fatal -- some international competitions apparently omit it -- and
+    just leaves the bare name in place rather than inventing one.
+    """
+    name = league.get("name")
+    if not name:
+        return None
+    country = league.get("country")
+    if not country:
+        return str(name)
+    return f"{country} - {name}"
+
+
 def _parse_envelopes(
     fixtures_data: dict[str, Any], odds_data: dict[str, Any], observed_at: datetime
 ) -> list[RawEventOdds]:
@@ -133,7 +166,7 @@ def _parse_envelopes(
             continue
         home_team, away_team = teams
 
-        league_name = item.get("league", {}).get("name")
+        league_name = _qualified_league_name(item.get("league", {}))
         raw_date = item.get("fixture", {}).get("date")
         if not league_name or not raw_date:
             continue
@@ -156,7 +189,7 @@ def _parse_envelopes(
         for bookmaker in item.get("bookmakers", []):
             bookmaker_id = bookmaker.get("id")
             source_id = str(bookmaker_id) if bookmaker_id is not None else None
-            common = {
+            common: dict[str, Any] = {
                 "source": bookmaker.get("name") or "unknown",
                 "sport": "football",
                 "league": league_name,
