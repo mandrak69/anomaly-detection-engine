@@ -111,6 +111,53 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
     assert mozzart_result.event.id == meridianbet_result.event.id
 
 
+def test_epl_league_alias_unifies_two_providers_same_match():
+    # Regression test for a real cross-provider gap found live: Mozzart
+    # reports the EPL as "Engleska 1" (Serbian for "England 1") and
+    # Meridianbet reports it as "Premier Liga" -- neither string shares
+    # enough characters with api-football's own "Premier League" for
+    # token_sort_ratio to ever bridge them, so the same real fixture
+    # resolved to two (three, counting the-odds-api's "EPL") separate
+    # canonical events until pipeline.LEAGUE_ALIASES explicitly said so.
+    # Each entry was verified against real fixtures on both sides before
+    # being added, not just guessed from the league name alone -- see
+    # LEAGUE_ALIASES' own comment for why that distinction matters.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-10-10T11:30:00+00:00")
+
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    mozzart_result = mozzart_catalog.match(
+        sport="football", league="Engleska 1",
+        home_team_raw="Arsenal", away_team_raw="Leeds",
+        start_time=start_time,
+    )
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Premier Liga",
+        home_team_raw="Arsenal", away_team_raw="Leeds",
+        start_time=start_time,
+    )
+
+    assert mozzart_result.event is not None
+    assert meridianbet_result.event is not None
+    assert mozzart_result.event.id == meridianbet_result.event.id
+
+
 def test_default_source_uses_two_json_collector_polls(monkeypatch):
     _clear_source_env(monkeypatch)
 

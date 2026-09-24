@@ -85,6 +85,18 @@ TOKEN_ALIASES = {
 # fuzzy-match path, an explicit alias is not order-dependent.
 LEAGUE_ALIASES = {
     "Azijske igre M23": "Azijske Igre U23",
+    # Verified by checking each side's actual teams, not just the name --
+    # a name-only guess here is exactly how "Primera Division" (Peru's
+    # own top flight under api-football) could have been wrongly aliased
+    # to Meridianbet's "La Liga" (Spain) if it had been. Every entry below
+    # was confirmed by cross-referencing real fixtures on both sides.
+    "Premier Liga": "Premier League",  # Meridianbet, EPL
+    "Engleska 1": "Premier League",  # Mozzart, EPL
+    "EPL": "Premier League",  # the-odds-api, EPL
+    "MLS Liga": "Major League Soccer",  # Meridianbet
+    "SAD - MLS": "Major League Soccer",  # Mozzart
+    "Serija A": "Serie A",  # Meridianbet, Italy's top flight
+    "Italija 1": "Serie A",  # Mozzart, Italy's top flight
 }
 
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
