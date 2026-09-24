@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ class HarImportError(ValueError):
     """Raised when the HAR doesn't contain anything usable for this source."""
 
 
-def _wildcard_to_matcher(pattern: str):
+def _wildcard_to_matcher(pattern: str) -> Callable[[str], bool]:
     compiled = re.compile(fnmatch.translate(pattern))
     return lambda url: compiled.match(url) is not None
 
