@@ -62,6 +62,41 @@ ALIASES = {
     # Champions League fixture into two events.
     "Arsenal FC": "Arsenal",
     "Lille OSC": "Lille",
+    # Same club-suffix/prefix/abbreviation gap as above, found by
+    # systematically comparing every Meridianbet/Mozzart team pair
+    # sharing a competition_id+kickoff+one already-matching side --
+    # each entry verified the same way (same real fixture, only this
+    # club's own name differs). Target picked as whichever spelling an
+    # existing provider already used elsewhere (not guessed), except a
+    # bare acronym ("PSG"), which -- like "FCB"/"Barca" above -- maps to
+    # the full name instead.
+    "Sabah Masazir": "Sabah",
+    "Galatasaray Istanbul": "Galatasaray",
+    "Inter Milano": "Inter",
+    "Viking FK": "Viking",
+    "Fenerbahce Istanbul": "Fenerbahce",
+    "PSG": "Paris Saint-Germain",
+    "VfB Stuttgart": "Stuttgart",
+    "CSD Xelaju MC": "Xelajú",
+    "MS Tira": "Tira",
+    "Ironi Baka El Garbiya": "Baqa Al-Gharbiyye",
+    "Independiente Santa Fe": "Santa Fe",
+    "Aguilas Doradas Rionegro": "Águilas Doradas",
+    "Turks&Caicos Islands": "Turks and Caicos Islands",
+    "Saint Martin": "Saint-Martin",
+    "Antigva & Barbuda": "Antigua and Barbuda",
+    "Atletico Fenix": "CA Fenix Montevideo",
+    "Colon FC": "Colon Montevideo",
+    "CS Cerrito": "Cerrito",
+    "MS Ashdod": "Ashdod",
+    "MS Football Hapoel Kiryat Yam": "Kiryat Yam",
+    "Guadalupe": "Guadeloupe",
+    # "CA Cerro" deliberately NOT aliased here despite a verified live
+    # duplicate (see docs) -- the Uruguayan "Club Atletico Cerro" bucket
+    # it would target already has an unrelated Paraguayan fixture
+    # ("Sevilla Atletico") wrongly merged into it from elsewhere, so
+    # pointing more sightings at it isn't safe until that's untangled
+    # first.
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name

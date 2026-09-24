@@ -155,6 +155,86 @@ def test_club_suffix_alias_unifies_two_providers_same_match():
     assert meridianbet_result.event.id == mozzart_result.event.id
 
 
+def test_transliteration_alias_unifies_two_providers_same_match():
+    # A different category from the club-suffix cases above: the same
+    # small Israeli town's club spelled via two unrelated
+    # transliteration conventions (Arabic-native "Baqa Al-Gharbiyye" vs
+    # Hebrew-route "Ironi Baka El Garbiya") -- token_sort_ratio can't
+    # bridge this either, verified live via a shared opponent + identical
+    # kickoff on both sides.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-09-23T17:45:00+00:00")
+
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    api_football_catalog = FixtureCatalog(
+        connection,
+        provider_id="api-football",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Liga Alef",
+        home_team_raw="Baqa Al-Gharbiyye", away_team_raw="Hapoel Tirat HaCarmel",
+        start_time=start_time,
+    )
+    api_football_result = api_football_catalog.match(
+        sport="football", league="Liga Alef",
+        home_team_raw="Ironi Baka El Garbiya", away_team_raw="Hapoel Tirat HaCarmel",
+        start_time=start_time,
+    )
+
+    assert meridianbet_result.event is not None
+    assert api_football_result.event is not None
+    assert meridianbet_result.event.id == api_football_result.event.id
+
+
+def test_batch_club_name_aliases_have_the_expected_targets():
+    # A plain content check for the rest of the batch added alongside the
+    # two end-to-end tests above -- each was individually verified live
+    # (same competition_id + identical kickoff + a shared opponent on the
+    # unaliased side) before being added; this only guards against the
+    # dict itself being accidentally edited later, not the underlying
+    # matching mechanism (already covered end-to-end above and by
+    # TeamNormalizer's own tests).
+    expected = {
+        "Galatasaray Istanbul": "Galatasaray",
+        "Inter Milano": "Inter",
+        "Viking FK": "Viking",
+        "Fenerbahce Istanbul": "Fenerbahce",
+        "PSG": "Paris Saint-Germain",
+        "VfB Stuttgart": "Stuttgart",
+        "CSD Xelaju MC": "Xelajú",
+        "MS Tira": "Tira",
+        "Independiente Santa Fe": "Santa Fe",
+        "Aguilas Doradas Rionegro": "Águilas Doradas",
+        "Turks&Caicos Islands": "Turks and Caicos Islands",
+        "Saint Martin": "Saint-Martin",
+        "Antigva & Barbuda": "Antigua and Barbuda",
+        "Atletico Fenix": "CA Fenix Montevideo",
+        "Colon FC": "Colon Montevideo",
+        "CS Cerrito": "Cerrito",
+        "MS Ashdod": "Ashdod",
+        "MS Football Hapoel Kiryat Yam": "Kiryat Yam",
+        "Guadalupe": "Guadeloupe",
+    }
+    for key, value in expected.items():
+        assert pipeline.ALIASES[key] == value
+    # Deliberately excluded: a live duplicate exists for "CA Cerro", but
+    # its target ("Club Atletico Cerro") is itself contaminated with an
+    # unrelated fixture, so no alias was added for it.
+    assert "CA Cerro" not in pipeline.ALIASES
+
+
 def test_mls_league_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider gap found live: Mozzart
     # reports MLS as "SAD - MLS" (Serbian for "USA - MLS") and
