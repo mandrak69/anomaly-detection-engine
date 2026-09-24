@@ -235,6 +235,92 @@ def test_batch_club_name_aliases_have_the_expected_targets():
     assert "CA Cerro" not in pipeline.ALIASES
 
 
+def test_ireland_and_iceland_resolve_to_different_teams_once_both_exist():
+    # Regression test for a real, still-live false positive: bare
+    # "Iceland" scores 85.71 against "Ireland" via token_sort_ratio --
+    # above fuzzy_threshold, and neither name has a digit for the digit
+    # guard to gate on -- so whichever of the two is sighted *second*
+    # used to fuzzy-merge into the other instead of creating its own
+    # team, since only one of the two genuine canonical rows existed yet
+    # to exact-match against (verified live: every "Iceland" sighting
+    # merged into "Ireland" this way). Both rows already existing
+    # simultaneously (the end state of the one-off data fix that split
+    # them back apart live) is what actually closes this -- each new
+    # sighting then takes the ordinary exact-match path first and never
+    # reaches fuzzy matching at all.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES "
+        "('team-ireland-t', 'Ireland', 'football'), "
+        "('team-iceland-t', 'Iceland', 'football')"
+    )
+    connection.commit()
+
+    catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    ireland_result = catalog.match(
+        sport="football", league="Liga Nacija",
+        home_team_raw="Kosovo", away_team_raw="Ireland",
+        start_time=datetime.fromisoformat("2026-09-24T18:45:00+00:00"),
+    )
+    iceland_result = catalog.match(
+        sport="football", league="Liga Nacija",
+        home_team_raw="Iceland", away_team_raw="Estonia",
+        start_time=datetime.fromisoformat("2026-09-26T16:00:00+00:00"),
+    )
+
+    assert ireland_result.event.away_team.id == "team-ireland-t"
+    assert iceland_result.event.home_team.id == "team-iceland-t"
+
+
+def test_ireland_spelling_aliases_unify_three_providers_same_match():
+    # Regression test for the *other* fragmentation the Ireland/Iceland
+    # investigation turned up: Meridianbet's bare "Ireland", Mozzart's
+    # "Republic Of Ireland", and api-football's "Rep. Of Ireland" are
+    # the same real senior national team, spelled three different ways.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-09-24T18:45:00+00:00")
+
+    catalogs = {
+        provider_id: FixtureCatalog(
+            connection,
+            provider_id=provider_id,
+            aliases=pipeline.ALIASES,
+            token_aliases=pipeline.TOKEN_ALIASES,
+            league_aliases=pipeline.LEAGUE_ALIASES,
+        )
+        for provider_id in ("meridianbet", "mozzart", "api-football")
+    }
+
+    results = {
+        "meridianbet": catalogs["meridianbet"].match(
+            sport="football", league="Liga Nacija",
+            home_team_raw="Kosovo", away_team_raw="Ireland", start_time=start_time,
+        ),
+        "mozzart": catalogs["mozzart"].match(
+            sport="football", league="Liga nacija (B) - Evropa",
+            home_team_raw="Kosovo", away_team_raw="Republic Of Ireland", start_time=start_time,
+        ),
+        "api-football": catalogs["api-football"].match(
+            sport="football", league="UEFA Nations League",
+            home_team_raw="Kosovo", away_team_raw="Rep. Of Ireland", start_time=start_time,
+        ),
+    }
+
+    team_ids = {r.event.away_team.id for r in results.values()}
+    assert len(team_ids) == 1
+
+
 def test_mls_league_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider gap found live: Mozzart
     # reports MLS as "SAD - MLS" (Serbian for "USA - MLS") and

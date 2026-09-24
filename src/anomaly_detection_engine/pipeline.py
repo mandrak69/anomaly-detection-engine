@@ -97,6 +97,38 @@ ALIASES = {
     # ("Sevilla Atletico") wrongly merged into it from elsewhere, so
     # pointing more sightings at it isn't safe until that's untangled
     # first.
+    #
+    # These four exist for a different reason than every entry above:
+    # not a spelling gap fuzzy matching fails to bridge, but the
+    # opposite -- a single-letter-different country name pair
+    # ("Ireland"/"Iceland") that token_sort_ratio scores *above*
+    # fuzzy_threshold, verified live to have silently merged Iceland's
+    # senior and U21 national teams into Ireland's (and vice versa for
+    # the U21 side) from their very first sighting, since no genuine
+    # "Iceland"/"Ireland U21" canonical row existed yet to exact-match
+    # against first. Once those rows exist (see the one-off data fix
+    # that split them back out), "Iceland" and "Ireland U21" resolve
+    # correctly on their own via the ordinary exact-match path and need
+    # no alias -- the entries below are for the *other* fragmentation
+    # this same investigation turned up: three still-separate spellings
+    # of Ireland's own senior team ("Ireland" from Meridianbet,
+    # "Republic Of Ireland" from Mozzart, "Rep. Of Ireland" from
+    # api-football) and a senior/U21 collision on two more teams, for a
+    # subtly different reason than the country mix-up above: "Republic
+    # Ireland M21"/"Northern Ireland M21" DO have a digit, so the digit
+    # guard (see team_normalizer._digit_tokens) correctly refuses to
+    # fuzzy-match them against the bare, digit-less senior team -- but
+    # with no "...U21" canonical row existing yet either, that just left
+    # them stuck at "unknown" (a new team every sighting) rather than
+    # merging cleanly the way "Iceland M21" already does once "Iceland
+    # U21" exists. An explicit alias, not the exact-match self-healing
+    # the country fix relies on, since "Republic Ireland M21" and
+    # "Ireland U21" aren't spelled closely enough for even a
+    # digit-guard-safe fuzzy match to bridge on its own.
+    "Republic Of Ireland": "Ireland",
+    "Rep. Of Ireland": "Ireland",
+    "Republic Ireland M21": "Ireland U21",
+    "Northern Ireland M21": "Northern Ireland U21",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
