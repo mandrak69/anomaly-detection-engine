@@ -111,6 +111,50 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
     assert mozzart_result.event.id == meridianbet_result.event.id
 
 
+def test_club_suffix_alias_unifies_two_providers_same_match():
+    # Regression test for a real cross-provider matching gap found live:
+    # Meridianbet reports "Arsenal FC" and "Lille OSC" for a Champions
+    # League fixture the-odds-api/Mozzart report as bare "Arsenal" and
+    # "Lille" -- token_sort_ratio scores the club-suffix difference below
+    # fuzzy_threshold, so each side created its own separate canonical
+    # team until pipeline.ALIASES got an explicit entry for each name
+    # (see that dict's own comment).
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-10-13T19:00:00+00:00")
+
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Liga Šampiona",
+        home_team_raw="Arsenal FC", away_team_raw="Lille OSC",
+        start_time=start_time,
+    )
+    mozzart_result = mozzart_catalog.match(
+        sport="football", league="Liga Šampiona",
+        home_team_raw="Arsenal", away_team_raw="Lille",
+        start_time=start_time,
+    )
+
+    assert meridianbet_result.event is not None
+    assert mozzart_result.event is not None
+    assert meridianbet_result.event.id == mozzart_result.event.id
+
+
 def test_mls_league_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider gap found live: Mozzart
     # reports MLS as "SAD - MLS" (Serbian for "USA - MLS") and

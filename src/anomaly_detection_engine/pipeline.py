@@ -54,6 +54,14 @@ ALIASES = {
     "FCB": "Barcelona",
     "Barca": "Barcelona",
     "Real Madrid CF": "Real Madrid",
+    # Meridianbet appends a club-suffix ("FC"/"OSC"/...) that scores below
+    # fuzzy_threshold against the bare name other sources use -- verified
+    # live: "Arsenal FC" and "Lille OSC" (Meridianbet) each created their
+    # own separate canonical team instead of merging into "Arsenal"/
+    # "Lille" (the-odds-api/Mozzart's own spelling), splitting a shared
+    # Champions League fixture into two events.
+    "Arsenal FC": "Arsenal",
+    "Lille OSC": "Lille",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
