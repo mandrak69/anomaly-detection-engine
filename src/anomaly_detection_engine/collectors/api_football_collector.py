@@ -164,9 +164,10 @@ def _parse_envelopes(
         teams = team_names.get(fixture_id)
         if teams is None:
             continue
-        home_team, away_team = teams
+        home_team, away_team, home_team_id, away_team_id = teams
 
-        league_name = _qualified_league_name(item.get("league", {}))
+        league = item.get("league", {})
+        league_name = _qualified_league_name(league)
         raw_date = item.get("fixture", {}).get("date")
         if not league_name or not raw_date:
             continue
@@ -206,6 +207,12 @@ def _parse_envelopes(
                 # RawEventOdds.source_event_id.
                 "source_event_id": str(fixture_id) if fixture_id is not None else None,
                 "lifecycle": lifecycles.get(fixture_id),
+                "source_home_team_id": home_team_id,
+                "source_away_team_id": away_team_id,
+                "source_competition_id": (
+                    str(league["id"]) if league.get("id") is not None else None
+                ),
+                "country": (str(league["country"]) if league.get("country") else None),
             }
 
             match_winner_odds = _extract_match_winner_odds(bookmaker)
@@ -368,8 +375,20 @@ def _is_plan_page_limit_error(errors: object) -> bool:
     return isinstance(plan_message, str) and "page" in plan_message.lower()
 
 
-def _team_names_by_fixture_id(fixtures_data: dict[str, Any]) -> dict[int, tuple[str, str]]:
-    result: dict[int, tuple[str, str]] = {}
+def _team_names_by_fixture_id(
+    fixtures_data: dict[str, Any],
+) -> dict[int, tuple[str, str, str | None, str | None]]:
+    """(home_name, away_name, home_id, away_id) per fixture.id. The ids
+    come from the same teams.home/teams.away objects the names already
+    do (teams.home.id/teams.away.id) -- api-football's own stable team
+    identifiers, previously read only for the name and discarded; see
+    RawEventOdds.source_home_team_id/source_away_team_id. A team id is
+    optional the same way the name-only path already tolerates a missing
+    name: absent/non-string ids just leave that slot None rather than
+    dropping the whole fixture, since team NAMES (already required above)
+    are what makes a fixture usable at all.
+    """
+    result: dict[int, tuple[str, str, str | None, str | None]] = {}
     for item in fixtures_data["response"]:
         try:
             fixture_id = item["fixture"]["id"]
@@ -377,7 +396,14 @@ def _team_names_by_fixture_id(fixtures_data: dict[str, Any]) -> dict[int, tuple[
             away = item["teams"]["away"]["name"]
         except (KeyError, TypeError):
             continue
-        result[fixture_id] = (home, away)
+        home_id = item["teams"]["home"].get("id")
+        away_id = item["teams"]["away"].get("id")
+        result[fixture_id] = (
+            home,
+            away,
+            str(home_id) if home_id is not None else None,
+            str(away_id) if away_id is not None else None,
+        )
     return result
 
 

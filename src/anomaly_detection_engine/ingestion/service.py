@@ -271,6 +271,9 @@ class OddsIngestionService:
                 away_team_raw=raw.away_team,
                 start_time=raw.start_time,
                 source_event_id=raw.source_event_id,
+                home_team_source_id=raw.source_home_team_id,
+                away_team_source_id=raw.source_away_team_id,
+                competition_source_id=raw.source_competition_id,
             )
             if match.event is None:
                 return False, f"identity: {match.reason}"

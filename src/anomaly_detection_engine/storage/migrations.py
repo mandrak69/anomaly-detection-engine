@@ -1063,6 +1063,56 @@ def _migration_17_odds_snapshot_quote_time(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_18_source_id_mappings(connection: sqlite3.Connection) -> None:
+    """Adds source_team_id_mappings / source_competition_id_mappings, the
+    same shape as migration 10's source_event_mappings but keyed on a
+    provider's own stable team/competition id (see RawEventOdds.
+    source_home_team_id/source_away_team_id/source_competition_id)
+    instead of a raw name needing fuzzy resolution. Several real sources
+    -- api-football (teams.home.id/teams.away.id, league.id), Meridianbet
+    (header.rivalIds, header.league.leagueId), Mozzart (match.home.id/
+    match.visitor.id, match.competition.id) -- already report a stable
+    id right next to the display name; the collectors were simply
+    discarding it in favor of fuzzy-matching the name from scratch on
+    every sighting. A provider with no such id (the-odds-api's teams)
+    never gets a row here; FixtureCatalog.match() falls back to its
+    existing name-based resolution exactly as before whenever a source id
+    is absent or not yet mapped -- purely additive, no existing behavior
+    changes for a sighting that carries no provider id.
+
+    `last_seen_raw_name` is not used for matching -- it exists so a cache
+    *hit* can be checked for a name that has drifted sharply since it was
+    last written (a provider recycling/reusing an id across a season
+    boundary, most plausible for lower-tier competitions/teams). See
+    FixtureCatalog._resolve_team's use of it: a hit whose stored name no
+    longer resembles the new sighting's name is still trusted (a provider
+    doesn't silently swap identities without also renaming), but logged
+    so a human notices, the same "log, don't fail" posture this project
+    already uses for a missing country/region rather than inventing one.
+    """
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS source_team_id_mappings (
+            source TEXT NOT NULL,
+            source_team_id TEXT NOT NULL,
+            team_id TEXT NOT NULL REFERENCES teams(id),
+            last_seen_raw_name TEXT,
+            created_at TEXT,
+            PRIMARY KEY (source, source_team_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS source_competition_id_mappings (
+            source TEXT NOT NULL,
+            source_competition_id TEXT NOT NULL,
+            competition_id TEXT NOT NULL REFERENCES competitions(id),
+            last_seen_raw_name TEXT,
+            created_at TEXT,
+            PRIMARY KEY (source, source_competition_id)
+        );
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -1081,6 +1131,7 @@ MIGRATIONS: list[Migration] = [
     _migration_15_signal_peak_edge_percent,
     _migration_16_retention_cleanup_indexes,
     _migration_17_odds_snapshot_quote_time,
+    _migration_18_source_id_mappings,
 ]
 
 

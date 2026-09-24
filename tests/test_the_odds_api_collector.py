@@ -94,6 +94,20 @@ def test_maps_response_into_raw_event_odds_per_complete_bookmaker():
     assert raw.source_timestamp.tzinfo is not None
 
 
+def test_raw_event_odds_carries_the_sport_key_as_source_competition_id():
+    collector = TheOddsApiCollector(
+        sport_key="soccer_epl",
+        api_key="test-key",
+        fetch=fetch_stub(SAMPLE_RESPONSE),
+    )
+    raw = collector.collect().records[0]
+
+    assert raw.source_competition_id == "soccer_epl"
+    # No numeric team ids exist upstream at all for this source.
+    assert raw.source_home_team_id is None
+    assert raw.source_away_team_id is None
+
+
 def test_source_identifies_the_sport_key():
     collector = TheOddsApiCollector(
         sport_key="soccer_epl", api_key="test-key", fetch=fetch_stub([])

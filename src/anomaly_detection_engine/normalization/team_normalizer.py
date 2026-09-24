@@ -56,6 +56,30 @@ def _digit_tokens(comparison_key: str) -> tuple[str, ...]:
     return tuple(_DIGIT_RUN.findall(comparison_key))
 
 
+def names_are_similar(a: str, b: str, *, fuzzy_threshold: float = 85.0) -> bool:
+    """True when two raw names are close enough to plausibly be the same
+    real-world team/competition, by the same normalization/digit-guard/
+    fuzzy-ratio rules `TeamNormalizer.normalize()` itself uses to accept
+    a fuzzy match -- unlike normalize(), this compares exactly two given
+    strings rather than one name against a whole candidate pool, and
+    returns a plain bool rather than picking a canonical target.
+
+    Used by FixtureCatalog's provider-id fast path (see
+    source_team_id_mappings/source_competition_id_mappings) to detect a
+    provider recycling a numeric id across a season boundary onto a
+    genuinely different name -- a mismatch here doesn't override the id
+    (a provider doesn't silently swap identities without also renaming;
+    the id is still trusted), it only decides whether to log a drift
+    warning for a human to notice.
+    """
+    key_a, key_b = _comparison_key(a), _comparison_key(b)
+    if key_a == key_b:
+        return True
+    if _digit_tokens(key_a) != _digit_tokens(key_b):
+        return False
+    return fuzz.token_sort_ratio(key_a, key_b) >= fuzzy_threshold
+
+
 class TeamNormalizer:
     def __init__(
         self,

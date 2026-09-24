@@ -44,7 +44,10 @@ def football_match(
     match_id=1,
     home="Partizan",
     away="Crvena Zvezda",
+    home_id=None,
+    away_id=None,
     competition="Super liga Srbije",
+    competition_id=None,
     start_time_ms=1787904000000,
     outcomes=None,
     sport_name="Fudbal",
@@ -61,12 +64,22 @@ def football_match(
         groups.append(odds_group("Konačan ishod", outcomes))
     groups.append(odds_group("Sledeći gol", {"1": ("1.90", "ACTIVE", home)}))
 
+    home_obj = {"name": home}
+    if home_id is not None:
+        home_obj["id"] = home_id
+    away_obj = {"name": away}
+    if away_id is not None:
+        away_obj["id"] = away_id
+    competition_obj = {"name": competition}
+    if competition_id is not None:
+        competition_obj["id"] = competition_id
+
     return {
         "id": match_id,
         "sport": {"name": sport_name},
-        "competition": {"name": competition},
-        "home": {"name": home},
-        "visitor": {"name": away},
+        "competition": competition_obj,
+        "home": home_obj,
+        "visitor": away_obj,
         "startTime": start_time_ms,
         "oddsGroup": groups,
         "status": LIVE_STATUS if status is None else status,
@@ -105,6 +118,32 @@ def test_maps_a_clean_match_into_raw_event_odds(tmp_path):
     assert raw.market.phase == MarketPhase.LIVE
     assert raw.lifecycle == EventLifecycle.LIVE
     assert raw.source_event_id == "1"
+
+
+def test_raw_event_odds_carries_the_provider_team_and_competition_ids(tmp_path):
+    drop_capture(tmp_path, [football_match(home_id=94299, away_id=94296, competition_id=4187)])
+
+    collector = MozzartFileCollector(tmp_path)
+    raw = collector.collect().records[0]
+
+    assert raw.source_home_team_id == "94299"
+    assert raw.source_away_team_id == "94296"
+    assert raw.source_competition_id == "4187"
+    # No country/region field is confirmed present in a real Mozzart
+    # capture (only an opaque, unconfirmed `originId`) -- left unset
+    # rather than guessed.
+    assert raw.country is None
+
+
+def test_missing_provider_ids_leave_the_new_fields_unset(tmp_path):
+    drop_capture(tmp_path, [football_match()])
+
+    collector = MozzartFileCollector(tmp_path)
+    raw = collector.collect().records[0]
+
+    assert raw.source_home_team_id is None
+    assert raw.source_away_team_id is None
+    assert raw.source_competition_id is None
 
 
 def test_maps_a_pre_match_match_into_raw_event_odds(tmp_path):

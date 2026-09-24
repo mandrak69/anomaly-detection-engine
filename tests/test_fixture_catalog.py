@@ -194,6 +194,164 @@ def test_no_source_event_id_falls_back_to_normal_resolution():
     assert mappings == 0
 
 
+def test_team_source_id_hit_skips_fuzzy_matching_entirely():
+    # The point of the id fast path: a raw name that would never
+    # fuzzy-match on its own (nothing here resembles "Partizan" at all)
+    # still resolves correctly once its provider id was already mapped --
+    # proof the fuzzy step is skipped outright, not just cached under the
+    # old name.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    first = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+        home_team_source_id="435", away_team_source_id="451",
+    )
+
+    second = catalog.match(
+        sport="football", league="L", home_team_raw="Completely Different Spelling",
+        away_team_raw="Also Totally Different", start_time=T0 + timedelta(days=1),
+        home_team_source_id="435", away_team_source_id="451",
+    )
+
+    assert second.event.home_team.id == first.event.home_team.id
+    assert second.event.away_team.id == first.event.away_team.id
+    assert second.confidence == 100.0
+    # No new team rows for the wildly different spellings -- the id hit
+    # short-circuited before TeamNormalizer ever ran.
+    teams = connection.execute("SELECT COUNT(*) AS n FROM teams").fetchone()["n"]
+    assert teams == 2
+
+
+def test_team_source_id_is_saved_after_a_name_based_resolution():
+    # A source_team_id supplied alongside a name that resolves via the
+    # normal (name-keyed) path must still get its id mapping written, so
+    # the *next* sighting of that id can take the fast path even before
+    # the raw name has ever drifted.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+        home_team_source_id="435", away_team_source_id="451",
+    )
+
+    mappings = connection.execute(
+        "SELECT source_team_id, last_seen_raw_name FROM source_team_id_mappings "
+        "ORDER BY source_team_id"
+    ).fetchall()
+    assert {(row["source_team_id"], row["last_seen_raw_name"]) for row in mappings} == {
+        ("435", "Partizan"),
+        ("451", "Crvena Zvezda"),
+    }
+
+
+def test_team_source_id_hit_with_drifted_name_still_trusts_the_id(caplog):
+    # A provider recycling a numeric id across a season boundary onto a
+    # genuinely different name is still trusted -- see
+    # fixture_catalog.team_id.name_drift -- but must be logged so a human
+    # notices, not silently merged with no trace.
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    first = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+        home_team_source_id="435", away_team_source_id="451",
+    )
+
+    with caplog.at_level("WARNING"):
+        second = catalog.match(
+            sport="football", league="L", home_team_raw="A Totally Unrelated Name",
+            away_team_raw="Crvena Zvezda", start_time=T0 + timedelta(days=200),
+            home_team_source_id="435", away_team_source_id="451",
+        )
+
+    assert second.event.home_team.id == first.event.home_team.id
+    assert any(
+        record.message == "fixture_catalog.team_id.name_drift" for record in caplog.records
+    )
+
+
+def test_no_team_source_id_falls_back_to_normal_resolution():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="mozzart")
+
+    result = catalog.match(
+        sport="football", league="L", home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda", start_time=T0,
+    )
+
+    assert result.event is not None
+    mappings = connection.execute(
+        "SELECT COUNT(*) AS n FROM source_team_id_mappings"
+    ).fetchone()["n"]
+    assert mappings == 0
+
+
+def test_competition_source_id_hit_skips_fuzzy_matching_entirely():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    first = catalog.match(
+        sport="football", league="Liga Profesional Argentina", home_team_raw="River Plate",
+        away_team_raw="Boca Juniors", start_time=T0, competition_source_id="128",
+    )
+
+    second = catalog.match(
+        sport="football", league="A Completely Different League Name",
+        home_team_raw="Some Other Team", away_team_raw="Yet Another Team",
+        start_time=T0 + timedelta(days=1), competition_source_id="128",
+    )
+
+    assert second.event.competition_id == first.event.competition_id
+    competitions = connection.execute(
+        "SELECT COUNT(*) AS n FROM competitions"
+    ).fetchone()["n"]
+    assert competitions == 1
+
+
+def test_competition_source_id_is_saved_after_a_name_based_resolution():
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    catalog.match(
+        sport="football", league="Liga Profesional Argentina", home_team_raw="River Plate",
+        away_team_raw="Boca Juniors", start_time=T0, competition_source_id="128",
+    )
+
+    row = connection.execute(
+        "SELECT last_seen_raw_name FROM source_competition_id_mappings "
+        "WHERE source_competition_id = ?",
+        ("128",),
+    ).fetchone()
+    assert row["last_seen_raw_name"] == "Liga Profesional Argentina"
+
+
+def test_competition_source_id_hit_with_drifted_name_still_trusts_the_id(caplog):
+    connection = make_connection()
+    catalog = FixtureCatalog(connection, provider_id="api-football")
+
+    catalog.match(
+        sport="football", league="Liga Profesional Argentina", home_team_raw="River Plate",
+        away_team_raw="Boca Juniors", start_time=T0, competition_source_id="128",
+    )
+
+    with caplog.at_level("WARNING"):
+        catalog.match(
+            sport="football", league="A Totally Unrelated League Name",
+            home_team_raw="River Plate", away_team_raw="Boca Juniors",
+            start_time=T0 + timedelta(days=200), competition_source_id="128",
+        )
+
+    assert any(
+        record.message == "fixture_catalog.competition_id.name_drift"
+        for record in caplog.records
+    )
+
+
 def test_case_and_whitespace_variant_spelling_reuses_the_existing_team():
     # A different provider (or the same one, on a bad day) reporting the
     # same real team under different case/whitespace must not create a

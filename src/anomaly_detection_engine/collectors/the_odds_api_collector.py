@@ -27,7 +27,11 @@ class TheOddsApiError(RuntimeError):
 
 
 def parse_the_odds_api_response(
-    raw: str | bytes, observed_at: datetime, *, league_fallback: str = ""
+    raw: str | bytes,
+    observed_at: datetime,
+    *,
+    league_fallback: str = "",
+    sport_key: str | None = None,
 ) -> list[RawEventOdds]:
     """Maps a the-odds-api.com /v4/sports/{sport}/odds response (h2h,
     decimal odds) onto RawEventOdds, one per bookmaker per event.
@@ -36,6 +40,19 @@ def parse_the_odds_api_response(
     TheOddsApiManualCollector (a manually-captured copy of the identical
     response shape) so both go through exactly the same mapping.
     league_fallback is used when an event has no sport_title field.
+
+    sport_key (e.g. "soccer_epl") is the-odds-api's own stable slug for
+    the competition -- unlike every other source in this project, no
+    numeric team/league id exists upstream at all (confirmed: an event
+    here has no id field beyond the whole fixture's own "id", already
+    unused, and no per-team id whatsoever), but sport_key is itself a
+    genuine stable identifier, just a slug rather than a number; see
+    RawEventOdds.source_competition_id. In practice both call sites below
+    already pass the same value for this and for league_fallback, but the
+    two are conceptually distinct (one is a display-name fallback, this
+    one is an identifier) and kept as separate parameters. No team ids
+    exist upstream, so source_home_team_id/source_away_team_id stay
+    unset here.
 
     Raises TheOddsApiError if the top-level shape isn't even a
     the-odds-api.com response (their /odds endpoint always returns a
@@ -90,6 +107,7 @@ def parse_the_odds_api_response(
                     # (e.g. "bet365") -- see RawEventOdds.source_id for
                     # why this must not be derived from the display name.
                     source_id=bookmaker.get("key"),
+                    source_competition_id=sport_key,
                 )
             )
 
@@ -194,7 +212,7 @@ class TheOddsApiCollector(OddsCollector):
         raw = self._fetch(url)
         observed_at = datetime.now(UTC)
         result = parse_the_odds_api_response(
-            raw, observed_at, league_fallback=self._sport_key
+            raw, observed_at, league_fallback=self._sport_key, sport_key=self._sport_key
         )
 
         logger.info(
@@ -240,7 +258,7 @@ class TheOddsApiManualCollector(ManualCaptureCollector):
         super().__init__(
             capture_dir,
             parse=lambda raw_text, observed_at: parse_the_odds_api_response(
-                raw_text, observed_at, league_fallback=sport_key
+                raw_text, observed_at, league_fallback=sport_key, sport_key=sport_key
             ),
             source_label=f"the-odds-api-manual:{sport_key}",
             provider_id="the-odds-api",

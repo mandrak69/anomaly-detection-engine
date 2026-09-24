@@ -187,6 +187,21 @@ def test_raw_event_odds_carries_the_fixture_id_as_source_event_id():
     assert all(record.source_event_id == "1493120" for record in result)
 
 
+def test_raw_event_odds_carries_the_provider_team_and_league_ids():
+    collector = ApiFootballCollector(
+        api_key="test-key",
+        date="2026-09-08",
+        fetch=fetch_stub(SAMPLE_FIXTURES_RESPONSE, SAMPLE_ODDS_RESPONSE),
+    )
+    result = collector.collect().records
+    three_way = next(r for r in result if r.market.market_type == MarketType.THREE_WAY)
+
+    assert three_way.source_home_team_id == "435"
+    assert three_way.source_away_team_id == "451"
+    assert three_way.source_competition_id == "128"
+    assert three_way.country == "Argentina"
+
+
 def test_same_league_name_in_two_countries_does_not_collide():
     # Regression test: api-football's own league.name alone is not a
     # safe competition identity -- verified live that a bare "Premier

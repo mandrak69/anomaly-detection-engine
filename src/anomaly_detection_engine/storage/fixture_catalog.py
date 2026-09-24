@@ -6,7 +6,10 @@ from uuid import uuid4
 
 from anomaly_detection_engine.matching.event_matcher import EventMatchResult
 from anomaly_detection_engine.models.event import Event, Team
-from anomaly_detection_engine.normalization.team_normalizer import TeamNormalizer
+from anomaly_detection_engine.normalization.team_normalizer import (
+    TeamNormalizer,
+    names_are_similar,
+)
 from anomaly_detection_engine.storage.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -95,6 +98,9 @@ class FixtureCatalog:
         away_team_raw: str,
         start_time: datetime,
         source_event_id: str | None = None,
+        home_team_source_id: str | None = None,
+        away_team_source_id: str | None = None,
+        competition_source_id: str | None = None,
     ) -> EventMatchResult:
         home_raw = home_team_raw.strip()
         away_raw = away_team_raw.strip()
@@ -142,10 +148,14 @@ class FixtureCatalog:
                     self._connection.commit()
                     return EventMatchResult(mapped_event, 100.0, "resolved")
 
-            home, home_confidence = self._resolve_team(raw_name=home_raw, sport=sport)
-            away, away_confidence = self._resolve_team(raw_name=away_raw, sport=sport)
+            home, home_confidence = self._resolve_team(
+                raw_name=home_raw, sport=sport, source_team_id=home_team_source_id
+            )
+            away, away_confidence = self._resolve_team(
+                raw_name=away_raw, sport=sport, source_team_id=away_team_source_id
+            )
             canonical_league, competition_id = self._resolve_competition(
-                raw_league=league.strip(), sport=sport
+                raw_league=league.strip(), sport=sport, source_competition_id=competition_source_id
             )
 
             event = self._resolve_event(
@@ -178,9 +188,49 @@ class FixtureCatalog:
 
     # -- team resolution --------------------------------------------------
 
-    def _resolve_team(self, *, raw_name: str, sport: str) -> tuple[Team, float]:
+    def _resolve_team(
+        self, *, raw_name: str, sport: str, source_team_id: str | None = None
+    ) -> tuple[Team, float]:
+        # ID fast path: a provider-supplied team id already resolved once
+        # (see source_team_id_mappings, migration 18) skips fuzzy
+        # matching entirely on every later sighting, the same way
+        # match()'s own source_event_id fast path skips the whole
+        # team/competition/event resolution for a fixture. Unlike the
+        # name-keyed cache just below, this survives the provider's raw
+        # name itself drifting between sightings (a sponsor rename, a
+        # transliteration change) -- exactly the case a name-keyed cache
+        # can't help with, since a changed raw_name is a cache miss there
+        # by construction.
+        if source_team_id is not None:
+            id_hit = self._find_team_by_source_id(source_team_id)
+            if id_hit is not None:
+                team, last_seen_raw_name = id_hit
+                if last_seen_raw_name is not None and not names_are_similar(
+                    last_seen_raw_name, raw_name
+                ):
+                    # The id is still trusted (a provider doesn't silently
+                    # swap identities without also renaming) -- this is
+                    # "log, don't fail", the same posture missing-country
+                    # handling and _map_fixture_status already use
+                    # elsewhere in this project, surfaced for a human to
+                    # notice a provider recycling an id across a season
+                    # boundary rather than treated as an error.
+                    logger.warning(
+                        "fixture_catalog.team_id.name_drift",
+                        extra={
+                            "source_team_id": source_team_id,
+                            "team_id": team.id,
+                            "last_seen_raw_name": last_seen_raw_name,
+                            "raw_name": raw_name,
+                        },
+                    )
+                self._save_team_id_mapping(source_team_id, team.id, raw_name)
+                return team, 100.0
+
         mapped = self._find_mapping(raw_name, sport)
         if mapped is not None:
+            if source_team_id is not None:
+                self._save_team_id_mapping(source_team_id, mapped.id, raw_name)
             return mapped, 100.0
 
         existing = self._teams_for_sport(sport)
@@ -240,6 +290,8 @@ class FixtureCatalog:
         self._save_mapping(
             raw_name, sport, team.id, resolution_method=result.method, confidence=confidence
         )
+        if source_team_id is not None:
+            self._save_team_id_mapping(source_team_id, team.id, raw_name)
         return team, confidence
 
     def _find_mapping(self, raw_name: str, sport: str) -> Team | None:
@@ -298,9 +350,51 @@ class FixtureCatalog:
         )
         return team
 
+    def _find_team_by_source_id(self, source_team_id: str) -> tuple[Team, str | None] | None:
+        row = self._connection.execute(
+            """
+            SELECT t.*, m.last_seen_raw_name FROM source_team_id_mappings m
+            JOIN teams t ON t.id = m.team_id
+            WHERE m.source = ? AND m.source_team_id = ?
+            """,
+            (self._provider_id, source_team_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._map_team_row(row), row["last_seen_raw_name"]
+
+    def _save_team_id_mapping(self, source_team_id: str, team_id: str, raw_name: str) -> None:
+        # UPSERT rather than INSERT OR IGNORE (unlike _save_mapping
+        # above): last_seen_raw_name must be refreshed on every sighting
+        # of an already-mapped id, not just written once on first insert,
+        # or the drift check above would only ever compare against the
+        # id's very first sighting instead of its most recent one.
+        # team_id/created_at are deliberately excluded from the UPDATE
+        # clause -- an id, once mapped, always resolves to the same team
+        # (see _find_team_by_source_id's caller); only the "what name did
+        # we last see under this id" bookkeeping field changes.
+        self._connection.execute(
+            """
+            INSERT INTO source_team_id_mappings
+                (source, source_team_id, team_id, last_seen_raw_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (source, source_team_id)
+            DO UPDATE SET last_seen_raw_name = excluded.last_seen_raw_name
+            """,
+            (
+                self._provider_id,
+                source_team_id,
+                team_id,
+                raw_name,
+                to_utc_iso(datetime.now(UTC)),
+            ),
+        )
+
     # -- competition resolution --------------------------------------------
 
-    def _resolve_competition(self, *, raw_league: str, sport: str) -> tuple[str, str]:
+    def _resolve_competition(
+        self, *, raw_league: str, sport: str, source_competition_id: str | None = None
+    ) -> tuple[str, str]:
         """Resolves a raw league/competition string to its canonical
         name and stable id, the same exact/alias/fuzzy pattern
         _resolve_team uses for team names. Without this, "Premier
@@ -317,8 +411,32 @@ class FixtureCatalog:
         identity on competition_id, not this string -- see that
         method's docstring for why.
         """
+        # ID fast path -- mirrors _resolve_team's own source_team_id fast
+        # path above; see that method's comment for the full reasoning
+        # (source_competition_id_mappings, migration 18).
+        if source_competition_id is not None:
+            id_hit = self._find_competition_by_source_id(source_competition_id)
+            if id_hit is not None:
+                canonical_name, competition_id, last_seen_raw_name = id_hit
+                if last_seen_raw_name is not None and not names_are_similar(
+                    last_seen_raw_name, raw_league
+                ):
+                    logger.warning(
+                        "fixture_catalog.competition_id.name_drift",
+                        extra={
+                            "source_competition_id": source_competition_id,
+                            "competition_id": competition_id,
+                            "last_seen_raw_name": last_seen_raw_name,
+                            "raw_league": raw_league,
+                        },
+                    )
+                self._save_competition_id_mapping(source_competition_id, competition_id, raw_league)
+                return canonical_name, competition_id
+
         mapped = self._find_competition_mapping(raw_league, sport)
         if mapped is not None:
+            if source_competition_id is not None:
+                self._save_competition_id_mapping(source_competition_id, mapped[1], raw_league)
             return mapped
 
         existing = self._competitions_for_sport(sport)
@@ -358,6 +476,8 @@ class FixtureCatalog:
             resolution_method=result.method,
             confidence=confidence,
         )
+        if source_competition_id is not None:
+            self._save_competition_id_mapping(source_competition_id, competition_id, raw_league)
         return canonical_name, competition_id
 
     def _find_competition_mapping(self, raw_league: str, sport: str) -> tuple[str, str] | None:
@@ -419,6 +539,43 @@ class FixtureCatalog:
             },
         )
         return competition_id
+
+    def _find_competition_by_source_id(
+        self, source_competition_id: str
+    ) -> tuple[str, str, str | None] | None:
+        row = self._connection.execute(
+            """
+            SELECT c.canonical_name, c.id, m.last_seen_raw_name
+            FROM source_competition_id_mappings m
+            JOIN competitions c ON c.id = m.competition_id
+            WHERE m.source = ? AND m.source_competition_id = ?
+            """,
+            (self._provider_id, source_competition_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["canonical_name"], row["id"], row["last_seen_raw_name"]
+
+    def _save_competition_id_mapping(
+        self, source_competition_id: str, competition_id: str, raw_league: str
+    ) -> None:
+        # Same UPSERT reasoning as _save_team_id_mapping above.
+        self._connection.execute(
+            """
+            INSERT INTO source_competition_id_mappings
+                (source, source_competition_id, competition_id, last_seen_raw_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (source, source_competition_id)
+            DO UPDATE SET last_seen_raw_name = excluded.last_seen_raw_name
+            """,
+            (
+                self._provider_id,
+                source_competition_id,
+                competition_id,
+                raw_league,
+                to_utc_iso(datetime.now(UTC)),
+            ),
+        )
 
     # -- event resolution --------------------------------------------------
 

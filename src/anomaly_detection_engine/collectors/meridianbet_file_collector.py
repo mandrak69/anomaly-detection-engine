@@ -104,6 +104,19 @@ def _map_event(
     if len(rivals) != 2:
         return []
 
+    # meridianbet.com's own stable per-team ids, positionally paired with
+    # rivals (rivalIds[0] is always the home team, same order as rivals
+    # itself) -- see RawEventOdds.source_home_team_id/source_away_team_id.
+    # Confirmed present on every event in a real capture; optional here
+    # the same way the id fields elsewhere in this function are, since a
+    # missing/short rivalIds must not drop team NAMES that are otherwise
+    # perfectly usable.
+    rival_ids = header.get("rivalIds", [])
+    home_team_id = str(rival_ids[0]) if len(rival_ids) == 2 and rival_ids[0] is not None else None
+    away_team_id = str(rival_ids[1]) if len(rival_ids) == 2 and rival_ids[1] is not None else None
+    league_id = header.get("league", {}).get("leagueId")
+    region = header.get("region", {}).get("name")
+
     try:
         common = {
             "source": source_name,
@@ -116,6 +129,10 @@ def _map_event(
             # meridianbet.com's own stable event id -- see
             # RawEventOdds.source_event_id.
             "source_event_id": str(header["eventId"]),
+            "source_home_team_id": home_team_id,
+            "source_away_team_id": away_team_id,
+            "source_competition_id": str(league_id) if league_id is not None else None,
+            "country": str(region) if region else None,
         }
     except (KeyError, TypeError):
         return []

@@ -126,6 +126,10 @@ def _map_match(
     if set(odds) != {"1", "X", "2"}:
         return None
 
+    home_id = match.get("home", {}).get("id")
+    visitor_id = match.get("visitor", {}).get("id")
+    competition_id = match.get("competition", {}).get("id")
+
     try:
         return RawEventOdds(
             source=source_name,
@@ -146,6 +150,19 @@ def _map_match(
             odds=odds,
             # mozzartbet.com's own stable match id.
             source_event_id=str(match["id"]),
+            # mozzartbet.com's own stable team/competition ids, read
+            # right alongside the names above -- see
+            # RawEventOdds.source_home_team_id/source_away_team_id/
+            # source_competition_id. Optional the same way the names
+            # above are required but everything else here is tolerant:
+            # a missing id just leaves that slot None.
+            source_home_team_id=str(home_id) if home_id is not None else None,
+            source_away_team_id=str(visitor_id) if visitor_id is not None else None,
+            source_competition_id=str(competition_id) if competition_id is not None else None,
+            # Confirmed against a real capture: Mozzart's competition
+            # object has no country/region field (only an opaque
+            # `originId`, whose meaning is not confirmed) -- left unset
+            # rather than guessed, same as the-odds-api.
         )
     except (KeyError, TypeError):
         return None

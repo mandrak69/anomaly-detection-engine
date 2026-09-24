@@ -43,3 +43,29 @@ class RawEventOdds:
     # default) means the source doesn't say, not "scheduled"; see
     # models.market.EventLifecycle for why no default is guessed here.
     lifecycle: EventLifecycle | None = None
+    # The source's own stable identifier for the home/away team and the
+    # competition/league themselves (e.g. api-football's teams.home.id,
+    # league.id) -- distinct from source_event_id above (the whole
+    # fixture) the same way source_id (the bookmaker) is. Several real
+    # sources report these right next to the display name and the
+    # collector was simply discarding them in favor of fuzzy-matching the
+    # name from scratch on every sighting; when present, FixtureCatalog
+    # caches and reuses them (see source_team_id_mappings /
+    # source_competition_id_mappings) so a team or competition already
+    # resolved once by id skips fuzzy matching entirely on every later
+    # sighting, the same way source_event_id already does for the whole
+    # fixture. A source with no such stable id (the-odds-api's teams, the
+    # JSON demo) leaves these unset, and resolution falls back to the
+    # existing name-based path exactly as it did before these fields
+    # existed.
+    source_home_team_id: str | None = None
+    source_away_team_id: str | None = None
+    source_competition_id: str | None = None
+    # The competition's real-world country/region, when the source
+    # reports one alongside the league name -- distinct from folding it
+    # into `league` itself (what api_football_collector.py and
+    # meridianbet_file_collector.py already do as a stop-gap to stop
+    # same-named leagues from different countries colliding). Optional:
+    # a source with no such field (Mozzart, the-odds-api) leaves this
+    # unset rather than guessing one.
+    country: str | None = None

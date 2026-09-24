@@ -23,7 +23,9 @@ def football_event(
     home="FK Partizan",
     away="FK Crvena Zvezda",
     league="Super Liga",
+    league_id=None,
     region=None,
+    rival_ids=None,
     start_time_ms=1787904000000,
     sport_name="Fudbal",
     include_match_winner=True,
@@ -51,8 +53,12 @@ def football_event(
         "rivals": [home, away],
         "state": "ACTIVE",
     }
+    if league_id is not None:
+        header["league"]["leagueId"] = league_id
     if region is not None:
         header["region"] = {"name": region}
+    if rival_ids is not None:
+        header["rivalIds"] = rival_ids
     return {"header": header, "positions": positions}
 
 
@@ -140,6 +146,32 @@ def test_same_league_name_in_two_regions_does_not_collide(tmp_path):
     leagues_by_event = {r.source_event_id: r.league for r in result}
     assert leagues_by_event["1"] == "Engleska - Premier Liga"
     assert leagues_by_event["2"] == "Škotska - Premier Liga"
+
+
+def test_raw_event_odds_carries_the_provider_team_and_league_ids(tmp_path):
+    drop_capture(tmp_path, [
+        football_event(rival_ids=[420355, 263461], league_id=2505, region="Argentina"),
+    ])
+
+    collector = MeridianbetFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert all(r.source_home_team_id == "420355" for r in result)
+    assert all(r.source_away_team_id == "263461" for r in result)
+    assert all(r.source_competition_id == "2505" for r in result)
+    assert all(r.country == "Argentina" for r in result)
+
+
+def test_missing_provider_ids_leave_the_new_fields_unset(tmp_path):
+    drop_capture(tmp_path, [football_event(rival_ids=None, league_id=None, region=None)])
+
+    collector = MeridianbetFileCollector(tmp_path)
+    result = collector.collect().records
+
+    assert all(r.source_home_team_id is None for r in result)
+    assert all(r.source_away_team_id is None for r in result)
+    assert all(r.source_competition_id is None for r in result)
+    assert all(r.country is None for r in result)
 
 
 def test_missing_region_falls_back_to_the_bare_league_name(tmp_path):
