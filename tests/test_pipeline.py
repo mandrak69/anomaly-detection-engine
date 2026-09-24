@@ -121,11 +121,11 @@ def test_mls_league_alias_unifies_two_providers_same_match():
     # pipeline.LEAGUE_ALIASES explicitly said so. Each entry was verified
     # against real fixtures on both sides before being added, not just
     # guessed from the league name alone -- see LEAGUE_ALIASES' own
-    # comment for why that distinction matters (it's also why an EPL/
-    # "Premier League" and Serie A/"Serija A" version of this same test
-    # doesn't exist: api-football's own bare "Premier League"/"Serie A"
-    # buckets turned out to be Kazakhstan/Ghana and Brazil respectively,
-    # not England/Italy, so there was nothing valid to alias those to).
+    # comment for why that distinction matters (it's also why the EPL and
+    # Serie A entries below alias to the-odds-api's "EPL" and
+    # Meridianbet's "Serija A" instead of an api-football bucket:
+    # api-football's own bare "Premier League"/"Serie A" turned out to be
+    # Kazakhstan/Ghana and Brazil respectively, not England/Italy).
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -160,6 +160,86 @@ def test_mls_league_alias_unifies_two_providers_same_match():
     assert mozzart_result.event is not None
     assert meridianbet_result.event is not None
     assert mozzart_result.event.id == meridianbet_result.event.id
+
+
+def test_epl_league_alias_unifies_the_odds_api_and_meridianbet():
+    # the-odds-api's own "EPL" already covers the same real matches, with
+    # no api-football equivalent currently valid (see LEAGUE_ALIASES'
+    # comment) -- Meridianbet's "Premier Liga" aliases to it directly.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-10-10T11:30:00+00:00")
+
+    odds_api_catalog = FixtureCatalog(
+        connection,
+        provider_id="the-odds-api",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    odds_api_result = odds_api_catalog.match(
+        sport="football", league="EPL",
+        home_team_raw="Arsenal", away_team_raw="Chelsea",
+        start_time=start_time,
+    )
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Premier Liga",
+        home_team_raw="Arsenal", away_team_raw="Chelsea",
+        start_time=start_time,
+    )
+
+    assert odds_api_result.event is not None
+    assert meridianbet_result.event is not None
+    assert odds_api_result.event.id == meridianbet_result.event.id
+
+
+def test_serie_a_league_alias_unifies_meridianbet_and_mozzart():
+    # Meridianbet's own "Serija A" (34 events, the larger of the two) is
+    # the anchor for Italy's Serie A, with no api-football equivalent
+    # currently valid -- Mozzart's "Italija 1" aliases to it directly.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-10-10T11:30:00+00:00")
+
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Serija A",
+        home_team_raw="Inter Milano", away_team_raw="AC Milan",
+        start_time=start_time,
+    )
+    mozzart_result = mozzart_catalog.match(
+        sport="football", league="Italija 1",
+        home_team_raw="Inter Milano", away_team_raw="AC Milan",
+        start_time=start_time,
+    )
+
+    assert meridianbet_result.event is not None
+    assert mozzart_result.event is not None
+    assert meridianbet_result.event.id == mozzart_result.event.id
 
 
 def test_default_source_uses_two_json_collector_polls(monkeypatch):
