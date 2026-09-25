@@ -813,6 +813,40 @@ def test_alias_target_differing_only_by_case_reuses_the_existing_team_not_a_dupl
     assert teams == 1
 
 
+def test_alias_reuses_the_existing_team_when_first_sighted_in_a_new_competition():
+    # Regression test for a real bug found live: "Arsenal FC" (Meridianbet)
+    # aliases to "Arsenal", already an existing canonical team from an
+    # earlier Champions League sighting -- but the *first-ever* sighting of
+    # "Arsenal FC" in a *different* competition (an FA Cup round "Arsenal"
+    # itself had never been recorded in yet) used to create a second,
+    # duplicate "Arsenal" team instead of reusing the real one, since
+    # _find_global_exact_team only accepted a literal "exact" name match,
+    # not an alias-resolved one -- silently re-fragmenting exactly the
+    # identity this alias exists to unify, just triggered by a new
+    # competition context instead of a new raw spelling.
+    connection = make_connection()
+    catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases={"Arsenal FC": "Arsenal"},
+    )
+
+    first = catalog.match(
+        sport="football", league="Champions League", home_team_raw="Arsenal",
+        away_team_raw="Lille", start_time=T0,
+    )
+    second = catalog.match(
+        sport="football", league="FA Cup", home_team_raw="Arsenal FC",
+        away_team_raw="Some Lower League Team", start_time=T0 + timedelta(days=14),
+    )
+
+    assert second.event.home_team.id == first.event.home_team.id
+    teams = connection.execute(
+        "SELECT COUNT(*) AS n FROM teams WHERE canonical_name = 'Arsenal'"
+    ).fetchone()["n"]
+    assert teams == 1
+
+
 def test_token_alias_expands_a_brand_new_teams_canonical_name():
     # The expansion must apply even on a team's very first sighting (no
     # existing candidate to fuzzy-match against yet) -- otherwise a

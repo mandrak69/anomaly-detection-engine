@@ -843,9 +843,22 @@ class FixtureCatalog:
         result = normalizer.normalize(raw_name)
         # An exact, globally-unique display name may connect the same club
         # across league/cup competitions (subject to country compatibility).
-        # A configured alias is only evidence inside the current competition
-        # or a unique fixture context; never make it a global identity rule.
-        if result.method != "exact" or result.canonical_name is None:
+        # A configured alias ("Arsenal FC" -> "Arsenal" in pipeline.ALIASES)
+        # carries the same weight here: unlike a fuzzy/ambiguous score, every
+        # ALIASES entry in this project was individually verified against a
+        # real fixture before being added (see
+        # docs/team-identity-mapping-decisions.md) -- it is a curated,
+        # unconditional identity claim, not per-competition evidence.
+        # Excluding it here reproduces the exact bug this fallback exists to
+        # prevent: verified live, "Arsenal FC" (aliased to "Arsenal") sighted
+        # for the first time in a competition "Arsenal" hadn't played in yet
+        # (e.g. a new cup round) created a second, duplicate "Arsenal" team
+        # instead of reusing the existing one, since only a literal "exact"
+        # match used to reach this fallback at all. Fuzzy/ambiguous/unknown
+        # results still fall through untouched -- those are exactly the
+        # per-sighting-confidence cases this project's whole trust-state
+        # model exists to keep out of any global identity rule.
+        if result.method not in {"exact", "alias"} or result.canonical_name is None:
             return None
         target_key = " ".join(result.canonical_name.split()).casefold()
         candidates = [
