@@ -8,9 +8,9 @@ matching its own previously-seen name gets marked SUSPECT rather than
 silently repointed (see FixtureCatalog._resolve_team/_resolve_competition's
 own "name_drift" handling). Nothing in this project currently clears a
 SUSPECT mapping or resolves an UNVERIFIED one by hand -- FixtureCatalog.
-verify_team_mapping/verify_competition_mapping exist and are tested, but
-had no operational caller. This script is that caller: a deliberately
-minimal, three-command CLI, not the fuller re-audit/report tool a
+verify_team_mapping/verify_competition_mapping/verify_event_mapping exist and
+are tested, but need an operational caller. This script is that caller: a deliberately
+minimal CLI, not the fuller re-audit/report tool a
 production identity system eventually wants (that's future work, not
 this).
 
@@ -34,6 +34,14 @@ Usage:
         --source-name "Engleska Premier Liga" \
         --competition-id competition-123 --country England \
         --source-competition-id 67890
+
+    # Verify or retarget one provider fixture id. The raw names form the
+    # compatibility snapshot used to detect later provider-id recycling.
+    python scripts/identity_mapping.py event \
+        --provider api-football --sport football \
+        --source-event-id 123 --event-id event-abc123 \
+        --home-name Arsenal --away-name Chelsea \
+        --competition-name "England - Premier League" --country England
 
 By default this opens whatever DB_PATH (or its default) load_config()
 resolves to -- the same database app.py/poller.py write to. Pass
@@ -91,6 +99,26 @@ def _cmd_competition(args: argparse.Namespace) -> None:
         f"{args.competition_id}"
         + (f" (source_competition_id={args.source_competition_id})"
            if args.source_competition_id else "")
+    )
+
+
+def _cmd_event(args: argparse.Namespace) -> None:
+    catalog, _ = _open_catalog(args.provider, args.db_path)
+    catalog.verify_event_mapping(
+        sport=args.sport,
+        source_event_id=args.source_event_id,
+        canonical_event_id=args.event_id,
+        home_name=args.home_name,
+        away_name=args.away_name,
+        competition_name=args.competition_name,
+        country=args.country,
+        home_source_team_id=args.home_source_team_id,
+        away_source_team_id=args.away_source_team_id,
+        source_competition_id=args.source_competition_id,
+    )
+    print(
+        f"Verified event: {args.provider!r}/{args.sport!r} "
+        f"source_event_id={args.source_event_id!r} -> {args.event_id}"
     )
 
 
@@ -206,6 +234,22 @@ def main(argv: list[str] | None = None) -> None:
     competition_parser.add_argument("--country", default=None)
     competition_parser.add_argument("--source-competition-id", default=None)
     competition_parser.set_defaults(func=_cmd_competition)
+
+    event_parser = subparsers.add_parser(
+        "event", help="Record a human-verified provider fixture-id mapping"
+    )
+    event_parser.add_argument("--provider", required=True)
+    event_parser.add_argument("--sport", required=True)
+    event_parser.add_argument("--source-event-id", required=True)
+    event_parser.add_argument("--event-id", required=True, help="Existing canonical event id")
+    event_parser.add_argument("--home-name", required=True)
+    event_parser.add_argument("--away-name", required=True)
+    event_parser.add_argument("--competition-name", required=True)
+    event_parser.add_argument("--country", default=None)
+    event_parser.add_argument("--home-source-team-id", default=None)
+    event_parser.add_argument("--away-source-team-id", default=None)
+    event_parser.add_argument("--source-competition-id", default=None)
+    event_parser.set_defaults(func=_cmd_event)
 
     suspects_parser = subparsers.add_parser(
         "suspects", help="List every SUSPECT/CONFLICT mapping in the database"

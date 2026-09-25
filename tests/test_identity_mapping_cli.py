@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,6 +23,23 @@ def make_db(tmp_path):
     connection.commit()
     connection.close()
     return db_path
+
+
+def add_event(db_path):
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "INSERT INTO teams (id, canonical_name, sport) VALUES ('team-2', 'Chelsea', 'football')"
+    )
+    connection.execute(
+        """
+        INSERT INTO events (
+            id, sport, league, competition_id, home_team_id, away_team_id, start_time
+        ) VALUES (?, 'football', 'EPL', 'competition-1', 'team-1', 'team-2', ?)
+        """,
+        ("event-1", datetime(2026, 9, 25, 18, tzinfo=UTC).isoformat()),
+    )
+    connection.commit()
+    connection.close()
 
 
 def test_team_command_writes_a_verified_mapping(tmp_path, capsys):
@@ -151,3 +169,64 @@ def test_suspects_command_reports_nothing_when_the_database_is_clean(tmp_path, c
     main(["--db-path", str(db_path), "suspects"])
 
     assert capsys.readouterr().out == ""
+
+
+def test_event_command_replaces_suspect_mapping_with_verified_snapshot(tmp_path, capsys):
+    db_path = make_db(tmp_path)
+    add_event(db_path)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        INSERT INTO source_event_mappings (
+            source, source_event_id, event_id, trust_state,
+            resolution_method, resolver_version, sport
+        ) VALUES ('api-football', 'fixture-10', 'event-1', 'SUSPECT',
+                  'name_drift', 1, 'football')
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    main(
+        [
+            "--db-path", str(db_path), "event",
+            "--provider", "api-football", "--sport", "football",
+            "--source-event-id", "fixture-10", "--event-id", "event-1",
+            "--home-name", "Arsenal FC", "--away-name", "Chelsea FC",
+            "--competition-name", "England - Premier League", "--country", "England",
+            "--home-source-team-id", "42", "--away-source-team-id", "49",
+            "--source-competition-id", "39",
+        ]
+    )
+
+    assert "Verified event" in capsys.readouterr().out
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    mapping = connection.execute(
+        "SELECT * FROM source_event_mappings "
+        "WHERE source='api-football' AND source_event_id='fixture-10'"
+    ).fetchone()
+    event = connection.execute("SELECT * FROM events WHERE id='event-1'").fetchone()
+    assert mapping["trust_state"] == "VERIFIED"
+    assert mapping["resolution_method"] == "manual"
+    assert mapping["last_verified_home_name"] == "Arsenal FC"
+    assert mapping["last_verified_away_name"] == "Chelsea FC"
+    assert mapping["last_verified_competition_name"] == "England - Premier League"
+    assert mapping["home_source_team_id"] == "42"
+    assert event["reference_provider"] == "api-football"
+    assert event["reference_provider_id"] == "fixture-10"
+
+
+def test_event_command_rejects_unknown_canonical_event(tmp_path):
+    db_path = make_db(tmp_path)
+
+    with pytest.raises(SystemExit, match="Unknown canonical event"):
+        main(
+            [
+                "--db-path", str(db_path), "event",
+                "--provider", "mozzart", "--sport", "football",
+                "--source-event-id", "10", "--event-id", "missing",
+                "--home-name", "Alpha", "--away-name", "Beta",
+                "--competition-name", "League",
+            ]
+        )

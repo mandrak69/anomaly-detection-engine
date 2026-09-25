@@ -506,6 +506,75 @@ class FixtureCatalog:
         else:
             self._connection.commit()
 
+    def verify_event_mapping(
+        self,
+        *,
+        sport: str,
+        source_event_id: str,
+        canonical_event_id: str,
+        home_name: str,
+        away_name: str,
+        competition_name: str,
+        country: str | None = None,
+        home_source_team_id: str | None = None,
+        away_source_team_id: str | None = None,
+        source_competition_id: str | None = None,
+    ) -> None:
+        """Persist a human-approved provider fixture-id mapping.
+
+        The names and optional provider entity ids are required audit evidence,
+        not decoration: later sightings compare their fixture context with this
+        snapshot before the provider-id fast path is trusted. Manual approval is
+        allowed to replace an existing SUSPECT mapping, matching the behavior of
+        the team/competition verification methods above.
+        """
+        source_event_id = source_event_id.strip()
+        home_name = home_name.strip()
+        away_name = away_name.strip()
+        competition_name = competition_name.strip()
+        if not all((source_event_id, home_name, away_name, competition_name)):
+            raise ValueError("event verification fields must not be blank")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            event = self._connection.execute(
+                "SELECT id FROM events WHERE id = ? AND sport = ?",
+                (canonical_event_id, sport),
+            ).fetchone()
+            if event is None:
+                raise ValueError(
+                    f"Unknown canonical event {canonical_event_id!r} for sport {sport!r}"
+                )
+
+            # _save_event_mapping intentionally refuses to overwrite SUSPECT
+            # rows during normal ingestion. A human verification is the one
+            # supported override, so remove only this exact cache key inside
+            # the same transaction before recreating it with a full snapshot.
+            self._connection.execute(
+                "DELETE FROM source_event_mappings WHERE source = ? AND source_event_id = ?",
+                (self._provider_id, source_event_id),
+            )
+            self._save_event_mapping(
+                source_event_id,
+                canonical_event_id,
+                trust_state=TRUST_VERIFIED,
+                resolution_method="manual",
+                sport=sport,
+                league=competition_name,
+                home_raw=home_name,
+                away_raw=away_name,
+                country=country,
+                home_team_source_id=home_source_team_id,
+                away_team_source_id=away_source_team_id,
+                competition_source_id=source_competition_id,
+            )
+            self._promote_event_to_reference(canonical_event_id, source_event_id)
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
     # -- team resolution --------------------------------------------------
 
     def _resolve_team(
