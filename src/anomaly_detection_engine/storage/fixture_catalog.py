@@ -1213,9 +1213,9 @@ class FixtureCatalog:
                 mapped[0], mapped[1], 100.0, "verified_name_mapping", mapped_trust
             )
 
-        existing = self._competitions_for_sport(sport, country)
+        existing_names, existing = self._competitions_for_sport(sport, country)
         normalizer = TeamNormalizer(
-            existing.keys(),
+            existing_names,
             aliases=self._league_aliases,
             fuzzy_threshold=self._fuzzy_threshold,
             ambiguity_margin=self._fuzzy_ambiguity_margin,
@@ -1239,6 +1239,18 @@ class FixtureCatalog:
         elif result.canonical_name is not None:
             canonical_name = result.canonical_name
             candidate_competition_id = existing.get(canonical_name)
+            if candidate_competition_id is None and canonical_name in existing_names:
+                # An exact/alias target that does exist, just not
+                # uniquely in this context -- e.g. two countries each
+                # have their own "Premier League" and this sighting
+                # reported no country to pick between them. Logged
+                # distinctly from a genuinely brand-new name so this
+                # doesn't read as routine in the logs.
+                logger.warning(
+                    "fixture_catalog.competition.ambiguous_without_country",
+                    extra={"raw_league": raw_league, "canonical_name": canonical_name,
+                           "sport": sport, "country": country},
+                )
             if (
                 candidate_competition_id is not None
                 and self._provider_id == REFERENCE_PROVIDER_ID
@@ -1383,7 +1395,31 @@ class FixtureCatalog:
 
     def _competitions_for_sport(
         self, sport: str, country: str | None
-    ) -> dict[str, str]:
+    ) -> tuple[set[str], dict[str, str]]:
+        """Returns (candidate_names, unambiguous_name_to_id) for every
+        competition in this sport compatible with `country` (every
+        competition when country is None, else one whose own country is
+        unset or matches).
+
+        The two are deliberately not the same mapping. candidate_names
+        feeds TeamNormalizer's fuzzy/exact/alias candidate pool -- a name
+        two different competitions happen to share (most commonly two
+        countries both having a bare "Premier League") is still a valid
+        *name* to match against. unambiguous_name_to_id is what
+        _resolve_competition actually reuses an id from, and only
+        contains a name when exactly one competition owns it in this
+        context: collapsing straight into a plain {name: id} dict here
+        (the previous shape) let a name shared by several countries
+        silently keep whichever row SQLite happened to return last,
+        picking a country arbitrarily -- verified live: an England
+        fixture from a source that reports no country at all landed on
+        the wrong country's same-named competition this way. A name
+        left out of this second dict is treated exactly like a brand-new
+        name by the caller (create a fresh competition) rather than
+        guessing between the candidates -- the same "harmless duplicate
+        beats a silent wrong merge" trade-off this class already makes
+        for an ambiguous fuzzy team/competition match.
+        """
         if country is None:
             rows = self._connection.execute(
                 "SELECT * FROM competitions WHERE sport = ?", (sport,)
@@ -1396,7 +1432,12 @@ class FixtureCatalog:
                 """,
                 (sport, country),
             ).fetchall()
-        return {row["canonical_name"]: row["id"] for row in rows}
+        ids_by_name: dict[str, list[str]] = {}
+        for row in rows:
+            ids_by_name.setdefault(row["canonical_name"], []).append(row["id"])
+        names = set(ids_by_name)
+        unambiguous = {name: ids[0] for name, ids in ids_by_name.items() if len(ids) == 1}
+        return names, unambiguous
 
     def _competition_has_different_reference_id(
         self, competition_id: str, source_competition_id: str

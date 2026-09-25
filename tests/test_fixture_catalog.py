@@ -657,6 +657,79 @@ def test_same_raw_league_name_in_two_countries_has_contextual_mappings():
     assert mappings[0]["competition_id"] != mappings[1]["competition_id"]
 
 
+def test_league_alias_reuses_existing_competition_in_same_country():
+    # An alias-resolved league name, with a country that matches an
+    # already-existing competition, must reuse that competition -- the
+    # "known country" arm of the ambiguity fix below, kept as its own
+    # test so a regression there doesn't hide behind the ambiguous-case
+    # test's own assertions.
+    connection = make_connection()
+    first_source = FixtureCatalog(connection, provider_id="the-odds-api")
+    first = first_source.match(
+        sport="football", league="EPL", country="England",
+        home_team_raw="Arsenal", away_team_raw="Chelsea", start_time=T0,
+    )
+
+    second_source = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        league_aliases={"Engleska 1": "EPL"},
+    )
+    second = second_source.match(
+        sport="football", league="Engleska 1", country="England",
+        home_team_raw="Liverpool", away_team_raw="Everton",
+        start_time=T0 + timedelta(hours=1),
+    )
+
+    competitions = connection.execute(
+        "SELECT COUNT(*) AS n FROM competitions WHERE canonical_name = 'EPL'"
+    ).fetchone()["n"]
+    assert competitions == 1
+    assert second.event.competition_id == first.event.competition_id
+
+
+def test_countryless_league_does_not_choose_between_same_named_competitions():
+    # Regression test for a real bug found live: two genuinely different
+    # competitions sharing one bare display name ("Premier League" in
+    # Kazakhstan and in Ghana, both real api-football buckets) used to
+    # collapse into a single {name: id} dict -- whichever row SQLite
+    # happened to return last silently won. A source that reports no
+    # country at all (the-odds-api has no such field) then landed on
+    # that arbitrary winner instead of getting its own bucket: verified
+    # live, a genuine England fixture from a country-blind source ended
+    # up filed under Ghana's competition. A missing country must not be
+    # able to pick between two already-known candidates -- it gets its
+    # own new competition instead, the same "harmless duplicate over a
+    # silent wrong merge" trade-off an ambiguous fuzzy match already
+    # gets elsewhere in this class.
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+
+    kazakhstan = api.match(
+        sport="football", league="Premier League", country="Kazakhstan",
+        home_team_raw="Kazakh Team A", away_team_raw="Kazakh Team B", start_time=T0,
+    )
+    ghana = api.match(
+        sport="football", league="Premier League", country="Ghana",
+        home_team_raw="Ghana Team A", away_team_raw="Ghana Team B",
+        start_time=T0 + timedelta(days=1),
+    )
+
+    the_odds_api = FixtureCatalog(connection, provider_id="the-odds-api")
+    countryless = the_odds_api.match(
+        sport="football", league="Premier League", country=None,
+        home_team_raw="Arsenal", away_team_raw="Chelsea",
+        start_time=T0 + timedelta(days=2),
+    )
+
+    assert countryless.event.competition_id != kazakhstan.event.competition_id
+    assert countryless.event.competition_id != ghana.event.competition_id
+    competitions = connection.execute(
+        "SELECT COUNT(*) AS n FROM competitions WHERE canonical_name = 'Premier League'"
+    ).fetchone()["n"]
+    assert competitions == 3
+
+
 def test_cold_start_fixture_context_learns_one_unrelated_team_spelling():
     connection = make_connection()
     api = FixtureCatalog(connection, provider_id="api-football")
@@ -685,6 +758,54 @@ def test_cold_start_fixture_context_learns_one_unrelated_team_spelling():
     assert (row["trust_state"], row["resolution_method"]) == (
         "VERIFIED", "provider_event_context"
     )
+
+
+def test_legacy_unverified_event_mapping_reverifies_on_next_sighting():
+    # Migration 19 intentionally downgrades every pre-existing
+    # source_event_mappings row to UNVERIFIED, including API-Football's
+    # own -- unlike team/competition id mappings, a legacy event mapping
+    # carries no identity snapshot to check a later sighting against (see
+    # that migration's own comment). This proves the intended lifecycle:
+    # the fast VERIFIED path is skipped for the stale row, but the
+    # fixture still resolves to the SAME existing event through ordinary
+    # competition/team resolution, and that re-verification earns it
+    # VERIFIED + reference_provider back rather than leaving it stuck.
+    connection = make_connection()
+    api = FixtureCatalog(connection, provider_id="api-football")
+    first = api.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0, source_event_id="af-1",
+    )
+    assert first.event.id is not None
+
+    # Simulate migration 19's downgrade of this now-legacy mapping.
+    connection.execute(
+        "UPDATE source_event_mappings SET trust_state = 'UNVERIFIED', "
+        "resolution_method = 'legacy' WHERE source = 'api-football' "
+        "AND source_event_id = 'af-1'"
+    )
+    connection.execute(
+        "UPDATE events SET reference_provider = NULL, reference_provider_id = NULL "
+        "WHERE id = ?",
+        (first.event.id,),
+    )
+    connection.commit()
+
+    reverified = api.match(
+        sport="football", league="L", home_team_raw="A", away_team_raw="B",
+        start_time=T0, source_event_id="af-1",
+    )
+
+    assert reverified.event.id == first.event.id
+    mapping = connection.execute(
+        "SELECT trust_state FROM source_event_mappings "
+        "WHERE source = 'api-football' AND source_event_id = 'af-1'"
+    ).fetchone()
+    assert mapping["trust_state"] == "VERIFIED"
+    event_row = connection.execute(
+        "SELECT reference_provider FROM events WHERE id = ?", (first.event.id,)
+    ).fetchone()
+    assert event_row["reference_provider"] == "api-football"
 
 
 def test_reference_provider_owns_canonical_kickoff_time():

@@ -1289,6 +1289,23 @@ def _migration_19_reference_identity_and_mapping_trust(
             """
         )
 
+    # Legacy event mappings intentionally remain UNVERIFIED here, including
+    # API-Football rows -- unlike the team/competition id backfills just
+    # above, which DO promote an existing API-Football row straight to
+    # VERIFIED. The two aren't inconsistent: a legacy team/competition id
+    # mapping is itself the durable evidence ("API-Football id 100 is this
+    # canonical team"), so trusting it costs nothing extra to re-derive.
+    # A legacy event mapping is just (source, source_event_id, event_id) --
+    # none of the identity-snapshot columns this table gains below
+    # (last_verified_home_name/away_name/competition_name/country,
+    # home_source_team_id, away_source_team_id, source_competition_id) were
+    # ever captured historically, so there is nothing here to compare a
+    # later sighting against to detect a recycled provider fixture id (see
+    # match()'s own use of trust_state == VERIFIED as its fast path). The
+    # first post-migration sighting re-verifies the fixture through
+    # competition + kickoff + team context exactly as if it were new, and
+    # only then records that snapshot and earns VERIFIED -- a one-time
+    # re-derivation cost per event, not a correctness gap.
     event_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(source_event_mappings)")
     }
