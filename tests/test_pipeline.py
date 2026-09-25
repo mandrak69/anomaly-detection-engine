@@ -193,6 +193,58 @@ def test_club_suffix_alias_unifies_two_providers_same_match():
     assert meridianbet_result.event.id == mozzart_result.event.id
 
 
+def test_reserve_team_alias_unifies_two_providers_without_touching_the_senior_team():
+    # Regression test for a real stale-cache bug found live: Meridianbet's
+    # "Atletico Madrid B" and Mozzart's "Atletico Madrid 2" (the same real
+    # reserve-team fixture) had both been fuzzy-merged into the *senior*
+    # "Atletico Madrid" team before this project's reserve/women qualifier
+    # guard existed (see team_normalizer._semantic_qualifiers) -- a
+    # Primera RFEF reserve match wrongly attributed to the senior team's
+    # event history. This proves the fix stays scoped to the reserve
+    # side only: both providers' reserve spellings land on one shared
+    # team, and it is never the senior "Atletico Madrid" team.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    senior_start_time = datetime.fromisoformat("2026-09-24T19:00:00+00:00")
+    senior = meridianbet_catalog.match(
+        sport="football", league="La Liga",
+        home_team_raw="Atletico Madrid", away_team_raw="Real Madrid",
+        start_time=senior_start_time,
+    )
+
+    reserve_start_time = senior_start_time + timedelta(days=1)
+    meridianbet_reserve = meridianbet_catalog.match(
+        sport="football", league="Primera RFEF",
+        home_team_raw="Atletico Madrid B", away_team_raw="Villarreal CF B U23",
+        start_time=reserve_start_time,
+    )
+    mozzart_reserve = mozzart_catalog.match(
+        sport="football", league="Primera RFEF",
+        home_team_raw="Atletico Madrid 2", away_team_raw="Villarreal CF B U23",
+        start_time=reserve_start_time,
+    )
+
+    assert meridianbet_reserve.event.home_team.id == mozzart_reserve.event.home_team.id
+    assert meridianbet_reserve.event.home_team.id != senior.event.home_team.id
+    assert meridianbet_reserve.event.home_team.canonical_name == "Atletico Madrid B"
+
+
 def test_transliteration_alias_unifies_two_providers_same_match():
     # A different category from the club-suffix cases above: the same
     # small Israeli town's club spelled via two unrelated

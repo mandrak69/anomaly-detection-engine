@@ -129,6 +129,20 @@ ALIASES = {
     "Rep. Of Ireland": "Ireland",
     "Republic Ireland M21": "Ireland U21",
     "Northern Ireland M21": "Northern Ireland U21",
+    # A genuinely different, narrower reason than every entry above: not
+    # a name gap fuzzy matching fails to bridge or a country/age
+    # collision, but a *stale, pre-qualifier-guard* cache row -- verified
+    # live, Meridianbet's "Atletico Madrid B" and Mozzart's "Atletico
+    # Madrid 2" (the same real reserve-team fixture, reported the same
+    # day) were both fuzzy-merged into senior "Atletico Madrid" back
+    # when this project's fuzzy matcher had no reserve/women qualifier
+    # guard at all (see team_normalizer._semantic_qualifiers) --
+    # attributing a Primera RFEF reserve match to the senior team's own
+    # event history. Meridianbet's own spelling now resolves correctly
+    # on its own once "Atletico Madrid B" exists as its own canonical
+    # team (plain exact match, no alias needed); Mozzart's "2" spelling
+    # still needs this one to reach it.
+    "Atletico Madrid 2": "Atletico Madrid B",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
