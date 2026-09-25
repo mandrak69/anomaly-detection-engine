@@ -264,7 +264,12 @@ Trust states include:
 - `VERIFIED`: compatible mapping confirmed by strong IDs, curated alias, or a
   human decision;
 - `SUSPECT`: later evidence conflicts with a trusted mapping;
-- `REJECTED` or retired where audit history requires it.
+- `REJECTED` or retired where audit history requires it -- **not yet
+  implemented**: no code path sets or reads it today, and the CLI in
+  §18/§21 has no verb to produce it. Naming it here is intentional (the
+  identity lifecycle needs a terminal "a human looked at this and it was
+  wrong" state distinct from `SUSPECT`'s "unresolved, needs a look"), not
+  a claim that it exists yet.
 
 `SUSPECT` mappings never silently return to the fast path. Operators must be
 able to list, inspect, verify, retarget, or reject them with an audit reason.
@@ -401,6 +406,17 @@ matching code.
 - Every alias requires evidence and a regression test.
 - Fuzzy-threshold changes require corpus/replay testing.
 - Production data repair uses reviewed, scripted migrations.
+- Fixing a matching rule is two changes, not one: the code change stops
+  the mistake for *future* sightings, but every mapping/event a sighting
+  already produced under the old, buggier rule stays wrong until a
+  separate, scripted data-repair pass finds and corrects it. Observed
+  live more than once (a fuzzy scorer change whose old version had
+  already merged reserve/women teams into their senior team; a
+  collector fix for a provider silently omitting country, added after
+  it had already collapsed several different countries' same-named
+  leagues into one bucket) -- treat "the rule is fixed" and "the data
+  the old rule already wrote is fixed" as two separate, both-required
+  steps of the same change, not one.
 - Comments explain invariants; incident narratives belong in decision logs.
 - Migrations, parsers, matching, and detectors remain independently testable.
 
@@ -452,6 +468,12 @@ list unresolved/suspect mappings
   -> safely reprocess affected observations
 ```
 
+`scripts/identity_mapping.py` implements the first three steps for
+`team`/`competition` mappings (`suspects` to list, `team`/`competition` to
+verify, each recorded with actor-less but timestamped provenance) -- see §21
+for what it's still missing (a `reject` verb, and "safely reprocess" staying a
+manual replay rather than a supported reprocessing operation).
+
 Alerts distinguish provider outage, parser breakage, identity degradation, and
 analysis failure.
 
@@ -483,11 +505,36 @@ analysis failure.
 
 ## 21. Roadmap
 
+### Recently completed
+
+- CLI for listing and verifying (team/competition) `SUSPECT`/`UNVERIFIED`
+  mappings (`scripts/identity_mapping.py`) — `suspects`/`team`/`competition`
+  only; no `reject` verb yet (see below);
+- countryless-competition ambiguity guard: a name shared by several
+  countries is never chosen between by dictionary/query order, and is
+  logged distinctly when it happens (`fixture_catalog.competition.
+  ambiguous_without_country`);
+- one full real-data replay (live api-football + retained Meridianbet/
+  Mozzart captures against a migrated database copy, before/after counts
+  diffed) run once, by hand, ahead of the reference-identity/trust-state
+  migration — see "Next priorities" below for turning this into a
+  reusable, scripted harness instead of a one-off.
+
 ### Next priorities
 
-1. supported CLI/workflow for listing and clearing `SUSPECT` mappings;
-2. explicit countryless-competition ambiguity guard and tests;
-3. replay harness and migration comparison report;
+1. a `reject`/retire verb for `scripts/identity_mapping.py` — trust
+   state `REJECTED` is named in §11 but has no write path anywhere yet;
+   the only supported human actions today are verify (team/competition)
+   and read-only `suspects`;
+2. turn the one-off replay above into a reusable, scripted harness
+   (`scripts/replay_against_copy.py` or similar) that any future
+   matching-rule change re-runs against, not just the identity/trust
+   migration;
+3. garbage-collect orphaned provisional entities: a team/competition
+   created under `ambiguous`/`fuzzy` resolution can become referenced by
+   zero events after a later merge/split (observed live while splitting
+   Atletico Madrid's reserve team back out) and currently needs a
+   by-hand check-then-delete, not a supported operation;
 4. provider health/freshness reporting;
 5. auditable persistent aliases;
 6. scheduled polling with overlap, retry, and back-pressure controls;
