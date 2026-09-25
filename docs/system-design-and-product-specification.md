@@ -468,11 +468,10 @@ list unresolved/suspect mappings
   -> safely reprocess affected observations
 ```
 
-`scripts/identity_mapping.py` implements the first three steps for
-`team`/`competition` mappings (`suspects` to list, `team`/`competition` to
-verify, each recorded with actor-less but timestamped provenance) -- see §21
-for what it's still missing (a `reject` verb, and "safely reprocess" staying a
-manual replay rather than a supported reprocessing operation).
+`scripts/identity_mapping.py` implements listing and manual verification for
+team, competition, and event mappings (`suspects`, `team`, `competition`, and
+`event`, each recorded with actor-less but timestamped provenance). See §21 for
+the remaining `reject` lifecycle gap.
 
 Alerts distinguish provider outage, parser breakage, identity degradation, and
 analysis failure.
@@ -517,28 +516,29 @@ analysis failure.
 - one full real-data replay (live api-football + retained Meridianbet/
   Mozzart captures against a migrated database copy, before/after counts
   diffed) run once, by hand, ahead of the reference-identity/trust-state
-  migration — see "Next priorities" below for turning this into a
-  reusable, scripted harness instead of a one-off.
+  migration;
+- reusable `scripts/replay_against_copy.py` harness for running any replay
+  command against a consistent copy and producing a JSON before/after diff;
+- read-only `scripts/audit_identity.py` for duplicate, orphan, conflict, trust,
+  and reference-ID checks;
+- verified `scripts/database_backup.py` online-backup/checksum workflow;
+- manual provider fixture-ID verification with a compatibility snapshot.
 
 ### Next priorities
 
-1. a `reject`/retire verb for `scripts/identity_mapping.py` — trust
+1. define runtime semantics and then add a `reject`/retire verb for
+   `scripts/identity_mapping.py` — trust
    state `REJECTED` is named in §11 but has no write path anywhere yet;
-   the only supported human actions today are verify (team/competition)
-   and read-only `suspects`;
-2. turn the one-off replay above into a reusable, scripted harness
-   (`scripts/replay_against_copy.py` or similar) that any future
-   matching-rule change re-runs against, not just the identity/trust
-   migration;
-3. garbage-collect orphaned provisional entities: a team/competition
+   ingestion must not immediately relearn a rejected key;
+2. garbage-collect orphaned provisional entities: a team/competition
    created under `ambiguous`/`fuzzy` resolution can become referenced by
    zero events after a later merge/split (observed live while splitting
-   Atletico Madrid's reserve team back out) and currently needs a
-   by-hand check-then-delete, not a supported operation;
-4. provider health/freshness reporting;
-5. auditable persistent aliases;
-6. scheduled polling with overlap, retry, and back-pressure controls;
-7. retention and backup policy.
+   Atletico Madrid's reserve team back out); the audit now reports these,
+   but deletion remains deliberately manual;
+3. provider health/freshness reporting;
+4. auditable persistent aliases;
+5. scheduled polling with overlap, retry, and back-pressure controls;
+6. backup rotation, restore drills, and an explicit retention policy.
 
 ### Later
 
@@ -572,6 +572,7 @@ through an ADR or an update to this specification.
 - [Team identity decisions](team-identity-mapping-decisions.md)
 - [League identity decisions](league-identity-mapping-decisions.md)
 - [League names by source](league-names-by-source.md)
+- [Operations runbook](operations.md)
 
 ## 24. Definition of done for behaviour changes
 
