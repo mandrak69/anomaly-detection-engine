@@ -240,6 +240,30 @@ def test_alias_target_with_no_existing_match_falls_back_to_its_own_spelling():
     assert result.method == "alias"
 
 
+def test_alias_wins_over_an_exact_match_against_a_stale_duplicate_row():
+    # Verified live: "Engleska 1" (Mozzart's own name for the English
+    # Premier League) already existed as its own canonical competition
+    # row -- created before "Engleska 1": "England - Premier League" was
+    # added to LEAGUE_ALIASES -- so every later sighting kept matching
+    # that stale row *exactly* and never even consulted the alias,
+    # permanently splitting the same real competition (and therefore its
+    # fixtures) across two canonical rows. A curated alias is a
+    # deliberate human override of exactly this situation, so it must be
+    # checked before an incidental exact-string match against whatever
+    # already happens to exist, not after -- matching this project's own
+    # documented evidence order (curated alias ranks above exact
+    # normalized name).
+    normalizer = TeamNormalizer(
+        ["Engleska 1", "England - Premier League"],
+        aliases={"Engleska 1": "England - Premier League"},
+    )
+
+    result = normalizer.normalize("Engleska 1")
+
+    assert result.canonical_name == "England - Premier League"
+    assert result.method == "alias"
+
+
 def test_differently_cased_acronym_still_expands_via_token_alias():
     normalizer = TeamNormalizer(
         ["United Arab Emirates U23"],

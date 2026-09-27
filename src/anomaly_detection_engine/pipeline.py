@@ -62,6 +62,11 @@ ALIASES = {
     # Champions League fixture into two events.
     "Arsenal FC": "Arsenal",
     "Lille OSC": "Lille",
+    # Same gap, found while investigating why an EPL surebet never saw
+    # Meridianbet's odds: "Brentford FC" (Meridianbet) split the same
+    # Aston Villa vs Brentford fixture into its own canonical event
+    # instead of merging into "Brentford" (the-odds-api/Mozzart).
+    "Brentford FC": "Brentford",
     # Same club-suffix/prefix/abbreviation gap as above, found by
     # systematically comparing every Meridianbet/Mozzart team pair
     # sharing a competition_id+kickoff+one already-matching side --
@@ -173,7 +178,7 @@ TOKEN_ALIASES = {
 # which provider's spelling a real run happens to see first -- unlike the
 # fuzzy-match path, an explicit alias is not order-dependent.
 LEAGUE_ALIASES = {
-    "Azijske igre M23": "Azijske Igre U23",
+    "Azijske igre M23": "Azija - Azijske Igre U23",
     # Verified by checking each side's actual teams, not just the name --
     # a name-only guess here is exactly how "Primera Division" (Peru's
     # own top flight under api-football) could have been wrongly aliased
@@ -190,8 +195,25 @@ LEAGUE_ALIASES = {
     "Premier Liga": "England - Premier League",
     "Engleska - Premier Liga": "England - Premier League",
     "Engleska 1": "England - Premier League",
-    "Serija A": "Italy - Serie A",
+    # No "Serija A" entry here, deliberately -- unlike every other key in
+    # this dict, the raw string "Serija A" is NOT provider-specific: both
+    # Mozzart and Meridianbet each independently call their own league
+    # "Serija A" in Serbian, but they mean two different real
+    # competitions (Mozzart's is Brazil's Serie A; Meridianbet's is
+    # Italy's -- verified live by the actual teams, "Botafogo"/"Sao
+    # Paulo" vs "Inter Milano"/"Napoli"). A single string -> string entry
+    # here is applied identically regardless of which provider's
+    # FixtureCatalog instance is resolving it, so it cannot express "this
+    # raw name means X for one provider and Y for another" -- that
+    # disambiguation has to happen per-provider, via
+    # scripts/identity_mapping.py competition --provider mozzart / \
+    # --provider meridianbet, not here.
     "Italija 1": "Italy - Serie A",
+    # Meridianbet's own real spelling, confirmed live via
+    # source_competition_mappings once it started reporting country for
+    # this league -- unlike bare "Serija A" above, this one IS
+    # provider-unambiguous (Meridianbet always means Italy by it).
+    "Italija - Serija A": "Italy - Serie A",
     "MLS Liga": "USA - Major League Soccer",
     "SAD - MLS Liga": "USA - Major League Soccer",
     "SAD - MLS": "USA - Major League Soccer",

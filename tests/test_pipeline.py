@@ -62,17 +62,20 @@ def _clear_source_env(monkeypatch):
 def test_national_team_acronym_alias_unifies_two_providers_same_match():
     # Regression test for a real cross-provider matching gap: Mozzart
     # reports "UAE M23" (league "Azijske igre M23"), Meridianbet reports
-    # "United Arab Emirates U23" (league "Azijske Igre U23"), for the
-    # exact same real Asian Games U23 match -- resolved to two separate
-    # canonical events until pipeline.TOKEN_ALIASES ("UAE" -> "United Arab
-    # Emirates") and pipeline.LEAGUE_ALIASES (an explicit "these are the
-    # same league" entry -- a one-off tournament name isn't worth teaching
-    # the matcher to handle algorithmically) were both added. Fuzzy
-    # matching alone (token_sort_ratio) can never bridge an acronym (the
-    # two strings share almost no characters), and pipeline.ALIASES can't
-    # either, since it only ever matches a raw name that is *entirely* one
-    # of its keys -- "UAE" as a key there never matches within the longer
-    # string "UAE M23". Two separate FixtureCatalog instances sharing one
+    # "United Arab Emirates U23" (league "Azija - Azijske Igre U23", its
+    # own real spelling -- confirmed live via
+    # source_competition_mappings, not the bare "Azijske Igre U23" this
+    # test originally guessed), for the exact same real Asian Games U23
+    # match -- resolved to two separate canonical events until
+    # pipeline.TOKEN_ALIASES ("UAE" -> "United Arab Emirates") and
+    # pipeline.LEAGUE_ALIASES (an explicit "these are the same league"
+    # entry -- a one-off tournament name isn't worth teaching the matcher
+    # to handle algorithmically) were both added. Fuzzy matching alone
+    # (token_sort_ratio) can never bridge an acronym (the two strings
+    # share almost no characters), and pipeline.ALIASES can't either,
+    # since it only ever matches a raw name that is *entirely* one of its
+    # keys -- "UAE" as a key there never matches within the longer string
+    # "UAE M23". Two separate FixtureCatalog instances sharing one
     # connection, mirroring exactly how run_ingestion wires one per
     # collector, using the exact real spellings both captures reported.
     connection = sqlite3.connect(":memory:")
@@ -101,7 +104,7 @@ def test_national_team_acronym_alias_unifies_two_providers_same_match():
         start_time=start_time,
     )
     meridianbet_result = meridianbet_catalog.match(
-        sport="football", league="Azijske Igre U23",
+        sport="football", league="Azija - Azijske Igre U23",
         home_team_raw="United Arab Emirates U23", away_team_raw="Iran U23",
         start_time=start_time,
     )
@@ -500,8 +503,14 @@ def test_epl_league_alias_unifies_the_odds_api_and_meridianbet():
 
 
 def test_serie_a_league_alias_unifies_meridianbet_and_mozzart():
-    # Both provider spellings resolve to API-Football's country-qualified
-    # canonical league name even when the reference feed arrives later.
+    # Meridianbet's real raw league name for Italy's Serie A is "Italija -
+    # Serija A" with country "Italy" (confirmed live via
+    # source_competition_mappings), not bare "Serija A" -- this test
+    # originally guessed the bare spelling, which is actually Mozzart's
+    # own name for a *different* real competition (see
+    # test_same_raw_league_name_means_different_leagues_per_provider
+    # below). Mozzart's "Italija 1" still aliases to the same canonical
+    # league via pipeline.LEAGUE_ALIASES.
     connection = sqlite3.connect(":memory:")
     configure_connection(connection)
     initialize_database(connection)
@@ -523,7 +532,7 @@ def test_serie_a_league_alias_unifies_meridianbet_and_mozzart():
     )
 
     meridianbet_result = meridianbet_catalog.match(
-        sport="football", league="Serija A",
+        sport="football", league="Italija - Serija A", country="Italy",
         home_team_raw="Inter Milano", away_team_raw="AC Milan",
         start_time=start_time,
     )
@@ -536,6 +545,91 @@ def test_serie_a_league_alias_unifies_meridianbet_and_mozzart():
     assert meridianbet_result.event is not None
     assert mozzart_result.event is not None
     assert meridianbet_result.event.id == mozzart_result.event.id
+
+
+def test_same_raw_league_name_means_different_leagues_per_provider():
+    # Regression test for a real production bug: Mozzart and Meridianbet
+    # each independently call a *different* real competition "Serija A"
+    # in Serbian -- Mozzart's is Brazil's Serie A, Meridianbet's is
+    # Italy's -- verified live by the actual teams. Mozzart's sighting
+    # carries no country at all, and a country-less competition is
+    # treated as compatible with any country's sighting (see
+    # _competitions_for_sport), so once either provider's "Serija A" has
+    # been seen, an exact-string match alone -- country or no country --
+    # cannot tell the two apart; pipeline.LEAGUE_ALIASES deliberately has
+    # no "Serija A" entry either, since one alias value can't mean two
+    # different things depending on which provider is asking. The
+    # supported fix is the same manual escape hatch used for a SUSPECT
+    # mapping: verify_competition_mapping, scoped to (source, sport,
+    # raw name), pins *this provider's* "Serija A" to the correct
+    # competition permanently, independent of what any other provider's
+    # own "Serija A" sighting resolves to.
+    connection = sqlite3.connect(":memory:")
+    configure_connection(connection)
+    initialize_database(connection)
+    start_time = datetime.fromisoformat("2026-10-10T11:30:00+00:00")
+
+    mozzart_catalog = FixtureCatalog(
+        connection,
+        provider_id="mozzart",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    meridianbet_catalog = FixtureCatalog(
+        connection,
+        provider_id="meridianbet",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+
+    # Meridianbet's sighting arrives first and creates "Serija A".
+    meridianbet_result = meridianbet_catalog.match(
+        sport="football", league="Serija A", country="Italy",
+        home_team_raw="Inter Milano", away_team_raw="AC Milan",
+        start_time=start_time,
+    )
+    assert meridianbet_result.event is not None
+    italy_competition_id = meridianbet_result.event.competition_id
+
+    # A brand-new Brazilian competition (a distinct raw string, so it
+    # cannot collide with the "Serija A" Meridianbet just created) to pin
+    # Mozzart's own "Serija A" to.
+    reference_catalog = FixtureCatalog(
+        connection,
+        provider_id="the-odds-api",
+        aliases=pipeline.ALIASES,
+        token_aliases=pipeline.TOKEN_ALIASES,
+        league_aliases=pipeline.LEAGUE_ALIASES,
+    )
+    brazil_result = reference_catalog.match(
+        sport="football", league="Serie A", country="Brazil",
+        home_team_raw="Botafogo", away_team_raw="Sao Paulo",
+        start_time=start_time + timedelta(days=1),
+    )
+    assert brazil_result.event is not None
+    brazil_competition_id = brazil_result.event.competition_id
+
+    mozzart_catalog.verify_competition_mapping(
+        sport="football",
+        source_name="Serija A",
+        canonical_competition_id=brazil_competition_id,
+    )
+
+    # Without the pin, Mozzart's own "Serija A" would exact-match the
+    # same country-less-compatible "Serija A" Meridianbet already
+    # created; the verified mapping's cache hit is checked first and
+    # wins instead.
+    mozzart_result = mozzart_catalog.match(
+        sport="football", league="Serija A",
+        home_team_raw="Botafogo", away_team_raw="Sao Paulo",
+        start_time=start_time,
+    )
+
+    assert mozzart_result.event is not None
+    assert mozzart_result.event.competition_id == brazil_competition_id
+    assert mozzart_result.event.competition_id != italy_competition_id
 
 
 def test_default_source_uses_two_json_collector_polls(monkeypatch):

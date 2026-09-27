@@ -183,10 +183,19 @@ class TeamNormalizer:
         candidate = self._expand_tokens(raw_name.strip())
         candidate_key = _comparison_key(candidate)
 
-        exact_match = self._canonical_name_by_key.get(candidate_key)
-        if exact_match is not None:
-            return NormalizationResult(candidate, exact_match, 100.0, "exact")
-
+        # Checked before the exact-match-against-existing-names lookup
+        # below, not after: a curated alias is a deliberate human
+        # override, so it must win even when a *stale* canonical row
+        # happens to already exist under the raw, un-aliased spelling
+        # (created before this alias was added). Verified live:
+        # "Engleska 1" (Mozzart's name for the English Premier League)
+        # already existed as its own canonical competition row, so every
+        # later sighting kept matching it *exactly* and never even
+        # consulted "Engleska 1": "England - Premier League" in
+        # LEAGUE_ALIASES -- permanently splitting the same real
+        # competition's fixtures across two canonical rows. Matches this
+        # project's own documented evidence order (curated alias ranks
+        # above exact normalized name).
         alias_match = self._alias_by_key.get(candidate_key)
         if alias_match:
             # An alias's own target string is whatever the caller wrote
@@ -206,6 +215,10 @@ class TeamNormalizer:
                 _comparison_key(alias_match), alias_match
             )
             return NormalizationResult(candidate, resolved_target, 100.0, "alias")
+
+        exact_match = self._canonical_name_by_key.get(candidate_key)
+        if exact_match is not None:
+            return NormalizationResult(candidate, exact_match, 100.0, "exact")
 
         # token_sort_ratio, not WRatio: WRatio's internal partial/token-set
         # blending scores two names sharing just one short common token
