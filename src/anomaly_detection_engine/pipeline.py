@@ -148,6 +148,38 @@ ALIASES = {
     # team (plain exact match, no alias needed); Mozzart's "2" spelling
     # still needs this one to reach it.
     "Atletico Madrid 2": "Atletico Madrid B",
+    # Found systematically, not one at a time: every pair of events
+    # sharing (sport, competition_id, start_time) plus one identical team
+    # ended up with a fuzzy-similar-but-not-identical name on the OTHER
+    # side, the same shape as the Arsenal FC/Lille OSC/Brentford FC gaps
+    # above -- the fixture-context match itself (same competition, same
+    # kickoff, same opponent) rules out coincidence, no live-fixture
+    # cross-check needed the way an isolated name-only guess would.
+    # Target picked as whichever spelling already had more events in the
+    # live database, not a style preference either way.
+    "Vancouver Whitecaps FC": "Vancouver Whitecaps",
+    "Inter Toronto": "Inter Toronto FC",
+    "Coban Imperial": "CSD Coban Imperial",
+    "Brighton & Hove Albion": "Brighton and Hove Albion",
+    "Charlotte FC": "Charlotte",
+    "San Diego FC": "San Diego",
+    "Bosnia-Herzegovina": "Bosnia and Herzegovina",
+    "Everton": "Everton FC",
+    "Toronto": "Toronto FC",
+    "Fulham FC": "Fulham",
+    "Philadelphia": "Philadelphia Union",
+    "Austin FC": "Austin",
+    "Dallas": "FC Dallas",
+    "Saint Louis City SC": "St. Louis City",
+    "Columbus": "Columbus Crew",
+    "Ipswich": "Ipswich Town",
+    "Chicago": "Chicago Fire",
+    "Newcastle": "Newcastle United",
+    "Colorado": "Colorado Rapids",
+    "Tottenham": "Tottenham Hotspur",
+    "Como": "Como 1907",
+    "NY City": "New York City FC",
+    "Leeds": "Leeds United",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
