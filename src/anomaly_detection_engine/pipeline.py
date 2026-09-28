@@ -183,6 +183,7 @@ ALIASES = {
     "Sunderland AFC": "Sunderland",
     "Chelsea": "Chelsea FC",
     "Feyenoord": "Feyenoord Rotterdam",
+    "Bournemouth": "AFC Bournemouth",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
