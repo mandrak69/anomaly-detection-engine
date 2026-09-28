@@ -180,6 +180,9 @@ ALIASES = {
     "Como": "Como 1907",
     "NY City": "New York City FC",
     "Leeds": "Leeds United",
+    "Sunderland AFC": "Sunderland",
+    "Chelsea": "Chelsea FC",
+    "Feyenoord": "Feyenoord Rotterdam",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
