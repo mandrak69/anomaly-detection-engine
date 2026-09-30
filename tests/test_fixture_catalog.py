@@ -537,6 +537,211 @@ def test_manual_provider_mapping_overrides_a_suspect_id():
     assert row["resolution_method"] == "manual"
 
 
+def test_reject_team_mapping_blocks_the_id_fast_path_from_relearning_it():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    west_ham = reference.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="West Ham United",
+        away_team_raw="Liverpool",
+        start_time=T0,
+        home_team_source_id="48",
+    )
+    assert west_ham.event is not None
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    first = mozzart.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Westham Untd",
+        away_team_raw="Chelsea",
+        start_time=T0 + timedelta(days=1),
+        home_team_source_id="777",
+    )
+    assert first.event is not None
+    connection.execute(
+        "UPDATE source_team_id_mappings SET trust_state = 'VERIFIED' "
+        "WHERE source = 'mozzart' AND source_team_id = '777'"
+    )
+    connection.commit()
+
+    mozzart.reject_team_mapping(
+        sport="football",
+        source_team_id="777",
+        reason="777 was recycled onto a different club",
+    )
+    row = connection.execute(
+        "SELECT trust_state, rejection_reason, rejected_at FROM source_team_id_mappings "
+        "WHERE source = 'mozzart' AND source_team_id = '777'"
+    ).fetchone()
+    assert row["trust_state"] == "REJECTED"
+    assert row["rejection_reason"] == "777 was recycled onto a different club"
+    assert row["rejected_at"] is not None
+
+    # A fresh sighting under the same rejected id must not silently
+    # revive it to VERIFIED -- the row stays REJECTED until a human
+    # calls verify_team_mapping again.
+    mozzart.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Westham Untd",
+        away_team_raw="Everton",
+        start_time=T0 + timedelta(days=2),
+        home_team_source_id="777",
+    )
+    row = connection.execute(
+        "SELECT trust_state FROM source_team_id_mappings "
+        "WHERE source = 'mozzart' AND source_team_id = '777'"
+    ).fetchone()
+    assert row["trust_state"] == "REJECTED"
+
+
+def test_verify_team_mapping_clears_a_rejected_mapping():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    west_ham = reference.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="West Ham United",
+        away_team_raw="Liverpool",
+        start_time=T0,
+        home_team_source_id="48",
+    )
+    assert west_ham.event is not None
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    mozzart.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Westham Untd",
+        away_team_raw="Chelsea",
+        start_time=T0 + timedelta(days=1),
+        home_team_source_id="777",
+    )
+    mozzart.reject_team_mapping(
+        sport="football", source_team_id="777", reason="wrong club"
+    )
+
+    mozzart.verify_team_mapping(
+        sport="football",
+        source_name="Westham Untd",
+        source_team_id="777",
+        canonical_team_id=west_ham.event.home_team.id,
+    )
+
+    row = connection.execute(
+        "SELECT trust_state, rejection_reason, rejected_at FROM source_team_id_mappings "
+        "WHERE source = 'mozzart' AND source_team_id = '777'"
+    ).fetchone()
+    assert row["trust_state"] == "VERIFIED"
+    assert row["rejection_reason"] is None
+    assert row["rejected_at"] is None
+
+
+def test_reject_team_mapping_requires_a_reason_and_an_existing_mapping():
+    connection = make_connection()
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+
+    with pytest.raises(ValueError, match="reason"):
+        mozzart.reject_team_mapping(
+            sport="football", source_team_id="999", reason="  "
+        )
+    with pytest.raises(ValueError, match="no mapping found"):
+        mozzart.reject_team_mapping(
+            sport="football", source_team_id="999", reason="never resolved"
+        )
+
+
+def test_reject_competition_mapping_blocks_relearning_by_name():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    canonical = reference.match(
+        sport="football",
+        league="England - Premier League",
+        country="England",
+        home_team_raw="Arsenal",
+        away_team_raw="Chelsea",
+        start_time=T0,
+    )
+    assert canonical.event is not None
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    mozzart.match(
+        sport="football",
+        league="Engleska Premijer Liga Neverified",
+        home_team_raw="Arsenal",
+        away_team_raw="Chelsea",
+        start_time=T0 + timedelta(days=1),
+    )
+    connection.execute(
+        "UPDATE source_competition_mappings SET trust_state = 'VERIFIED' "
+        "WHERE source = 'mozzart' AND source_competition_name = "
+        "'Engleska Premijer Liga Neverified'"
+    )
+    connection.commit()
+
+    mozzart.reject_competition_mapping(
+        sport="football",
+        source_name="Engleska Premijer Liga Neverified",
+        reason="wrong league entirely",
+    )
+
+    row = connection.execute(
+        "SELECT trust_state, rejection_reason FROM source_competition_mappings "
+        "WHERE source = 'mozzart' AND source_competition_name = "
+        "'Engleska Premijer Liga Neverified'"
+    ).fetchone()
+    assert row["trust_state"] == "REJECTED"
+    assert row["rejection_reason"] == "wrong league entirely"
+
+    # A REJECTED name mapping is invisible to the verified-fast-path
+    # lookup (same query the automatic resolver uses), so it cannot be
+    # silently relearned as VERIFIED again.
+    assert (
+        mozzart._find_competition_mapping(
+            "Engleska Premijer Liga Neverified", "football", None
+        )
+        is None
+    )
+
+
+def test_reject_event_mapping():
+    connection = make_connection()
+    reference = FixtureCatalog(connection, provider_id="api-football")
+    canonical = reference.match(
+        sport="football",
+        league="England - Premier League",
+        home_team_raw="Arsenal",
+        away_team_raw="Chelsea",
+        start_time=T0,
+        source_event_id="ev-1",
+    )
+    assert canonical.event is not None
+
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+    mozzart.match(
+        sport="football",
+        league="Engleska 1",
+        home_team_raw="Arsenal",
+        away_team_raw="Chelsea",
+        start_time=T0,
+        source_event_id="mz-1",
+    )
+
+    mozzart.reject_event_mapping(source_event_id="mz-1", reason="wrong fixture")
+
+    row = connection.execute(
+        "SELECT trust_state, rejection_reason FROM source_event_mappings "
+        "WHERE source = 'mozzart' AND source_event_id = 'mz-1'"
+    ).fetchone()
+    assert row["trust_state"] == "REJECTED"
+    assert row["rejection_reason"] == "wrong fixture"
+
+    with pytest.raises(ValueError, match="no event mapping found"):
+        mozzart.reject_event_mapping(source_event_id="never-seen", reason="x")
+
+
 def test_api_football_entities_are_reference_backed_and_others_are_provisional():
     connection = make_connection()
     api = FixtureCatalog(connection, provider_id="api-football")

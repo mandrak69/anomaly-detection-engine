@@ -19,6 +19,10 @@ RESOLVER_VERSION = 3
 TRUST_VERIFIED = "VERIFIED"
 TRUST_UNVERIFIED = "UNVERIFIED"
 TRUST_SUSPECT = "SUSPECT"
+# Terminal, human-set-only: "a human looked at this and it was wrong",
+# distinct from SUSPECT's "unresolved, needs a look" (see verify_*_mapping
+# and reject_*_mapping below). Never set by automatic resolution.
+TRUST_REJECTED = "REJECTED"
 
 _COUNTRY_ALIASES = {
     "engleska": "England",
@@ -415,7 +419,8 @@ class FixtureCatalog:
                 DO UPDATE SET
                     team_id = excluded.team_id,
                     resolution_method = 'manual', confidence = 100.0,
-                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
+                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version,
+                    rejection_reason = NULL, rejected_at = NULL
                 """,
                 (
                     self._provider_id,
@@ -435,10 +440,89 @@ class FixtureCatalog:
                     source_name.strip(),
                     trust_state=TRUST_VERIFIED,
                     resolution_method="manual",
-                    allow_suspect_override=True,
+                    allow_quarantine_override=True,
                 )
             if competition_id is not None:
                 self._record_team_competition(canonical_team_id, competition_id)
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
+    def reject_team_mapping(
+        self,
+        *,
+        sport: str,
+        reason: str,
+        source_name: str | None = None,
+        competition_id: str | None = None,
+        source_team_id: str | None = None,
+    ) -> None:
+        """Marks an existing provider -> team mapping REJECTED with a
+        human-audit reason: a human looked at this specific mapping and
+        decided it is wrong, a terminal state distinct from SUSPECT's
+        "unresolved, needs a look" (see TRUST_REJECTED). Every write path
+        that could otherwise silently relearn the same wrong mapping
+        already refuses to touch a REJECTED row the same way it already
+        refuses to touch SUSPECT (see _save_mapping/_save_team_id_mapping's
+        own CASE guards) -- the only way past this is verify_team_mapping,
+        the same escape hatch that already clears SUSPECT.
+
+        At least one of source_name (the name-keyed source_team_mappings
+        row, optionally scoped to competition_id) or source_team_id (the
+        provider-id-keyed source_team_id_mappings row) must be given, and
+        at least one matching row must actually exist -- rejecting a key
+        that was never resolved in the first place is almost certainly a
+        typo'd source_name/source_team_id, not a deliberate action, so
+        this raises rather than silently doing nothing.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("a rejection reason is required")
+        if source_name is None and source_team_id is None:
+            raise ValueError(
+                "reject_team_mapping needs source_name and/or source_team_id"
+            )
+
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows_affected = 0
+            if source_name is not None:
+                cur = self._connection.execute(
+                    """
+                    UPDATE source_team_mappings
+                    SET trust_state = 'REJECTED', rejection_reason = ?, rejected_at = ?
+                    WHERE source = ? AND sport = ? AND source_team_name = ?
+                      AND competition_id = ?
+                    """,
+                    (
+                        reason,
+                        now,
+                        self._provider_id,
+                        sport,
+                        source_name.strip(),
+                        competition_id or "",
+                    ),
+                )
+                rows_affected += cur.rowcount
+            if source_team_id is not None:
+                cur = self._connection.execute(
+                    """
+                    UPDATE source_team_id_mappings
+                    SET trust_state = 'REJECTED', rejection_reason = ?, rejected_at = ?
+                    WHERE source = ? AND sport = ? AND source_team_id = ?
+                    """,
+                    (reason, now, self._provider_id, sport, source_team_id),
+                )
+                rows_affected += cur.rowcount
+            if rows_affected == 0:
+                raise ValueError(
+                    "no mapping found to reject for "
+                    f"source={self._provider_id!r} sport={sport!r} "
+                    f"source_name={source_name!r} source_team_id={source_team_id!r}"
+                )
         except BaseException:
             self._connection.rollback()
             raise
@@ -478,7 +562,8 @@ class FixtureCatalog:
                 DO UPDATE SET
                     competition_id = excluded.competition_id,
                     resolution_method = 'manual', confidence = 100.0,
-                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version
+                    trust_state = 'VERIFIED', resolver_version = excluded.resolver_version,
+                    rejection_reason = NULL, rejected_at = NULL
                 """,
                 (
                     self._provider_id,
@@ -498,7 +583,76 @@ class FixtureCatalog:
                     source_name.strip(),
                     trust_state=TRUST_VERIFIED,
                     resolution_method="manual",
-                    allow_suspect_override=True,
+                    allow_quarantine_override=True,
+                )
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
+    def reject_competition_mapping(
+        self,
+        *,
+        sport: str,
+        reason: str,
+        source_name: str | None = None,
+        country: str | None = None,
+        source_competition_id: str | None = None,
+    ) -> None:
+        """Competition-mapping equivalent of reject_team_mapping -- see
+        that method's own docstring for the full reasoning. At least one
+        of source_name (the name-keyed source_competition_mappings row,
+        optionally scoped to country) or source_competition_id (the
+        provider-id-keyed source_competition_id_mappings row) must be
+        given, and at least one matching row must actually exist.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("a rejection reason is required")
+        if source_name is None and source_competition_id is None:
+            raise ValueError(
+                "reject_competition_mapping needs source_name and/or source_competition_id"
+            )
+
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows_affected = 0
+            if source_name is not None:
+                cur = self._connection.execute(
+                    """
+                    UPDATE source_competition_mappings
+                    SET trust_state = 'REJECTED', rejection_reason = ?, rejected_at = ?
+                    WHERE source = ? AND sport = ? AND source_competition_name = ?
+                      AND country_key = ?
+                    """,
+                    (
+                        reason,
+                        now,
+                        self._provider_id,
+                        sport,
+                        source_name.strip(),
+                        _country_key(country),
+                    ),
+                )
+                rows_affected += cur.rowcount
+            if source_competition_id is not None:
+                cur = self._connection.execute(
+                    """
+                    UPDATE source_competition_id_mappings
+                    SET trust_state = 'REJECTED', rejection_reason = ?, rejected_at = ?
+                    WHERE source = ? AND sport = ? AND source_competition_id = ?
+                    """,
+                    (reason, now, self._provider_id, sport, source_competition_id),
+                )
+                rows_affected += cur.rowcount
+            if rows_affected == 0:
+                raise ValueError(
+                    "no mapping found to reject for "
+                    f"source={self._provider_id!r} sport={sport!r} "
+                    f"source_name={source_name!r} "
+                    f"source_competition_id={source_competition_id!r}"
                 )
         except BaseException:
             self._connection.rollback()
@@ -575,6 +729,42 @@ class FixtureCatalog:
         else:
             self._connection.commit()
 
+    def reject_event_mapping(self, *, source_event_id: str, reason: str) -> None:
+        """Marks a provider fixture-id mapping REJECTED with a human-audit
+        reason -- see reject_team_mapping's own docstring for the full
+        reasoning. Keyed only by source_event_id: unlike the team/
+        competition mappings, an event mapping's primary key
+        (source, source_event_id) already fully identifies one row.
+        """
+        reason = reason.strip()
+        source_event_id = source_event_id.strip()
+        if not reason:
+            raise ValueError("a rejection reason is required")
+        if not source_event_id:
+            raise ValueError("source_event_id must not be blank")
+
+        now = to_utc_iso(datetime.now(UTC))
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._connection.execute(
+                """
+                UPDATE source_event_mappings
+                SET trust_state = 'REJECTED', rejection_reason = ?, rejected_at = ?
+                WHERE source = ? AND source_event_id = ?
+                """,
+                (reason, now, self._provider_id, source_event_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(
+                    "no event mapping found to reject for "
+                    f"source={self._provider_id!r} source_event_id={source_event_id!r}"
+                )
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
     # -- team resolution --------------------------------------------------
 
     def _resolve_team(
@@ -638,7 +828,7 @@ class FixtureCatalog:
                         source_team_id, sport, raw_name
                     )
                     source_id_is_suspect = True
-                elif mapping["trust_state"] == TRUST_SUSPECT:
+                elif mapping["trust_state"] in (TRUST_SUSPECT, TRUST_REJECTED):
                     source_id_is_suspect = True
 
         mapped = self._find_mapping(raw_name, sport, competition_id)
@@ -848,17 +1038,17 @@ class FixtureCatalog:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (source, sport, source_team_name, competition_id) DO UPDATE SET
                 team_id = CASE
-                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_team_mappings.team_id ELSE excluded.team_id END,
                 resolution_method = CASE
-                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_team_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 confidence = CASE
-                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_team_mappings.confidence ELSE excluded.confidence END,
                 trust_state = CASE
-                    WHEN source_team_mappings.trust_state = 'VERIFIED'
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_team_mappings.trust_state ELSE excluded.trust_state END,
                 resolver_version = excluded.resolver_version
             """,
@@ -1064,7 +1254,7 @@ class FixtureCatalog:
         *,
         trust_state: str,
         resolution_method: str,
-        allow_suspect_override: bool = False,
+        allow_quarantine_override: bool = False,
     ) -> None:
         now = to_utc_iso(datetime.now(UTC))
         self._connection.execute(
@@ -1079,28 +1269,35 @@ class FixtureCatalog:
                 last_seen_raw_name = excluded.last_seen_raw_name,
                 last_checked_at = excluded.last_checked_at,
                 team_id = CASE
-                    WHEN source_team_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    WHEN source_team_id_mappings.trust_state IN ('SUSPECT', 'REJECTED') AND NOT ?
                     THEN source_team_id_mappings.team_id ELSE excluded.team_id END,
                 trust_state = CASE
-                    WHEN source_team_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    WHEN source_team_id_mappings.trust_state IN ('SUSPECT', 'REJECTED') AND NOT ?
                     THEN source_team_id_mappings.trust_state ELSE excluded.trust_state END,
                 resolution_method = CASE
-                    WHEN source_team_id_mappings.trust_state IN ('VERIFIED', 'SUSPECT') AND NOT ?
+                    WHEN source_team_id_mappings.trust_state IN ('VERIFIED', 'SUSPECT', 'REJECTED')
+                         AND NOT ?
                     THEN source_team_id_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 resolver_version = excluded.resolver_version,
                 last_verified_raw_name = CASE
                     WHEN excluded.trust_state = 'VERIFIED'
-                         AND (source_team_id_mappings.trust_state != 'SUSPECT' OR ?)
+                         AND (source_team_id_mappings.trust_state NOT IN ('SUSPECT', 'REJECTED')
+                              OR ?)
                     THEN excluded.last_verified_raw_name
                     ELSE source_team_id_mappings.last_verified_raw_name END,
                 verified_at = CASE
                     WHEN excluded.trust_state = 'VERIFIED'
-                         AND (source_team_id_mappings.trust_state != 'SUSPECT' OR ?)
+                         AND (source_team_id_mappings.trust_state NOT IN ('SUSPECT', 'REJECTED')
+                              OR ?)
                     THEN excluded.verified_at
                     ELSE source_team_id_mappings.verified_at END,
                 drift_detected_at = CASE WHEN ? THEN NULL
-                    ELSE source_team_id_mappings.drift_detected_at END
+                    ELSE source_team_id_mappings.drift_detected_at END,
+                rejection_reason = CASE WHEN ? THEN NULL
+                    ELSE source_team_id_mappings.rejection_reason END,
+                rejected_at = CASE WHEN ? THEN NULL
+                    ELSE source_team_id_mappings.rejected_at END
             """,
             (
                 self._provider_id,
@@ -1116,12 +1313,14 @@ class FixtureCatalog:
                 now if trust_state == TRUST_VERIFIED else None,
                 now,
                 now,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
             ),
         )
 
@@ -1252,7 +1451,7 @@ class FixtureCatalog:
                         source_competition_id, sport, raw_league
                     )
                     source_id_is_suspect = True
-                elif mapping["trust_state"] == TRUST_SUSPECT:
+                elif mapping["trust_state"] in (TRUST_SUSPECT, TRUST_REJECTED):
                     source_id_is_suspect = True
 
         mapped = self._find_competition_mapping(raw_league, sport, country)
@@ -1433,18 +1632,18 @@ class FixtureCatalog:
             ON CONFLICT (source, sport, source_competition_name, country_key)
             DO UPDATE SET
                 competition_id = CASE
-                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_competition_mappings.competition_id
                     ELSE excluded.competition_id END,
                 resolution_method = CASE
-                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_competition_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 confidence = CASE
-                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_competition_mappings.confidence ELSE excluded.confidence END,
                 trust_state = CASE
-                    WHEN source_competition_mappings.trust_state = 'VERIFIED'
+                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
                     THEN source_competition_mappings.trust_state ELSE excluded.trust_state END,
                 resolver_version = excluded.resolver_version
             """,
@@ -1599,7 +1798,7 @@ class FixtureCatalog:
         *,
         trust_state: str,
         resolution_method: str,
-        allow_suspect_override: bool = False,
+        allow_quarantine_override: bool = False,
     ) -> None:
         now = to_utc_iso(datetime.now(UTC))
         self._connection.execute(
@@ -1614,31 +1813,39 @@ class FixtureCatalog:
                 last_seen_raw_name = excluded.last_seen_raw_name,
                 last_checked_at = excluded.last_checked_at,
                 competition_id = CASE
-                    WHEN source_competition_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    WHEN source_competition_id_mappings.trust_state
+                         IN ('SUSPECT', 'REJECTED') AND NOT ?
                     THEN source_competition_id_mappings.competition_id
                     ELSE excluded.competition_id END,
                 trust_state = CASE
-                    WHEN source_competition_id_mappings.trust_state = 'SUSPECT' AND NOT ?
+                    WHEN source_competition_id_mappings.trust_state
+                         IN ('SUSPECT', 'REJECTED') AND NOT ?
                     THEN source_competition_id_mappings.trust_state
                     ELSE excluded.trust_state END,
                 resolution_method = CASE
                     WHEN source_competition_id_mappings.trust_state
-                         IN ('VERIFIED', 'SUSPECT') AND NOT ?
+                         IN ('VERIFIED', 'SUSPECT', 'REJECTED') AND NOT ?
                     THEN source_competition_id_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 resolver_version = excluded.resolver_version,
                 last_verified_raw_name = CASE
                     WHEN excluded.trust_state = 'VERIFIED'
-                         AND (source_competition_id_mappings.trust_state != 'SUSPECT' OR ?)
+                         AND (source_competition_id_mappings.trust_state
+                              NOT IN ('SUSPECT', 'REJECTED') OR ?)
                     THEN excluded.last_verified_raw_name
                     ELSE source_competition_id_mappings.last_verified_raw_name END,
                 verified_at = CASE
                     WHEN excluded.trust_state = 'VERIFIED'
-                         AND (source_competition_id_mappings.trust_state != 'SUSPECT' OR ?)
+                         AND (source_competition_id_mappings.trust_state
+                              NOT IN ('SUSPECT', 'REJECTED') OR ?)
                     THEN excluded.verified_at
                     ELSE source_competition_id_mappings.verified_at END,
                 drift_detected_at = CASE WHEN ? THEN NULL
-                    ELSE source_competition_id_mappings.drift_detected_at END
+                    ELSE source_competition_id_mappings.drift_detected_at END,
+                rejection_reason = CASE WHEN ? THEN NULL
+                    ELSE source_competition_id_mappings.rejection_reason END,
+                rejected_at = CASE WHEN ? THEN NULL
+                    ELSE source_competition_id_mappings.rejected_at END
             """,
             (
                 self._provider_id,
@@ -1654,12 +1861,14 @@ class FixtureCatalog:
                 now if trust_state == TRUST_VERIFIED else None,
                 now,
                 now,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
-                allow_suspect_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
+                allow_quarantine_override,
             ),
         )
 
@@ -2094,13 +2303,13 @@ class FixtureCatalog:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (source, source_event_id) DO UPDATE SET
                 event_id = CASE
-                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    WHEN source_event_mappings.trust_state IN ('SUSPECT', 'REJECTED')
                     THEN source_event_mappings.event_id ELSE excluded.event_id END,
                 trust_state = CASE
-                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    WHEN source_event_mappings.trust_state IN ('SUSPECT', 'REJECTED')
                     THEN source_event_mappings.trust_state ELSE excluded.trust_state END,
                 resolution_method = CASE
-                    WHEN source_event_mappings.trust_state = 'SUSPECT'
+                    WHEN source_event_mappings.trust_state IN ('SUSPECT', 'REJECTED')
                     THEN source_event_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 resolver_version = excluded.resolver_version,

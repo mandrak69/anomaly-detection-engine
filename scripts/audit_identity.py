@@ -171,6 +171,31 @@ def audit_identity(connection: sqlite3.Connection) -> list[Finding]:
                 )
             )
 
+        # Separate from unresolved above: REJECTED is a closed decision (a
+        # human already looked and said it was wrong), not an open one
+        # needing attention -- always WARNING, tracked here so a rejected
+        # key doesn't quietly vanish from view, not because it's urgent.
+        rejected = _rows(
+            connection,
+            f"""
+            SELECT source, COALESCE(sport, '') AS sport, rejection_reason,
+                   rejected_at, COUNT(*) AS mapping_count
+            FROM {table}
+            WHERE trust_state = 'REJECTED'
+            GROUP BY source, sport, rejection_reason, rejected_at
+            ORDER BY rejected_at DESC
+            """,
+        )
+        if rejected:
+            findings.append(
+                Finding(
+                    "WARNING",
+                    f"rejected-{table}",
+                    f"{table} contains mappings a human marked REJECTED.",
+                    rejected,
+                )
+            )
+
     reference_checks = (
         ("source_team_id_mappings", "team_id", "source_team_id"),
         ("source_competition_id_mappings", "competition_id", "source_competition_id"),

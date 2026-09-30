@@ -1640,6 +1640,27 @@ def _migration_20_contextual_fixture_identity(connection: sqlite3.Connection) ->
         )
 
 
+def _migration_21_rejection_audit_trail(connection: sqlite3.Connection) -> None:
+    """Adds rejection_reason/rejected_at to every mapping table, so
+    trust_state='REJECTED' (named in the spec's §11 since the reference-
+    identity migration but never given a write path) can carry the
+    human-audit-reason the spec requires for it ("Operators must be able
+    to list, inspect, verify, retarget, or reject them with an audit
+    reason") -- the same two columns on all five tables, since a
+    rejection is the same kind of fact everywhere it can happen: a human
+    looked at a specific mapping and said it was wrong.
+    """
+    for table in (
+        "source_team_mappings",
+        "source_competition_mappings",
+        "source_team_id_mappings",
+        "source_competition_id_mappings",
+        "source_event_mappings",
+    ):
+        _add_column_if_missing(connection, table, "rejection_reason", "TEXT")
+        _add_column_if_missing(connection, table, "rejected_at", "TEXT")
+
+
 MIGRATIONS: list[Migration] = [
     _migration_1_initial_schema,
     _migration_2_full_market_identity,
@@ -1661,6 +1682,7 @@ MIGRATIONS: list[Migration] = [
     _migration_18_source_id_mappings,
     _migration_19_reference_identity_and_mapping_trust,
     _migration_20_contextual_fixture_identity,
+    _migration_21_rejection_audit_trail,
 ]
 
 

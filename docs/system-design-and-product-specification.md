@@ -264,15 +264,19 @@ Trust states include:
 - `VERIFIED`: compatible mapping confirmed by strong IDs, curated alias, or a
   human decision;
 - `SUSPECT`: later evidence conflicts with a trusted mapping;
-- `REJECTED` or retired where audit history requires it -- **not yet
-  implemented**: no code path sets or reads it today, and the CLI in
-  §18/§21 has no verb to produce it. Naming it here is intentional (the
-  identity lifecycle needs a terminal "a human looked at this and it was
-  wrong" state distinct from `SUSPECT`'s "unresolved, needs a look"), not
-  a claim that it exists yet.
+- `REJECTED`: a human looked at a specific mapping and decided it was
+  wrong -- terminal, distinct from `SUSPECT`'s "unresolved, needs a
+  look". Set only by `FixtureCatalog.reject_team_mapping`/
+  `reject_competition_mapping`/`reject_event_mapping`
+  (`scripts/identity_mapping.py reject`), never by automatic
+  resolution. Carries `rejection_reason`/`rejected_at` (migration 21).
 
-`SUSPECT` mappings never silently return to the fast path. Operators must be
-able to list, inspect, verify, retarget, or reject them with an audit reason.
+`SUSPECT` and `REJECTED` mappings never silently return to the fast path (see
+§12's evidence order): every write path that could relearn one refuses to
+touch it, protecting it exactly as it already protected `SUSPECT`. Operators
+must be able to list, inspect, verify, retarget, or reject them with an audit
+reason -- `suspects`/`team`/`competition`/`event`/`reject` in
+`scripts/identity_mapping.py`, all implemented.
 
 API-Football currently acts as the reference namespace where it has reliable
 coverage. Its IDs are strong evidence, not absolute truth. Uncovered fixtures
@@ -468,10 +472,10 @@ list unresolved/suspect mappings
   -> safely reprocess affected observations
 ```
 
-`scripts/identity_mapping.py` implements listing and manual verification for
-team, competition, and event mappings (`suspects`, `team`, `competition`, and
-`event`, each recorded with actor-less but timestamped provenance). See §21 for
-the remaining `reject` lifecycle gap.
+`scripts/identity_mapping.py` implements listing, manual verification, and
+rejection for team, competition, and event mappings (`suspects`, `team`,
+`competition`, `event`, and `reject`, each recorded with actor-less but
+timestamped provenance).
 
 Alerts distinguish provider outage, parser breakage, identity degradation, and
 analysis failure.
@@ -506,9 +510,9 @@ analysis failure.
 
 ### Recently completed
 
-- CLI for listing and verifying (team/competition) `SUSPECT`/`UNVERIFIED`
-  mappings (`scripts/identity_mapping.py`) — `suspects`/`team`/`competition`
-  only; no `reject` verb yet (see below);
+- CLI for listing, verifying, and rejecting (team/competition/event)
+  `SUSPECT`/`UNVERIFIED` mappings (`scripts/identity_mapping.py`) —
+  `suspects`/`team`/`competition`/`event`/`reject`;
 - countryless-competition ambiguity guard: a name shared by several
   countries is never chosen between by dictionary/query order, and is
   logged distinctly when it happens (`fixture_catalog.competition.
@@ -552,26 +556,30 @@ analysis failure.
   minute "when logged on" trigger, which — unlike a "run whether logged
   on or not" trigger — needed no elevated rights in this environment,
   despite an earlier attempt at Task Scheduler registration having
-  failed with Access Denied.
+  failed with Access Denied;
+- `reject`/retire verb for `scripts/identity_mapping.py`: `REJECTED`
+  (migration 21 adds `rejection_reason`/`rejected_at` to all five
+  mapping tables) is a terminal, human-set-only state distinct from
+  `SUSPECT`; every write path that could otherwise relearn a rejected
+  mapping now refuses to touch it, the same way each already refused to
+  touch `SUSPECT`; `scripts/audit_identity.py` reports rejected mappings
+  under their own `rejected-<table>` finding (`WARNING`, a closed
+  decision, not an open one).
 
 ### Next priorities
 
-1. define runtime semantics and then add a `reject`/retire verb for
-   `scripts/identity_mapping.py` — trust
-   state `REJECTED` is named in §11 but has no write path anywhere yet;
-   ingestion must not immediately relearn a rejected key;
-2. garbage-collect orphaned provisional entities: a team/competition
+1. garbage-collect orphaned provisional entities: a team/competition
    created under `ambiguous`/`fuzzy` resolution can become referenced by
    zero events after a later merge/split (observed live while splitting
    Atletico Madrid's reserve team back out, and again in the alias-
    precedence repair above); the audit now reports these, but deletion
    remains deliberately manual;
-3. provider health/freshness reporting;
-4. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+2. provider health/freshness reporting;
+3. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
    hardcoded source dict; adding one requires a code change and deploy,
    and the only provenance is the git commit, not a queryable audit
    trail;
-5. backup rotation, restore drills, and an explicit retention policy —
+4. backup rotation, restore drills, and an explicit retention policy —
    `database_backup.py` itself is done and used routinely; rotation
    (pruning old backups) and periodic restore drills are not.
 

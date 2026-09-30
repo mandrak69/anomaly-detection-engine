@@ -49,6 +49,31 @@ def test_audit_reports_orphans_duplicates_and_suspect_mappings(tmp_path):
     assert "unresolved-source_team_mappings" in codes
 
 
+def test_audit_reports_rejected_mappings_as_warning_not_unresolved(tmp_path):
+    _, connection = _database(tmp_path)
+    connection.executescript(
+        """
+        INSERT INTO teams (id, canonical_name, sport, identity_status)
+        VALUES ('home', 'Home', 'football', 'VERIFIED'),
+               ('away', 'Away', 'football', 'VERIFIED');
+        INSERT INTO source_team_mappings
+            (source, sport, source_team_name, competition_id, team_id,
+             resolution_method, confidence, created_at, trust_state, resolver_version,
+             rejection_reason, rejected_at)
+        VALUES ('book', 'football', 'Wrong Name', '', 'home',
+                'fuzzy', 87.0, '2026-09-25T18:00:00+00:00', 'REJECTED', 1,
+                'wrong club entirely', '2026-09-26T09:00:00+00:00');
+        """
+    )
+    connection.commit()
+
+    findings = {finding.code: finding for finding in audit_identity(connection)}
+
+    assert "rejected-source_team_mappings" in findings
+    assert findings["rejected-source_team_mappings"].severity == "WARNING"
+    assert "unresolved-source_team_mappings" not in findings
+
+
 def test_cli_opens_database_read_only(tmp_path, capsys):
     path, connection = _database(tmp_path)
     connection.close()

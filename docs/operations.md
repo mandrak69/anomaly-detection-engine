@@ -127,9 +127,32 @@ The raw names are required because a provider ID alone cannot detect later ID
 recycling or identity drift. Manual event verification can deliberately replace
 a `SUSPECT` mapping, so it should only be run after reviewing the source payload.
 
-There is intentionally no `reject` command yet. A rejected mapping needs a
-defined runtime policy preventing ordinary ingestion from immediately learning
-it again; adding only a new label would not complete that lifecycle.
+Mark a mapping `REJECTED` with an audit reason -- a terminal "a human looked at
+this and it was wrong", distinct from `SUSPECT`'s "unresolved, needs a look".
+Every write path that could otherwise relearn the same wrong mapping already
+refuses to touch a `REJECTED` row the same way it already refuses to touch
+`SUSPECT`; the only way past it is `team`/`competition`/`event` above, the same
+escape hatch that already clears `SUSPECT`:
+
+```bash
+python scripts/identity_mapping.py reject \
+  --provider mozzart --sport football --kind team \
+  --source-team-id 12345 \
+  --reason "recycled provider id, now a different club"
+
+python scripts/identity_mapping.py reject \
+  --provider mozzart --kind event \
+  --source-event-id mz-98765 --reason "wrong fixture entirely"
+```
+
+`--kind` selects the mapping shape (`team`/`competition`/`event`); `--sport` is
+required for `team`/`competition`, `--source-event-id` for `event`. At least one
+of `--source-name`/`--source-team-id` (team) or `--source-name`/
+`--source-competition-id` (competition) must identify an *existing* mapping --
+rejecting a key that was never resolved raises rather than silently doing
+nothing. `scripts/audit_identity.py` reports rejected mappings under their own
+`rejected-<table>` finding (always `WARNING`, since it is a closed decision, not
+an open one) so a rejection stays visible rather than quietly disappearing.
 
 ## After an identity change
 

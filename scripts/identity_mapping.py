@@ -43,6 +43,18 @@ Usage:
         --home-name Arsenal --away-name Chelsea \
         --competition-name "England - Premier League" --country England
 
+    # Mark a mapping REJECTED (a human decided it is wrong, not just
+    # unresolved) so ingestion cannot silently relearn it -- --kind
+    # selects which mapping shape; --sport is required for team/
+    # competition, --source-event-id for event.
+    python scripts/identity_mapping.py reject \
+        --provider mozzart --sport football --kind team \
+        --source-team-id 12345 \
+        --reason "recycled provider id, now a different club"
+    python scripts/identity_mapping.py reject \
+        --provider mozzart --kind event \
+        --source-event-id mz-98765 --reason "wrong fixture entirely"
+
 By default this opens whatever DB_PATH (or its default) load_config()
 resolves to -- the same database app.py/poller.py write to. Pass
 --db-path to point at a specific file instead. --competition-id/
@@ -120,6 +132,48 @@ def _cmd_event(args: argparse.Namespace) -> None:
         f"Verified event: {args.provider!r}/{args.sport!r} "
         f"source_event_id={args.source_event_id!r} -> {args.event_id}"
     )
+
+
+def _cmd_reject(args: argparse.Namespace) -> None:
+    catalog, _ = _open_catalog(args.provider, args.db_path)
+    if args.kind in ("team", "competition") and not args.sport:
+        raise ValueError(f"--sport is required for --kind {args.kind}")
+
+    if args.kind == "team":
+        catalog.reject_team_mapping(
+            sport=args.sport,
+            source_name=args.source_name,
+            competition_id=args.competition_id,
+            source_team_id=args.source_team_id,
+            reason=args.reason,
+        )
+        print(
+            f"Rejected: {args.provider!r}/{args.sport!r} team mapping "
+            f"source_name={args.source_name!r} source_team_id={args.source_team_id!r}"
+        )
+    elif args.kind == "competition":
+        catalog.reject_competition_mapping(
+            sport=args.sport,
+            source_name=args.source_name,
+            country=args.country,
+            source_competition_id=args.source_competition_id,
+            reason=args.reason,
+        )
+        print(
+            f"Rejected: {args.provider!r}/{args.sport!r} competition mapping "
+            f"source_name={args.source_name!r} "
+            f"source_competition_id={args.source_competition_id!r}"
+        )
+    else:
+        if not args.source_event_id:
+            raise ValueError("--source-event-id is required for --kind event")
+        catalog.reject_event_mapping(
+            source_event_id=args.source_event_id, reason=args.reason
+        )
+        print(
+            f"Rejected: {args.provider!r} event mapping "
+            f"source_event_id={args.source_event_id!r}"
+        )
 
 
 def _print_rows(title: str, rows: list[sqlite3.Row]) -> None:
@@ -250,6 +304,31 @@ def main(argv: list[str] | None = None) -> None:
     event_parser.add_argument("--away-source-team-id", default=None)
     event_parser.add_argument("--source-competition-id", default=None)
     event_parser.set_defaults(func=_cmd_event)
+
+    reject_parser = subparsers.add_parser(
+        "reject", help="Mark a team/competition/event mapping REJECTED with an audit reason"
+    )
+    reject_parser.add_argument("--provider", required=True)
+    reject_parser.add_argument("--kind", required=True, choices=["team", "competition", "event"])
+    reject_parser.add_argument(
+        "--sport", default=None, help="Required for --kind team/competition"
+    )
+    reject_parser.add_argument(
+        "--source-name", default=None, help="team/competition: the raw name to reject"
+    )
+    reject_parser.add_argument(
+        "--competition-id", default=None, help="team: scope the name-keyed row by competition"
+    )
+    reject_parser.add_argument(
+        "--country", default=None, help="competition: scope the name-keyed row by country"
+    )
+    reject_parser.add_argument("--source-team-id", default=None)
+    reject_parser.add_argument("--source-competition-id", default=None)
+    reject_parser.add_argument(
+        "--source-event-id", default=None, help="Required for --kind event"
+    )
+    reject_parser.add_argument("--reason", required=True, help="Human-audit reason, required")
+    reject_parser.set_defaults(func=_cmd_reject)
 
     suspects_parser = subparsers.add_parser(
         "suspects", help="List every SUSPECT/CONFLICT mapping in the database"

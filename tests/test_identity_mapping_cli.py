@@ -230,3 +230,108 @@ def test_event_command_rejects_unknown_canonical_event(tmp_path):
                 "--competition-name", "League",
             ]
         )
+
+
+def test_reject_command_marks_a_team_mapping_rejected(tmp_path, capsys):
+    db_path = make_db(tmp_path)
+    main(
+        [
+            "--db-path", str(db_path), "team",
+            "--provider", "mozzart", "--sport", "football",
+            "--source-name", "Westham Untd", "--team-id", "team-1",
+            "--source-team-id", "99999",
+        ]
+    )
+    capsys.readouterr()
+
+    main(
+        [
+            "--db-path", str(db_path), "reject",
+            "--provider", "mozzart", "--kind", "team", "--sport", "football",
+            "--source-name", "Westham Untd", "--source-team-id", "99999",
+            "--reason", "recycled id, now a different club",
+        ]
+    )
+
+    assert "Rejected" in capsys.readouterr().out
+
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    mapping = connection.execute(
+        "SELECT trust_state, rejection_reason FROM source_team_mappings "
+        "WHERE source='mozzart' AND source_team_name='Westham Untd'"
+    ).fetchone()
+    assert mapping["trust_state"] == "REJECTED"
+    assert mapping["rejection_reason"] == "recycled id, now a different club"
+
+    id_mapping = connection.execute(
+        "SELECT trust_state, rejection_reason FROM source_team_id_mappings "
+        "WHERE source='mozzart' AND source_team_id='99999'"
+    ).fetchone()
+    assert id_mapping["trust_state"] == "REJECTED"
+    assert id_mapping["rejection_reason"] == "recycled id, now a different club"
+
+
+def test_reject_command_marks_an_event_mapping_rejected(tmp_path, capsys):
+    db_path = make_db(tmp_path)
+    add_event(db_path)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        INSERT INTO source_event_mappings
+            (source, source_event_id, event_id, trust_state, resolution_method,
+             resolver_version, sport)
+        VALUES ('mozzart', 'mz-1', 'event-1', 'UNVERIFIED', 'fuzzy', 1, 'football')
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    main(
+        [
+            "--db-path", str(db_path), "reject",
+            "--provider", "mozzart", "--kind", "event",
+            "--source-event-id", "mz-1", "--reason", "wrong fixture",
+        ]
+    )
+
+    assert "Rejected" in capsys.readouterr().out
+
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    mapping = connection.execute(
+        "SELECT trust_state, rejection_reason FROM source_event_mappings "
+        "WHERE source='mozzart' AND source_event_id='mz-1'"
+    ).fetchone()
+    assert mapping["trust_state"] == "REJECTED"
+    assert mapping["rejection_reason"] == "wrong fixture"
+
+
+def test_reject_command_requires_sport_for_team_kind(tmp_path):
+    db_path = make_db(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--db-path", str(db_path), "reject",
+                "--provider", "mozzart", "--kind", "team",
+                "--source-name", "Ghost FC", "--reason", "x",
+            ]
+        )
+
+    assert "--sport is required" in str(exc_info.value)
+
+
+def test_reject_command_rejects_a_mapping_that_was_never_resolved(tmp_path):
+    db_path = make_db(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--db-path", str(db_path), "reject",
+                "--provider", "mozzart", "--kind", "team", "--sport", "football",
+                "--source-name", "Never Seen FC", "--reason", "x",
+            ]
+        )
+
+    assert "no mapping found" in str(exc_info.value)
