@@ -522,23 +522,53 @@ analysis failure.
 - read-only `scripts/audit_identity.py` for duplicate, orphan, conflict, trust,
   and reference-ID checks;
 - verified `scripts/database_backup.py` online-backup/checksum workflow;
-- manual provider fixture-ID verification with a compatibility snapshot.
+- manual provider fixture-ID verification with a compatibility snapshot;
+- alias-vs-exact-match precedence fix in `TeamNormalizer.normalize()`: a
+  curated `ALIASES`/`LEAGUE_ALIASES` entry now wins even when a stale,
+  un-aliased canonical row already exists under the raw spelling (it
+  previously never fired in that case, silently splitting the same real
+  team/competition across canonical rows forever) — matches the
+  documented evidence order in §12, where alias already ranked above
+  exact match on paper;
+- `scripts/merge_duplicate_identities.py`: repairs the split canonical
+  rows/events the bug above already produced (rename, merge, and split
+  operations, all audited and integrity-checked before and after); found
+  27 split team pairs and 12 split competitions live by systematically
+  diffing every event pair sharing (sport, competition_id, start_time)
+  plus one identical team, not by chasing individual match reports one
+  at a time; correctly left 4 name-similar-but-distinct pairs alone
+  (women's sides, an unrelated reserve-team coincidence);
+- corrected a wrong existing alias ("Serija A" → "Italy - Serie A"):
+  Mozzart and Meridianbet each call a *different* real competition
+  "Serija A" in Serbian (Brazil's vs Italy's) — a single global alias
+  can't express that, so the fix is the per-provider manual pin
+  (`verify_competition_mapping`), not a name-table entry.
 
 ### Next priorities
 
-1. define runtime semantics and then add a `reject`/retire verb for
+1. scheduled polling with overlap, retry, and back-pressure controls —
+   moved up: the background poller was observed live going silent for
+   24+ hours (process still running, no new log lines) with nothing to
+   detect or recover it short of a human noticing and restarting it by
+   hand;
+2. define runtime semantics and then add a `reject`/retire verb for
    `scripts/identity_mapping.py` — trust
    state `REJECTED` is named in §11 but has no write path anywhere yet;
    ingestion must not immediately relearn a rejected key;
-2. garbage-collect orphaned provisional entities: a team/competition
+3. garbage-collect orphaned provisional entities: a team/competition
    created under `ambiguous`/`fuzzy` resolution can become referenced by
    zero events after a later merge/split (observed live while splitting
-   Atletico Madrid's reserve team back out); the audit now reports these,
-   but deletion remains deliberately manual;
-3. provider health/freshness reporting;
-4. auditable persistent aliases;
-5. scheduled polling with overlap, retry, and back-pressure controls;
-6. backup rotation, restore drills, and an explicit retention policy.
+   Atletico Madrid's reserve team back out, and again in the alias-
+   precedence repair above); the audit now reports these, but deletion
+   remains deliberately manual;
+4. provider health/freshness reporting;
+5. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+   hardcoded source dict; adding one requires a code change and deploy,
+   and the only provenance is the git commit, not a queryable audit
+   trail;
+6. backup rotation, restore drills, and an explicit retention policy —
+   `database_backup.py` itself is done and used routinely; rotation
+   (pruning old backups) and periodic restore drills are not.
 
 ### Later
 
