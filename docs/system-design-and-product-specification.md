@@ -542,31 +542,36 @@ analysis failure.
   Mozzart and Meridianbet each call a *different* real competition
   "Serija A" in Serbian (Brazil's vs Italy's) — a single global alias
   can't express that, so the fix is the per-provider manual pin
-  (`verify_competition_mapping`), not a name-table entry.
+  (`verify_competition_mapping`), not a name-table entry;
+- poller reliability: `start_background_poller.ps1` now writes
+  `poller.pid` and validates it by command line, not just process name,
+  before `-SkipIfRunning` treats one as already running; new
+  `scripts/poller_watchdog.ps1` distinguishes "alive" from "actually
+  making progress" (log-staleness, not just Get-Process) and restarts a
+  crashed *or* hung poller; registered under Task Scheduler on a 15-
+  minute "when logged on" trigger, which — unlike a "run whether logged
+  on or not" trigger — needed no elevated rights in this environment,
+  despite an earlier attempt at Task Scheduler registration having
+  failed with Access Denied.
 
 ### Next priorities
 
-1. scheduled polling with overlap, retry, and back-pressure controls —
-   moved up: the background poller was observed live going silent for
-   24+ hours (process still running, no new log lines) with nothing to
-   detect or recover it short of a human noticing and restarting it by
-   hand;
-2. define runtime semantics and then add a `reject`/retire verb for
+1. define runtime semantics and then add a `reject`/retire verb for
    `scripts/identity_mapping.py` — trust
    state `REJECTED` is named in §11 but has no write path anywhere yet;
    ingestion must not immediately relearn a rejected key;
-3. garbage-collect orphaned provisional entities: a team/competition
+2. garbage-collect orphaned provisional entities: a team/competition
    created under `ambiguous`/`fuzzy` resolution can become referenced by
    zero events after a later merge/split (observed live while splitting
    Atletico Madrid's reserve team back out, and again in the alias-
    precedence repair above); the audit now reports these, but deletion
    remains deliberately manual;
-4. provider health/freshness reporting;
-5. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+3. provider health/freshness reporting;
+4. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
    hardcoded source dict; adding one requires a code change and deploy,
    and the only provenance is the git commit, not a queryable audit
    trail;
-6. backup rotation, restore drills, and an explicit retention policy —
+5. backup rotation, restore drills, and an explicit retention policy —
    `database_backup.py` itself is done and used routinely; rotation
    (pruning old backups) and periodic restore drills are not.
 

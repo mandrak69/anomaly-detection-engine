@@ -18,9 +18,13 @@
     mechanism at all, which is why it's worth installing regardless.
 
     Needs no elevated/admin rights -- the Startup folder is a plain
-    per-user directory (shell:startup), unlike Task Scheduler
-    registration, which this project's own tooling has hit Access
-    Denied on in this environment.
+    per-user directory (shell:startup). Task Scheduler registration was
+    also assumed to need elevated rights after an earlier attempt hit
+    Access Denied, but that turned out to be specific to a "run whether
+    logged on or not" trigger; a plain "when logged on" trigger (see
+    scripts/poller_watchdog.ps1's own docs for the working registration
+    command) needs no elevation either, and covers a hang/crash without
+    waiting for the next login the way this shortcut does.
 
     Idempotent: re-running this replaces the shortcut in place rather
     than accumulating duplicates.

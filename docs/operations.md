@@ -141,6 +141,50 @@ it again; adding only a new label would not complete that lifecycle.
 6. Run the repair as a reviewed script/transaction, never as ad-hoc production
    SQL without a saved copy and explicit before/after counts.
 
+## Poller reliability
+
+The background poller (`scripts/start_background_poller.ps1`) is a
+long-running pythonw.exe process; Windows has been observed freezing it
+outright (AppHangXProcB1, or idle-throttling "Efficiency Mode") for 24+
+hours with the process still showing as alive and nothing to detect it.
+
+Start it (writes `poller.pid`, checked by later `-SkipIfRunning` calls
+against the process's own command line, not just its name):
+
+```powershell
+.\scripts\start_background_poller.ps1
+```
+
+Check whether it is both running and still making progress, and
+auto-restart it if not (crashed: restarted immediately; alive but silent
+for longer than `-StalenessSeconds`, default 4h: killed then restarted):
+
+```powershell
+.\scripts\poller_watchdog.ps1
+```
+
+Register it to run automatically every 15 minutes (no elevated rights
+needed for this "when logged on" trigger; the mode this project's own
+tooling previously hit Access Denied on was a different, "run whether
+logged on or not" trigger):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<repo>\scripts\poller_watchdog.ps1"'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 3650)
+Register-ScheduledTask -TaskName 'AnomalyDetectionEnginePollerWatchdog' -Action $action -Trigger $trigger
+```
+
+`New-TimeSpan -Days 3650`, not `[TimeSpan]::MaxValue` -- the latter
+serializes to a duration outside what the Task Scheduler XML schema
+accepts and the registration fails.
+
+Pair this with `scripts/install_startup_shortcut.ps1` (every-login
+recovery) -- the watchdog task covers a hang or crash mid-session, the
+startup shortcut covers whatever happens between the watchdog's own
+15-minute checks and a reboot/logout.
+
 ## Retention
 
 Preview retention before deleting history:
