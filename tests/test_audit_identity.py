@@ -46,7 +46,36 @@ def test_audit_reports_orphans_duplicates_and_suspect_mappings(tmp_path):
     assert "duplicate-canonical-events" in codes
     assert "orphan-provisional-teams" in codes
     assert "orphan-provisional-competitions" in codes
+    assert "gc-safe-provisional-teams" in codes
+    assert "gc-safe-provisional-competitions" in codes
     assert "unresolved-source_team_mappings" in codes
+
+
+def test_audit_distinguishes_protected_orphan_from_gc_safe_orphan(tmp_path):
+    _, connection = _database(tmp_path)
+    connection.executescript(
+        """
+        INSERT INTO teams (id, canonical_name, sport, identity_status)
+        VALUES ('protected', 'Protected Team', 'football', 'PROVISIONAL');
+        INSERT INTO source_team_mappings
+            (source, sport, source_team_name, competition_id, team_id,
+             resolution_method, confidence, created_at, trust_state, resolver_version,
+             rejection_reason, rejected_at)
+        VALUES ('book', 'football', 'Wrong Team', '', 'protected',
+                'fuzzy', 87.0, '2026-09-25T18:00:00+00:00', 'REJECTED', 1,
+                'human rejected mapping', '2026-09-26T09:00:00+00:00');
+        """
+    )
+    connection.commit()
+
+    findings = {finding.code: finding for finding in audit_identity(connection)}
+
+    assert "protected-orphan-teams" in findings
+    assert "gc-safe-provisional-teams" not in findings
+    evidence = findings["protected-orphan-teams"].evidence
+    assert len(evidence) == 1
+    assert evidence[0]["entity_id"] == "protected"
+    assert evidence[0]["protection_reasons"] == ["rejected-mapping"]
 
 
 def test_audit_reports_rejected_mappings_as_warning_not_unresolved(tmp_path):

@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from anomaly_detection_engine.config import load_config, load_dotenv
+from anomaly_detection_engine.identity_cleanup import (
+    find_identity_cleanup_candidates,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,34 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 
 def _rows(connection: sqlite3.Connection, sql: str) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(sql).fetchall()]
+
+
+def _supports_identity_cleanup_classification(connection: sqlite3.Connection) -> bool:
+    required_tables = (
+        "teams",
+        "competitions",
+        "events",
+        "team_competitions",
+        "source_team_mappings",
+        "source_team_id_mappings",
+        "source_competition_mappings",
+        "source_competition_id_mappings",
+    )
+    if not all(_table_exists(connection, table) for table in required_tables):
+        return False
+
+    required_columns = {
+        "teams": {"identity_status", "reference_provider", "reference_provider_id"},
+        "competitions": {"identity_status", "reference_provider", "reference_provider_id"},
+        "source_team_mappings": {"trust_state", "competition_id", "team_id"},
+        "source_team_id_mappings": {"trust_state", "team_id"},
+        "source_competition_mappings": {"trust_state", "competition_id"},
+        "source_competition_id_mappings": {"trust_state", "competition_id"},
+    }
+    return all(
+        columns <= _columns(connection, table)
+        for table, columns in required_columns.items()
+    )
 
 
 def audit_identity(connection: sqlite3.Connection) -> list[Finding]:
@@ -119,6 +150,54 @@ def audit_identity(connection: sqlite3.Connection) -> list[Finding]:
                     orphan_competitions,
                 )
             )
+
+    # "Orphan" and "garbage" are intentionally different concepts. A
+    # provisional entity with no events can still carry durable identity
+    # knowledge through VERIFIED/SUSPECT/REJECTED mappings. Only classify GC
+    # safety when the database has the full contextual-identity schema; this
+    # audit is read-only and may also be pointed at an older pre-migration DB.
+    if _supports_identity_cleanup_classification(connection):
+        cleanup_candidates = find_identity_cleanup_candidates(connection)
+        classifications = (
+            (
+                "team",
+                "gc-safe-provisional-teams",
+                "protected-orphan-teams",
+                "Orphan provisional teams can be safely garbage-collected.",
+                "Orphan provisional teams are protected by durable identity knowledge.",
+            ),
+            (
+                "competition",
+                "gc-safe-provisional-competitions",
+                "protected-orphan-competitions",
+                "Orphan provisional competitions can be safely garbage-collected.",
+                "Orphan provisional competitions are protected by durable identity knowledge.",
+            ),
+        )
+        for (
+            entity_type, safe_code, protected_code, safe_message, protected_message
+        ) in classifications:
+            matching = [
+                candidate
+                for candidate in cleanup_candidates
+                if candidate.entity_type == entity_type
+            ]
+            safe = [
+                candidate.to_evidence()
+                for candidate in matching
+                if candidate.safe_to_delete
+            ]
+            protected = [
+                candidate.to_evidence()
+                for candidate in matching
+                if not candidate.safe_to_delete
+            ]
+            if safe:
+                findings.append(Finding("INFO", safe_code, safe_message, safe))
+            if protected:
+                findings.append(
+                    Finding("WARNING", protected_code, protected_message, protected)
+                )
 
     for table in ("teams", "competitions", "events"):
         if not _table_exists(connection, table) or "identity_status" not in _columns(
