@@ -592,11 +592,34 @@ analysis failure.
 
 ### Next priorities
 
-1. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+1. bare generic competition names already collapsing multiple
+   countries' competitions together — found live while fixing the
+   Manchester United/City fixtures above, by the same (sport, kickoff,
+   both-team-name-similarity) scan, widened to the whole database: a
+   name like "Prva Liga"/"Liga 2"/"Kup"/"Superliga"/"Premier Divizija"
+   (no country qualifier, from a provider that does not report
+   country) exact-matches across completely unrelated countries, so
+   over 200 competition-name pairs and 1000+ event instances currently
+   collide this way -- e.g. a single "Prva Liga" row already mixes
+   Czech, Austrian, Bulgarian, Uruguayan, and Serbian fixtures, and
+   "Spanija 1"/"Spanija 2" already mixes La Liga with Primera RFEF (a
+   different tier). At least one pair's canonical names and actual
+   team rosters were found already *crossed* ("Liga Profesional" held
+   Nigerian teams, "Nigerija 1" held Argentine ones) -- confirming that
+   "same team_ids for the sampled fixtures" is not sufficient evidence
+   of safety when either side might already be an internally-mixed
+   bag from this same root cause. Needs a fundamentally different fix
+   (most plausibly: scoping these bare names by country the way
+   Meridianbet's own sightings already do, rather than a bulk
+   name-similarity merge) and cannot be safely automated at this scale
+   without that -- each of the handful of pairs fixed so far
+   (Manchester's fixtures, the EPL/Brentford/Tottenham batches) was
+   individually verified against real rosters first;
+2. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
    hardcoded source dict; adding one requires a code change and deploy,
    and the only provenance is the git commit, not a queryable audit
    trail;
-2. backup rotation, restore drills, and an explicit retention policy —
+3. backup rotation, restore drills, and an explicit retention policy —
    `database_backup.py` itself is done and used routinely; rotation
    (pruning old backups) and periodic restore drills are not.
 
