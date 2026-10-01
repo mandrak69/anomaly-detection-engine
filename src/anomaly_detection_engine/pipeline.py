@@ -184,6 +184,13 @@ ALIASES = {
     "Chelsea": "Chelsea FC",
     "Feyenoord": "Feyenoord Rotterdam",
     "Bournemouth": "AFC Bournemouth",
+    # Women's-side short names found while tracking down the same
+    # Manchester fixture split as the LEAGUE_ALIASES entries below --
+    # Mozzart's own short spelling for several clubs' women's sides.
+    "Manchester City W": "Manchester City WFC (W)",
+    "Manchester United W": "Manchester United WFC (W)",
+    "West Ham W": "West Ham United FC (W)",
+    "Real Madrid W": "Real Madrid (W)",
 }
 
 # Word-level, unlike ALIASES above: ALIASES only ever matches a raw name
@@ -259,6 +266,16 @@ LEAGUE_ALIASES = {
     "Liga nacija (B) - Evropa": "UEFA Nations League",
     "Liga nacija (C) - Evropa": "UEFA Nations League",
     "Liga nacija (D) - Evropa": "UEFA Nations League",
+    # Found while tracking down why a Manchester United/City fixture's
+    # odds split across providers -- verified by the actual rosters on
+    # both sides (same real clubs, same kickoffs) before merging the
+    # live data these produced.
+    "Evropa - Liga Šampiona": "Liga Šampiona",
+    "Engleska - EFL Kup": "EFL Kup",
+    "Engleska Liga Kup W": "WSL Cup",
+    "FA Ženska Superliga": "Engleska - FA Ženska Superliga",
+    "Engleska 1 W": "Engleska - FA Ženska Superliga",
+    "Liga šampiona W": "Evropa - Liga Šampiona Žene",
 }
 
 # Demo dataset uses fixed calendar timestamps rather than live polling, so
