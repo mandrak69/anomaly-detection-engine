@@ -564,22 +564,30 @@ analysis failure.
   mapping now refuses to touch it, the same way each already refused to
   touch `SUSPECT`; `scripts/audit_identity.py` reports rejected mappings
   under their own `rejected-<table>` finding (`WARNING`, a closed
-  decision, not an open one).
+  decision, not an open one);
+- garbage collection for orphaned provisional entities
+  (`src/anomaly_detection_engine/identity_cleanup.py`,
+  `scripts/cleanup_identity.py`): "orphan" (zero events) and
+  "GC-safe" (orphan *and* no durable identity knowledge) are kept
+  distinct — `VERIFIED`/`SUSPECT`/`REJECTED` mappings and an unknown
+  future trust state all protect an entity even with zero events; only
+  GC-safe entities, their `UNVERIFIED` mappings, and their
+  `team_competitions` rows are deleted, inside one transaction that
+  recomputes the candidate set fresh so concurrent ingestion can't
+  make a previously-safe entity meaningful mid-cleanup. Dry-run by
+  default; `scripts/audit_identity.py` classifies the same orphans
+  into `gc-safe-<table>`/`protected-orphan-<table>` so the audit and
+  the cleanup tool never disagree about what is actually safe to
+  remove.
 
 ### Next priorities
 
-1. garbage-collect orphaned provisional entities: a team/competition
-   created under `ambiguous`/`fuzzy` resolution can become referenced by
-   zero events after a later merge/split (observed live while splitting
-   Atletico Madrid's reserve team back out, and again in the alias-
-   precedence repair above); the audit now reports these, but deletion
-   remains deliberately manual;
-2. provider health/freshness reporting;
-3. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+1. provider health/freshness reporting;
+2. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
    hardcoded source dict; adding one requires a code change and deploy,
    and the only provenance is the git commit, not a queryable audit
    trail;
-4. backup rotation, restore drills, and an explicit retention policy —
+3. backup rotation, restore drills, and an explicit retention policy —
    `database_backup.py` itself is done and used routinely; rotation
    (pruning old backups) and periodic restore drills are not.
 
@@ -616,6 +624,7 @@ through an ADR or an update to this specification.
 - [League identity decisions](league-identity-mapping-decisions.md)
 - [League names by source](league-names-by-source.md)
 - [Operations runbook](operations.md)
+- [Identity garbage collection](identity-garbage-collection.md)
 
 ## 24. Definition of done for behaviour changes
 
