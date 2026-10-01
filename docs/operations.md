@@ -208,6 +208,34 @@ recovery) -- the watchdog task covers a hang or crash mid-session, the
 startup shortcut covers whatever happens between the watchdog's own
 15-minute checks and a reboot/logout.
 
+## Provider health and data freshness
+
+A collector reporting `SUCCESS` every cycle does not mean its data is
+current -- a manual-capture source (`mozzart-file:*`, `meridianbet-file:*`)
+reports success even when no new HAR drop file exists at all, since
+`collect()` returns an empty result rather than an error. Check how long
+ago each source last actually produced fresh data, not just ran without
+raising:
+
+```bash
+python scripts/provider_health.py
+python scripts/provider_health.py --stale-after-hours 6
+python scripts/provider_health.py --json
+python scripts/provider_health.py --fail-on-stale --fail-on-failures
+```
+
+Read-only (`mode=ro` + `query_only`), reports per source: last run, last
+non-failed run, last run that actually produced fresh data, the current
+consecutive-failure streak, and run/failure counts over `--window-hours`
+(default 24h). `partial` counts as success here, not failure -- it is
+api-football's own normal state under this project's free-tier pagination
+cap, not an error condition. `--fail-on-stale`/`--fail-on-failures` exit 2,
+for wiring into a periodic check (see the poller watchdog above for the
+pattern) without needing to parse the text output.
+
+A STALE manual-capture source needs a fresh HAR import (see
+[Manual capture sources](manual-capture-sources.md)), not a code change.
+
 ## Retention
 
 Preview retention before deleting history:

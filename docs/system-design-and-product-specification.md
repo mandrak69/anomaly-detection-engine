@@ -578,16 +578,25 @@ analysis failure.
   default; `scripts/audit_identity.py` classifies the same orphans
   into `gc-safe-<table>`/`protected-orphan-<table>` so the audit and
   the cleanup tool never disagree about what is actually safe to
-  remove.
+  remove;
+- provider health/freshness reporting
+  (`src/anomaly_detection_engine/provider_health.py`,
+  `scripts/provider_health.py`): per-source last run, last non-failed
+  run, consecutive-failure streak, and run/failure counts over a
+  window are necessary but not sufficient -- a manual-capture source
+  reports `SUCCESS` on every cycle even when no new HAR drop file has
+  existed in days, so "last run that actually produced a non-empty
+  `source_payload`" is tracked as its own, separate signal from "last
+  run that didn't fail". `--fail-on-stale`/`--fail-on-failures` exit 2
+  for periodic unattended checks.
 
 ### Next priorities
 
-1. provider health/freshness reporting;
-2. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
+1. auditable persistent aliases — `ALIASES`/`LEAGUE_ALIASES` are still a
    hardcoded source dict; adding one requires a code change and deploy,
    and the only provenance is the git commit, not a queryable audit
    trail;
-3. backup rotation, restore drills, and an explicit retention policy —
+2. backup rotation, restore drills, and an explicit retention policy —
    `database_backup.py` itself is done and used routinely; rotation
    (pruning old backups) and periodic restore drills are not.
 
