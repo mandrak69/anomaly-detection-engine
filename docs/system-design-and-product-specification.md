@@ -608,7 +608,18 @@ analysis failure.
    Nigerian teams, "Nigerija 1" held Argentine ones) -- confirming that
    "same team_ids for the sampled fixtures" is not sufficient evidence
    of safety when either side might already be an internally-mixed
-   bag from this same root cause. Needs a fundamentally different fix
+   bag from this same root cause. Two more concrete instances turned
+   up while fixing an unrelated Meridianbet/the-odds-api gap (the
+   Athletic Club/Sport Recife Brazil Serie B fixture): a bare "Serija B"
+   row (no country) mixes Brazilian and Italian second-division clubs
+   under one competition_id, and a separate "Brazil - Serie A" row
+   (country correctly set to Brazil) has two Serie B clubs' fixtures
+   bleeding into it despite the country tag being right -- showing the
+   collision isn't only a missing-country problem; a correctly-tagged
+   row can still absorb the wrong league's events. Neither was touched
+   (left as-is pending the real fix below), only the individually
+   verified Brazil Serie B/Serija B pair actually asked about was
+   merged. Needs a fundamentally different fix
    (most plausibly: scoping these bare names by country the way
    Meridianbet's own sightings already do, rather than a bulk
    name-similarity merge) and cannot be safely automated at this scale
