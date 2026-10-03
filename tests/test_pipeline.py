@@ -16,6 +16,9 @@ from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.meridianbet_file_collector import (
     MeridianbetFileCollector,
 )
+from anomaly_detection_engine.collectors.meridianbet_http_collector import (
+    MeridianbetHttpCollector,
+)
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
@@ -1061,6 +1064,96 @@ def test_the_odds_api_supplemental_counts_a_failed_run_against_the_interval_too(
     collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
 
     assert not any(isinstance(c, TheOddsApiCollector) for c in collectors)
+
+
+def test_meridianbet_mode_http_adds_a_supplemental_collector(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_MODE", "http")
+
+    collectors = pipeline.build_collectors(config.load_config(), _run_repository())
+
+    meridianbet_http = [c for c in collectors if isinstance(c, MeridianbetHttpCollector)]
+    assert len(meridianbet_http) == 1
+    assert meridianbet_http[0].source == "meridianbet-http"
+
+
+def test_meridianbet_mode_http_ignores_any_capture_dir(monkeypatch, tmp_path):
+    # MERIDIANBET_MODE=http routes through the automatic collector only --
+    # a capture dir left set from a previous manual setup must not also
+    # start the manual-capture one at the same time.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("MERIDIANBET_MODE", "http")
+
+    collectors = pipeline.build_collectors(config.load_config(), _run_repository())
+
+    assert not any(isinstance(c, MeridianbetFileCollector) for c in collectors)
+    assert any(isinstance(c, MeridianbetHttpCollector) for c in collectors)
+
+
+def test_no_collector_run_repository_means_no_meridianbet_http_supplemental(monkeypatch):
+    # Same reasoning as the-odds-api's own equivalent test: with no
+    # repository there is nothing to rate-limit against, so this
+    # opt-in-by-mode collector is skipped entirely rather than firing on
+    # every poller restart with no memory of its last run.
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_MODE", "http")
+
+    collectors = pipeline.build_collectors(config.load_config())
+
+    assert not any(isinstance(c, MeridianbetHttpCollector) for c in collectors)
+
+
+def test_meridianbet_http_supplemental_is_skipped_within_the_min_interval(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_MODE", "http")
+    monkeypatch.setenv("MERIDIANBET_HTTP_MIN_INTERVAL_HOURS", "1")
+    repository = _run_repository()
+
+    now = datetime.fromisoformat("2026-09-15T12:00:00+00:00")
+    repository.save(
+        CollectorRun(
+            id="run-1",
+            source="meridianbet-http",
+            started_at=now - timedelta(minutes=30),
+            finished_at=now - timedelta(minutes=30),
+            status=CollectorRunStatus.SUCCESS,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            collector_version="0.1.0",
+        )
+    )
+
+    collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
+
+    assert not any(isinstance(c, MeridianbetHttpCollector) for c in collectors)
+
+
+def test_meridianbet_http_supplemental_resumes_once_the_min_interval_has_passed(monkeypatch):
+    _clear_source_env(monkeypatch)
+    monkeypatch.setenv("MERIDIANBET_MODE", "http")
+    monkeypatch.setenv("MERIDIANBET_HTTP_MIN_INTERVAL_HOURS", "1")
+    repository = _run_repository()
+
+    now = datetime.fromisoformat("2026-09-15T12:00:00+00:00")
+    repository.save(
+        CollectorRun(
+            id="run-1",
+            source="meridianbet-http",
+            started_at=now - timedelta(hours=2),
+            finished_at=now - timedelta(hours=2),
+            status=CollectorRunStatus.SUCCESS,
+            records_received=0,
+            records_accepted=0,
+            records_rejected=0,
+            collector_version="0.1.0",
+        )
+    )
+
+    collectors = pipeline.build_collectors(config.load_config(), repository, now=now)
+
+    assert any(isinstance(c, MeridianbetHttpCollector) for c in collectors)
 
 
 def test_run_detection_uses_wall_clock_time_for_any_non_demo_source(monkeypatch):

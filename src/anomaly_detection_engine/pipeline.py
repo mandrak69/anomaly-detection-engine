@@ -17,6 +17,9 @@ from anomaly_detection_engine.collectors.json_collector import JsonOddsCollector
 from anomaly_detection_engine.collectors.meridianbet_file_collector import (
     MeridianbetFileCollector,
 )
+from anomaly_detection_engine.collectors.meridianbet_http_collector import (
+    MeridianbetHttpCollector,
+)
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
@@ -384,22 +387,49 @@ def _mozzart_collectors(config: AppConfig) -> list[OddsCollector]:
 
 
 def _meridianbet_collector(config: AppConfig) -> OddsCollector | None:
-    """Builds the Meridianbet supplemental collector, if
-    MERIDIANBET_CAPTURE_DIR is set. Same opt-in, manual-capture-only
-    shape as Mozzart -- MERIDIANBET_MODE exists for the same reason
-    MOZZART_MODE does (an explicit, visible flag rather than an inferred
-    one), even though "manual" is the only mode implemented so far.
+    """Builds the Meridianbet manual-capture collector, if
+    MERIDIANBET_CAPTURE_DIR is set and MERIDIANBET_MODE=manual (the
+    default) -- same opt-in shape as Mozzart. MERIDIANBET_MODE="http"
+    instead routes through _meridianbet_http_collector below (automatic,
+    no capture dir needed); this function simply isn't active for that
+    mode, same as it already wasn't active with no capture dir set.
     """
-    if not config.meridianbet_capture_dir:
+    if not config.meridianbet_capture_dir or config.meridianbet_mode != "manual":
         return None
 
-    if config.meridianbet_mode != "manual":
-        raise ValueError(
-            f"MERIDIANBET_MODE={config.meridianbet_mode!r} is not supported -- "
-            "Meridianbet has no automatic mode yet."
-        )
-
     return MeridianbetFileCollector(Path(config.meridianbet_capture_dir))
+
+
+def _meridianbet_http_collector(
+    config: AppConfig,
+    collector_run_repository: CollectorRunRepository,
+    *,
+    now: datetime,
+) -> OddsCollector | None:
+    """Builds the automatic Meridianbet HTTP collector, if
+    MERIDIANBET_MODE=http -- no capture dir, no API key, just meridianbet.
+    rs's own anonymous-visitor endpoint (see MeridianbetHttpCollector).
+
+    Rate-limited against real elapsed time
+    (config.meridianbet_http_min_interval), the same shape
+    _the_odds_api_supplemental_collector already uses and for an
+    analogous reason: not a request quota here, but each poll pages
+    through the entire upcoming football schedule (~78 requests observed
+    live), which must not ride the same tight per-cycle cadence a
+    cheap single-request collector can. Checks the real collector_runs
+    history (find_latest_by_source, keyed on this collector's own
+    source, "meridianbet-http") so the gate survives a poller restart
+    correctly, same as the-odds-api's.
+    """
+    if config.meridianbet_mode != "http":
+        return None
+
+    collector = MeridianbetHttpCollector()
+    latest = collector_run_repository.find_latest_by_source(collector.source)
+    if latest is not None and now - latest.started_at < config.meridianbet_http_min_interval:
+        return None
+
+    return collector
 
 
 def _api_football_collector(config: AppConfig) -> OddsCollector | None:
@@ -467,15 +497,16 @@ def _supplemental_collectors(
     dir, an API key), so a run with none configured behaves exactly as
     before.
 
-    collector_run_repository defaults to None, which disables only
-    _the_odds_api_supplemental_collector's rate-limit *lookup* (it still
-    respects ODDS_API_KEY being unset or the-odds-api being primary) --
+    collector_run_repository defaults to None, which disables only the
+    rate-limited collectors' own lookups (_the_odds_api_supplemental_
+    collector, _meridianbet_http_collector) -- each still respects its
+    own opt-in condition (ODDS_API_KEY/MERIDIANBET_MODE) regardless;
     every real call site (run_ingestion) always supplies the real
     repository; None only matters for callers (older tests, a future
     one-off script) that have no CollectorRunRepository handy and don't
-    care about ODDS_API_KEY. now similarly defaults to real wall-clock
-    time via datetime.now(UTC) when not given, mirroring the demo-vs-real
-    "now" distinction already made elsewhere in this module.
+    need either rate-limited source. now similarly defaults to real
+    wall-clock time via datetime.now(UTC) when not given, mirroring the
+    demo-vs-real "now" distinction already made elsewhere in this module.
 
     Adding another source later is the same shape: its own
     _xxx_collector() helper reading its own AppConfig fields, appended
@@ -495,11 +526,19 @@ def _supplemental_collectors(
             collectors.append(api_football)
 
     if collector_run_repository is not None:
+        resolved_now = now if now is not None else datetime.now(UTC)
+
         odds_api = _the_odds_api_supplemental_collector(
-            config, collector_run_repository, now=now if now is not None else datetime.now(UTC)
+            config, collector_run_repository, now=resolved_now
         )
         if odds_api is not None:
             collectors.append(odds_api)
+
+        meridianbet_http = _meridianbet_http_collector(
+            config, collector_run_repository, now=resolved_now
+        )
+        if meridianbet_http is not None:
+            collectors.append(meridianbet_http)
 
     return collectors
 

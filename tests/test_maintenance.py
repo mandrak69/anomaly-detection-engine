@@ -36,6 +36,7 @@ def build_config(
         mozzart_prematch_capture_dir=None,
         meridianbet_capture_dir=None,
         meridianbet_mode="manual",
+        meridianbet_http_min_interval=timedelta(hours=1),
         min_value_gap_percent=Decimal("15.0"),
         signal_ttl=timedelta(hours=3),
         max_quote_age=timedelta(hours=1),

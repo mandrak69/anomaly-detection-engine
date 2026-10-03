@@ -521,11 +521,28 @@ endpoint, ...) only grows as more manual-capture sources get added.
 
 `MozzartFileCollector`/`MeridianbetFileCollector` exist because their
 sites sit behind Cloudflare bot-management (`cf_clearance`/`__cf_bm`
-cookies observed on the captured requests) -- Meridianbet's endpoint
-also requires an OAuth-style bearer token tied to a real logged-in
-session, not a plain API key. An automated fetch for either would mean
-scripting around that protection, which this project won't do
-regardless of technical feasibility. Neither has an automatic mode.
+cookies observed on the captured requests). Mozzart's own frontend has
+no server-rendered fallback and no automatic mode -- an automated fetch
+would mean scripting around Cloudflare's protection, which this project
+won't do regardless of technical feasibility.
+
+Meridianbet turned out different on closer investigation: its frontend
+is server-side-rendered (Angular Universal), so a plain, un-browsered
+HTTP GET to its own listing page already returns the full match/odds
+state embedded in the page, including a short-lived **anonymous**
+session token (`NEW_TOKEN.access_token`) -- the identical token the
+site's own server hands to *any* first-time visitor, logged in or not.
+Sending a realistic `User-Agent` (Cloudflare rejects urllib's default
+"Python-urllib/x.y" signature outright, HTTP 403/error 1010 -- not a
+challenge to pass, just honest self-identification) and that token as a
+Bearer header against Meridianbet's own listing endpoint
+(`online.meridianbet.rs/betshop/api/v1/offer/sport/{id}/leagues?page=N&
+time=ALL`, plus a required `Accept-Language` header) reproduces exactly
+what the site's own frontend already does -- no login, no forged
+credential, no bot-detection bypass. See `MeridianbetHttpCollector`
+(`MERIDIANBET_MODE=http`) below for the automatic collector built on
+this; `MeridianbetFileCollector` (`MERIDIANBET_MODE=manual`, the
+default) remains for a manual fallback.
 
 `TheOddsApiManualCollector` exists for a different reason: **even a
 source with a perfectly good API can need a manual fallback sometimes**
@@ -576,6 +593,18 @@ MOZZART_MODE=manual            the only value that exists today --
                                 silently assumed. Governs both
                                 MOZZART_CAPTURE_DIR and the optional
                                 MOZZART_PREMATCH_CAPTURE_DIR below.
+MERIDIANBET_MODE=manual|http   default "manual" (MeridianbetFileCollector,
+                                needs MERIDIANBET_CAPTURE_DIR). "http"
+                                instead uses MeridianbetHttpCollector --
+                                no capture dir needed, see above. Rate-
+                                limited against real elapsed time via
+                                MERIDIANBET_HTTP_MIN_INTERVAL_HOURS
+                                (default 1) -- unlike a cheap single-
+                                request collector, every poll pages
+                                through the entire upcoming schedule
+                                (~75+ sequential requests observed live),
+                                which must not ride the same tight
+                                per-cycle cadence as everyone else.
 ```
 
 `MOZZART_PREMATCH_CAPTURE_DIR` is an optional *second* drop directory for

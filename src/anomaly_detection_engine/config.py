@@ -24,6 +24,7 @@ DB_BUSY_TIMEOUT_SECONDS = 30
 DEFAULT_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 _VALID_ODDS_SOURCES = ("demo", "the-odds-api", "api-football")
+_VALID_MERIDIANBET_MODES = ("manual", "http")
 
 
 @dataclass(frozen=True)
@@ -85,9 +86,23 @@ class AppConfig:
     # of truth for phase.
     mozzart_prematch_capture_dir: str | None
     # Same manual-capture shape as mozzart_capture_dir/mozzart_mode above
-    # -- see pipeline._meridianbet_collector.
+    # -- see pipeline._meridianbet_collector. meridianbet_mode="http"
+    # instead selects pipeline._meridianbet_http_collector (automatic,
+    # no capture dir needed) -- see that function and
+    # collectors.meridianbet_http_collector for how.
     meridianbet_capture_dir: str | None
     meridianbet_mode: str
+    # Minimum wall-clock gap enforced between meridianbet-http polls --
+    # same rate-limiting shape as odds_api_min_interval below, but for a
+    # different reason: there's no request quota here (no API key, no
+    # paid tier), but each poll pages through the *entire* upcoming
+    # football schedule (confirmed live: 78 sequential requests, ~1900
+    # events) against an undocumented endpoint not published for bulk
+    # programmatic use -- riding the same per-cycle cadence as a cheap
+    # single-request collector (POLL_INTERVAL_SECONDS default: 5 minutes)
+    # would mean 78+ requests every 5 minutes, forever, unattended. Only
+    # consulted when meridianbet_mode == "http".
+    meridianbet_http_min_interval: timedelta
     min_value_gap_percent: Decimal
     signal_ttl: timedelta
     max_quote_age: timedelta
@@ -239,6 +254,13 @@ def load_config() -> AppConfig:
             f"ODDS_SOURCE={odds_source!r} must be one of {_VALID_ODDS_SOURCES}."
         )
 
+    meridianbet_mode = os.environ.get("MERIDIANBET_MODE", "manual")
+    if meridianbet_mode not in _VALID_MERIDIANBET_MODES:
+        raise ValueError(
+            f"MERIDIANBET_MODE={meridianbet_mode!r} must be one of "
+            f"{_VALID_MERIDIANBET_MODES}."
+        )
+
     return AppConfig(
         db_path=os.environ.get("DB_PATH", str(DEFAULT_DB_PATH)),
         odds_source=odds_source,
@@ -249,7 +271,10 @@ def load_config() -> AppConfig:
         mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
         mozzart_prematch_capture_dir=os.environ.get("MOZZART_PREMATCH_CAPTURE_DIR"),
         meridianbet_capture_dir=os.environ.get("MERIDIANBET_CAPTURE_DIR"),
-        meridianbet_mode=os.environ.get("MERIDIANBET_MODE", "manual"),
+        meridianbet_mode=meridianbet_mode,
+        meridianbet_http_min_interval=timedelta(
+            hours=float(os.environ.get("MERIDIANBET_HTTP_MIN_INTERVAL_HOURS", "1"))
+        ),
         min_value_gap_percent=Decimal(os.environ.get("MIN_VALUE_GAP_PERCENT", "15.0")),
         signal_ttl=timedelta(hours=float(os.environ.get("SIGNAL_TTL_HOURS", "3"))),
         max_quote_age=timedelta(minutes=float(os.environ.get("MAX_QUOTE_AGE_MINUTES", "60"))),

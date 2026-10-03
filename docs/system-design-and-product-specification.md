@@ -588,7 +588,27 @@ analysis failure.
   existed in days, so "last run that actually produced a non-empty
   `source_payload`" is tracked as its own, separate signal from "last
   run that didn't fail". `--fail-on-stale`/`--fail-on-failures` exit 2
-  for periodic unattended checks.
+  for periodic unattended checks;
+- automatic Meridianbet collector
+  (`src/anomaly_detection_engine/collectors/meridianbet_http_collector.py`,
+  `MERIDIANBET_MODE=http`): meridianbet.rs's frontend turned out to be
+  server-side-rendered, so a plain HTTP GET to its own listing page
+  already returns the full match/odds state embedded in the page,
+  including a short-lived *anonymous* session token the site hands to
+  any first-time visitor -- used as a Bearer token against its own
+  listing endpoint (`.../betshop/api/v1/offer/sport/{id}/leagues?
+  page=N&time=ALL`), reproducing exactly what the real frontend already
+  does (no login, no forged credential). Paginating with `time=ALL`
+  (not the frontend's own default "today" filter) returned the full
+  upcoming football schedule in one run -- confirmed live, 76 pages,
+  ~1900 events, wider coverage than any one manual HAR capture this
+  project had taken by hand. Rate-limited against real elapsed time
+  (`MERIDIANBET_HTTP_MIN_INTERVAL_HOURS`, default 1h), same shape as
+  the-odds-api's own supplemental gate, since every poll pages through
+  the entire schedule rather than one cheap request.
+  `MeridianbetFileCollector` (manual capture) stays available as a
+  fallback (`MERIDIANBET_MODE=manual`, still the default) -- the two
+  share one FixtureCatalog mapping cache via the same `provider_id`.
 
 ### Next priorities
 
