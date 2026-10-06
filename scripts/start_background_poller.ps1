@@ -19,18 +19,27 @@
     executable is used -- Python's sys.stdout/stderr are the same
     standard handles either way.
 
-    Same cadence math as run_soak_test.ps1 (see that script's own
-    .DESCRIPTION for the ~5-requests/cycle, 100/day budget reasoning) --
-    kept in sync manually since this script's whole reason to exist
-    (detached, no foreground console) is different from that one's
-    (interactive, Ctrl+C-able, console-visible) despite launching the
-    exact same poller.py.
-
     Does not survive a reboot on its own -- pair this with a Startup
     folder shortcut (see scripts/install_startup_shortcut.ps1) for
     every-login recovery, and scripts/poller_watchdog.ps1 run
     periodically (Task Scheduler, or a login-time loop) for the fix that
     also survives a mid-session hang/kill without needing a fresh login.
+
+    Sets no configuration env vars itself -- ODDS_SOURCE,
+    POLL_INTERVAL_SECONDS, and everything else AppConfig reads come
+    entirely from .env (config.load_dotenv(), loaded automatically by
+    poller.py) or a real environment variable already set in this
+    session, exactly like every other *_KEY/*_CAPTURE_DIR field. This
+    script previously hardcoded ODDS_SOURCE=api-football and
+    POLL_INTERVAL_SECONDS=5400 here, which silently overrode whatever
+    .env said on every single launch (a real env var always wins over
+    .env -- see load_dotenv()) -- found live, running with ODDS_SOURCE=
+    demo in .env while the actual poller kept using api-football
+    regardless. For the specific, deliberately-pinned api-football/90min
+    soak-test cadence, use run_soak_test.ps1 instead, which hardcodes
+    those on purpose (see that script's own .DESCRIPTION for the request
+    -budget math behind the exact numbers) -- this script is the general
+    launcher and must not have an opinion of its own.
 
 .PARAMETER SkipIfRunning
     Does nothing (exits 0) if poller.pid names a process that is both
@@ -91,9 +100,6 @@ if ($SkipIfRunning) {
         exit 0
     }
 }
-
-$env:ODDS_SOURCE = "api-football"
-$env:POLL_INTERVAL_SECONDS = "5400"
 
 $pythonwExe = Join-Path $repoRoot ".venv\Scripts\pythonw.exe"
 
