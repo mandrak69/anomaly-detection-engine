@@ -23,5 +23,8 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Type check (mypy)
+        run: mypy src/anomaly_detection_engine
+
       - name: Run tests
         run: pytest
