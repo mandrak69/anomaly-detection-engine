@@ -1029,6 +1029,23 @@ class FixtureCatalog:
         confidence: float,
         trust_state: str,
     ) -> None:
+        """Writes/updates one (source, sport, source_team_name,
+        competition_id) -> team_id mapping from automatic resolution.
+
+        A VERIFIED, SUSPECT, or REJECTED row is a closed decision this
+        write path must not silently relearn over: VERIFIED/REJECTED are
+        already human-settled, and SUSPECT means a human (or the
+        catastrophic-drift guard) flagged this exact mapping as needing
+        review -- the next ingestion cycle re-resolving the identical raw
+        name must not quietly clear that flag back to a fresh trust_state,
+        even via a strong path like event-context learning (see
+        _learn_identity_from_event_context). Only verify_team_mapping's
+        explicit, unconditional UPDATE (a human deliberately choosing the
+        canonical target) is allowed to clear SUSPECT/REJECTED here -- the
+        same split source_team_id_mappings already has between this
+        method's ID-mapping counterpart (_save_team_id_mapping) and its
+        own override escape hatch.
+        """
         self._connection.execute(
             """
             INSERT INTO source_team_mappings
@@ -1038,17 +1055,17 @@ class FixtureCatalog:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (source, sport, source_team_name, competition_id) DO UPDATE SET
                 team_id = CASE
-                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_team_mappings.team_id ELSE excluded.team_id END,
                 resolution_method = CASE
-                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_team_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 confidence = CASE
-                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_team_mappings.confidence ELSE excluded.confidence END,
                 trust_state = CASE
-                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_team_mappings.trust_state IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_team_mappings.trust_state ELSE excluded.trust_state END,
                 resolver_version = excluded.resolver_version
             """,
@@ -1622,6 +1639,14 @@ class FixtureCatalog:
         confidence: float,
         trust_state: str,
     ) -> None:
+        """Writes/updates one (source, sport, source_competition_name,
+        country_key) -> competition_id mapping from automatic resolution.
+
+        Same VERIFIED/SUSPECT/REJECTED quarantine reasoning as
+        _save_mapping (its team-mapping counterpart) -- see that
+        method's docstring. Only verify_competition_mapping's explicit,
+        unconditional UPDATE is allowed to clear SUSPECT/REJECTED here.
+        """
         self._connection.execute(
             """
             INSERT INTO source_competition_mappings
@@ -1632,18 +1657,22 @@ class FixtureCatalog:
             ON CONFLICT (source, sport, source_competition_name, country_key)
             DO UPDATE SET
                 competition_id = CASE
-                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_competition_mappings.trust_state
+                        IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_competition_mappings.competition_id
                     ELSE excluded.competition_id END,
                 resolution_method = CASE
-                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_competition_mappings.trust_state
+                        IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_competition_mappings.resolution_method
                     ELSE excluded.resolution_method END,
                 confidence = CASE
-                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_competition_mappings.trust_state
+                        IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_competition_mappings.confidence ELSE excluded.confidence END,
                 trust_state = CASE
-                    WHEN source_competition_mappings.trust_state IN ('VERIFIED', 'REJECTED')
+                    WHEN source_competition_mappings.trust_state
+                        IN ('VERIFIED', 'SUSPECT', 'REJECTED')
                     THEN source_competition_mappings.trust_state ELSE excluded.trust_state END,
                 resolver_version = excluded.resolver_version
             """,

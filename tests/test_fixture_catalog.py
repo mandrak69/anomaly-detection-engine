@@ -537,6 +537,158 @@ def test_manual_provider_mapping_overrides_a_suspect_id():
     assert row["resolution_method"] == "manual"
 
 
+def _team_mapping_trust_state(connection, *, source, raw_name, competition_id=None):
+    if competition_id is None:
+        row = connection.execute(
+            """
+            SELECT trust_state FROM source_team_mappings
+            WHERE source = ? AND sport = 'football' AND source_team_name = ?
+            """,
+            (source, raw_name),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            """
+            SELECT trust_state FROM source_team_mappings
+            WHERE source = ? AND sport = 'football' AND source_team_name = ?
+              AND competition_id = ?
+            """,
+            (source, raw_name, competition_id),
+        ).fetchone()
+    return row["trust_state"] if row else None
+
+
+def test_suspect_name_mapping_survives_reingestion_until_manually_verified():
+    # A SUSPECT quarantine on a *name*-based mapping must behave exactly
+    # like the already-tested ID-mapping case above: it is a closed
+    # question pending human review, and the automatic resolution path
+    # (_save_mapping) must not silently relearn over it on the very next
+    # sighting of the identical raw name, even though resolution itself
+    # still succeeds (the team row isn't gone, just this specific mapping
+    # is flagged).
+    connection = make_connection()
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+
+    first = mozzart.match(
+        sport="football",
+        league="Super liga Srbije",
+        home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda",
+        start_time=T0,
+    )
+    assert first.event is not None
+    competition_id = first.event.competition_id
+
+    connection.execute(
+        """
+        UPDATE source_team_mappings SET trust_state = 'SUSPECT'
+        WHERE source = 'mozzart' AND sport = 'football' AND source_team_name = 'Partizan'
+        """
+    )
+    connection.commit()
+    assert (
+        _team_mapping_trust_state(connection, source="mozzart", raw_name="Partizan")
+        == "SUSPECT"
+    )
+
+    mozzart.match(
+        sport="football",
+        league="Super liga Srbije",
+        home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda",
+        start_time=T0 + timedelta(days=1),
+    )
+
+    # Still SUSPECT -- a fresh ingestion resolving the identical raw name
+    # must not quietly clear the quarantine flag.
+    assert (
+        _team_mapping_trust_state(connection, source="mozzart", raw_name="Partizan")
+        == "SUSPECT"
+    )
+
+    mozzart.verify_team_mapping(
+        sport="football",
+        source_name="Partizan",
+        canonical_team_id=first.event.home_team.id,
+        competition_id=competition_id,
+    )
+
+    assert (
+        _team_mapping_trust_state(
+            connection, source="mozzart", raw_name="Partizan", competition_id=competition_id
+        )
+        == "VERIFIED"
+    )
+
+
+def _competition_mapping_trust_state(connection, *, source, raw_name):
+    row = connection.execute(
+        """
+        SELECT trust_state FROM source_competition_mappings
+        WHERE source = ? AND sport = 'football' AND source_competition_name = ?
+        """,
+        (source, raw_name),
+    ).fetchone()
+    return row["trust_state"] if row else None
+
+
+def test_suspect_competition_mapping_survives_reingestion_until_manually_verified():
+    connection = make_connection()
+    mozzart = FixtureCatalog(connection, provider_id="mozzart")
+
+    first = mozzart.match(
+        sport="football",
+        league="Super liga Srbije",
+        home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda",
+        start_time=T0,
+    )
+    assert first.event is not None
+
+    connection.execute(
+        """
+        UPDATE source_competition_mappings SET trust_state = 'SUSPECT'
+        WHERE source = 'mozzart' AND sport = 'football'
+          AND source_competition_name = 'Super liga Srbije'
+        """
+    )
+    connection.commit()
+    assert (
+        _competition_mapping_trust_state(
+            connection, source="mozzart", raw_name="Super liga Srbije"
+        )
+        == "SUSPECT"
+    )
+
+    mozzart.match(
+        sport="football",
+        league="Super liga Srbije",
+        home_team_raw="Partizan",
+        away_team_raw="Crvena Zvezda",
+        start_time=T0 + timedelta(days=1),
+    )
+
+    assert (
+        _competition_mapping_trust_state(
+            connection, source="mozzart", raw_name="Super liga Srbije"
+        )
+        == "SUSPECT"
+    )
+
+    mozzart.verify_competition_mapping(
+        sport="football",
+        source_name="Super liga Srbije",
+        canonical_competition_id=first.event.competition_id,
+    )
+
+    assert (
+        _competition_mapping_trust_state(
+            connection, source="mozzart", raw_name="Super liga Srbije"
+        )
+        == "VERIFIED"
+    )
+
+
 def test_reject_team_mapping_blocks_the_id_fast_path_from_relearning_it():
     connection = make_connection()
     reference = FixtureCatalog(connection, provider_id="api-football")

@@ -608,9 +608,21 @@ analysis failure.
   the entire schedule rather than one cheap request.
   `MeridianbetFileCollector` (manual capture) stays available as a
   fallback (`MERIDIANBET_MODE=manual`, still the default) -- the two
-  share one FixtureCatalog mapping cache via the same `provider_id`.
-
-### Next priorities
+  share one FixtureCatalog mapping cache via the same `provider_id`;
+- closed a gap in §11's "`SUSPECT`/`REJECTED` never silently return to
+  the fast path" guarantee: it held for the ID-keyed mapping tables
+  (`source_team_id_mappings`/`source_competition_id_mappings`) but not
+  the name-keyed ones (`source_team_mappings`/`source_competition_
+  mappings`) -- `_save_mapping`/`_save_competition_mapping`'s own
+  `ON CONFLICT` only protected `VERIFIED`/`REJECTED`, so a `SUSPECT`
+  name mapping (reachable today via a `SUSPECT` source id cascading
+  into the name mapping on the next sighting under that id) would have
+  its trust_state quietly overwritten by the very next ingestion cycle
+  resolving the identical raw name, including by the strong `provider_
+  event_context` path. Now protects `SUSPECT` the same way the ID
+  tables already did; only `verify_team_mapping`/`verify_competition_
+  mapping`'s explicit, unconditional write (a human choosing the
+  target) can still clear it.
 
 1. bare generic competition names already collapsing multiple
    countries' competitions together — found live while fixing the
