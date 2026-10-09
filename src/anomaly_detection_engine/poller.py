@@ -11,7 +11,21 @@ from anomaly_detection_engine.observability.logging_config import configure_logg
 from anomaly_detection_engine.pipeline import run_detection, run_ingestion
 from anomaly_detection_engine.runtime import Runtime, build_runtime
 
-logger = logging.getLogger(__name__)
+# Not getLogger(__name__): this module is routinely executed as the
+# entry point itself (`python -m anomaly_detection_engine.poller`,
+# used by both start_background_poller.ps1 and run_soak_test.ps1), and
+# Python sets __name__ to "__main__" for the module run that way -- a
+# logger named "__main__" shares no ancestor with configure_logging()'s
+# "anomaly_detection_engine" logger, so it never gets that handler and
+# every message here (poller.started, poller.cycle_completed,
+# poller.cycle_failed -- including the exc_info traceback on a crashed
+# cycle, poller.burst_window_enabled, poller.stopped, poller.signal_
+# received) was silently dropped with no error of its own, every real
+# run, this project's entire history (confirmed: zero occurrences of
+# any of them in any retained poller.log/poller.err.log). A hardcoded
+# dotted path makes the logger's identity independent of how the
+# module happens to be invoked.
+logger = logging.getLogger("anomaly_detection_engine.poller")
 
 DEFAULT_POLL_INTERVAL_SECONDS = 300.0
 DEFAULT_BURST_INTERVAL_SECONDS = 1800.0

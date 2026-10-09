@@ -1,6 +1,46 @@
+import logging
 from datetime import datetime
 
 import anomaly_detection_engine.poller as poller
+from anomaly_detection_engine.observability.logging_config import configure_logging
+
+
+def test_logger_name_is_a_fixed_dotted_path_not___name__():
+    # poller.py is routinely executed as the entry point itself
+    # (`python -m anomaly_detection_engine.poller`), under which Python
+    # sets the module's own __name__ to "__main__" -- a
+    # logging.getLogger(__name__) there would silently create a logger
+    # with no relation to configure_logging()'s "anomaly_detection_
+    # engine" hierarchy, dropping every poller.* log message (including
+    # a crashed cycle's traceback) with no error of its own. Confirmed
+    # live: zero occurrences of poller.started/poller.cycle_completed/
+    # poller.cycle_failed/poller.burst_window_enabled/poller.stopped in
+    # any retained log from an actual `-m`-launched run.
+    assert poller.logger.name == "anomaly_detection_engine.poller"
+
+
+def test_logger_propagates_to_the_configured_handler():
+    # The real-world consequence of the above: a record logged here
+    # must actually reach the handler configure_logging() attaches
+    # ("anomaly_detection_engine", which this module's logger must be a
+    # descendant of), not just have the right name in isolation. Not
+    # pytest's caplog fixture: configure_logging() sets propagate=False
+    # on "anomaly_detection_engine" (so this project's own JSON
+    # formatting is the only output, not also duplicated by a root
+    # handler), which is exactly what stops a record from ever reaching
+    # caplog's own default root-logger capture too -- a plain temporary
+    # handler on the real logger is what actually proves propagation,
+    # the same thing production relies on.
+    root = configure_logging()
+    records: list[logging.LogRecord] = []
+    capture_handler = logging.Handler()
+    capture_handler.emit = records.append  # type: ignore[method-assign]
+    root.addHandler(capture_handler)
+    try:
+        poller.logger.info("test.marker")
+    finally:
+        root.removeHandler(capture_handler)
+    assert any(r.getMessage() == "test.marker" for r in records)
 
 
 def test_run_cycle_ingests_then_detects_in_order(monkeypatch):
