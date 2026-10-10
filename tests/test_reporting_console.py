@@ -45,6 +45,7 @@ def build_config() -> AppConfig:
         odds_api_capture_dir=None,
         mozzart_capture_dir=None,
         mozzart_mode="manual",
+        mozzart_http_min_interval=timedelta(hours=0.5),
         mozzart_prematch_capture_dir=None,
         meridianbet_capture_dir=None,
         meridianbet_mode="manual",

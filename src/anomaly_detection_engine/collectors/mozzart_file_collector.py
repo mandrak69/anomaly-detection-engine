@@ -176,10 +176,13 @@ class MozzartFileCollector(ManualCaptureCollector):
     decides its phase; the two endpoints share this exact response
     shape).
 
-    mozzartbet.com sits behind Cloudflare bot-management (cf_clearance /
-    __cf_bm cookies observed on the captured request) -- an automated
-    fetch here would mean scripting around that protection, which this
-    project won't do. The capture step stays manual: in your own browser,
+    mozzartbet.com's page itself sits behind Cloudflare bot-management
+    (cf_clearance / __cf_bm cookies observed on the captured request),
+    but that turned out not to gate the actual listing endpoint at all
+    -- see MozzartHttpCollector, the automatic alternative
+    (MOZZART_MODE=http), which reaches it with a plain request plus one
+    extra header, no browser or session involved. This manual-capture
+    collector stays available as a fallback: in your own browser,
     open DevTools -> Network, find the matches request (e.g.
     /live/matches for live, or the equivalent pre-match listing), and
     save its response body to `capture_dir / filename` (default

@@ -74,12 +74,20 @@ def http_get_with_retry(
     timeout: float,
     error_cls: type[Exception],
     provider_label: str,
+    data: bytes | None = None,
     max_attempts: int = 3,
     backoff_base_seconds: float = 1.0,
     max_delay_seconds: float = 60.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bytes:
     """Fetches `url`, retrying up to `max_attempts` total attempts (so
+
+    data, when given, is sent as the request body and makes this a POST
+    instead of a GET -- the same behavior urllib.request.Request itself
+    already has (its `data` parameter is what distinguishes the two),
+    not a separate code path here. Added for MozzartHttpCollector, whose
+    one real endpoint is POST-only; every GET-only caller (api-football,
+    the-odds-api, meridianbet-http) simply never passes it.
     at most max_attempts - 1 retries) for transient failures only:
     a network-level error (urllib.error.URLError -- covers DNS failure,
     connection refused, timeout, ...) or an HTTP response whose status
@@ -116,11 +124,11 @@ def http_get_with_retry(
     last_exception: Exception | None = None
 
     for attempt in range(max_attempts):
-        request = urllib.request.Request(url, headers=headers)
+        request = urllib.request.Request(url, data=data, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                data: bytes = response.read()
-                return data
+                response_body: bytes = response.read()
+                return response_body
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             wrapped = error_cls(

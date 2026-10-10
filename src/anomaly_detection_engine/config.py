@@ -25,6 +25,7 @@ DEFAULT_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 _VALID_ODDS_SOURCES = ("demo", "the-odds-api", "api-football")
 _VALID_MERIDIANBET_MODES = ("manual", "http")
+_VALID_MOZZART_MODES = ("manual", "http")
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,16 @@ class AppConfig:
     odds_api_mode: str
     odds_api_capture_dir: str | None
     mozzart_capture_dir: str | None
+    # manual (default, needs mozzart_capture_dir) | http (automatic, no
+    # capture dir needed -- see pipeline._mozzart_http_collector and
+    # collectors.mozzart_http_collector).
     mozzart_mode: str
+    # Same rate-limiting shape/reasoning as meridianbet_http_min_interval
+    # below -- no quota to protect, but each poll pages through mozzart
+    # bet.com's entire date=all_days schedule (confirmed live: 83
+    # sequential requests, ~1200 matches). Only consulted when
+    # mozzart_mode == "http".
+    mozzart_http_min_interval: timedelta
     # None means "not configured" -- a second, optional drop directory
     # for pre-match Mozzart captures, kept separate from
     # mozzart_capture_dir precisely because the capture tooling saves
@@ -261,6 +271,12 @@ def load_config() -> AppConfig:
             f"{_VALID_MERIDIANBET_MODES}."
         )
 
+    mozzart_mode = os.environ.get("MOZZART_MODE", "manual")
+    if mozzart_mode not in _VALID_MOZZART_MODES:
+        raise ValueError(
+            f"MOZZART_MODE={mozzart_mode!r} must be one of {_VALID_MOZZART_MODES}."
+        )
+
     return AppConfig(
         db_path=os.environ.get("DB_PATH", str(DEFAULT_DB_PATH)),
         odds_source=odds_source,
@@ -268,7 +284,10 @@ def load_config() -> AppConfig:
         odds_api_mode=os.environ.get("ODDS_API_MODE", "auto"),
         odds_api_capture_dir=os.environ.get("ODDS_API_CAPTURE_DIR"),
         mozzart_capture_dir=os.environ.get("MOZZART_CAPTURE_DIR"),
-        mozzart_mode=os.environ.get("MOZZART_MODE", "manual"),
+        mozzart_mode=mozzart_mode,
+        mozzart_http_min_interval=timedelta(
+            hours=float(os.environ.get("MOZZART_HTTP_MIN_INTERVAL_HOURS", "0.5"))
+        ),
         mozzart_prematch_capture_dir=os.environ.get("MOZZART_PREMATCH_CAPTURE_DIR"),
         meridianbet_capture_dir=os.environ.get("MERIDIANBET_CAPTURE_DIR"),
         meridianbet_mode=meridianbet_mode,

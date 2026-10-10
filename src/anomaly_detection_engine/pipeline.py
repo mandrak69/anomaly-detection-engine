@@ -21,6 +21,7 @@ from anomaly_detection_engine.collectors.meridianbet_http_collector import (
     MeridianbetHttpCollector,
 )
 from anomaly_detection_engine.collectors.mozzart_file_collector import MozzartFileCollector
+from anomaly_detection_engine.collectors.mozzart_http_collector import MozzartHttpCollector
 from anomaly_detection_engine.collectors.the_odds_api_collector import (
     TheOddsApiCollector,
     TheOddsApiManualCollector,
@@ -360,23 +361,21 @@ def _mozzart_collectors(config: AppConfig) -> list[OddsCollector]:
     landing in the "wrong" directory is still tagged correctly rather
     than mislabeled.
 
-    MOZZART_MODE exists (default and currently only valid value:
-    "manual") so the mode is an explicit, visible flag rather than
-    something inferred from which env vars happen to be set -- the same
-    reasoning as _the_odds_api_collector's ODDS_API_MODE, even though
-    Mozzart has no working automatic mode yet (mozzartbet.com's
-    Cloudflare bot-management, see MozzartFileCollector). It governs
-    both directories: there's no meaningful case for one being manual
-    and the other automatic.
+    MOZZART_MODE exists (default: "manual") so the mode is an explicit,
+    visible flag rather than something inferred from which env vars
+    happen to be set -- the same reasoning as _the_odds_api_collector's
+    ODDS_API_MODE. MOZZART_MODE="http" instead routes through
+    _mozzart_http_collector below (automatic, no capture dir needed);
+    this function simply isn't active for that mode, same as it already
+    wasn't active with no capture dir set. It governs both directories:
+    there's no meaningful case for one being manual and the other
+    automatic.
     """
     if not config.mozzart_capture_dir and not config.mozzart_prematch_capture_dir:
         return []
 
     if config.mozzart_mode != "manual":
-        raise ValueError(
-            f"MOZZART_MODE={config.mozzart_mode!r} is not supported -- Mozzart has "
-            "no automatic mode yet (see README.md's Data Collection section)."
-        )
+        return []
 
     collectors: list[OddsCollector] = []
     if config.mozzart_capture_dir:
@@ -384,6 +383,33 @@ def _mozzart_collectors(config: AppConfig) -> list[OddsCollector]:
     if config.mozzart_prematch_capture_dir:
         collectors.append(MozzartFileCollector(Path(config.mozzart_prematch_capture_dir)))
     return collectors
+
+
+def _mozzart_http_collector(
+    config: AppConfig,
+    collector_run_repository: CollectorRunRepository,
+    *,
+    now: datetime,
+) -> OddsCollector | None:
+    """Builds the automatic Mozzart HTTP collector, if MOZZART_MODE=http
+    -- no capture dir, no browser; see MozzartHttpCollector.
+
+    Rate-limited against real elapsed time (config.mozzart_http_min_
+    interval), the same shape _meridianbet_http_collector already uses
+    and for the same reason: no request quota here, but each poll pages
+    through mozzartbet.com's entire date=all_days schedule (~83 requests
+    observed live), which must not ride the same tight per-cycle cadence
+    a cheap single-request collector can.
+    """
+    if config.mozzart_mode != "http":
+        return None
+
+    collector = MozzartHttpCollector()
+    latest = collector_run_repository.find_latest_by_source(collector.source)
+    if latest is not None and now - latest.started_at < config.mozzart_http_min_interval:
+        return None
+
+    return collector
 
 
 def _meridianbet_collector(config: AppConfig) -> OddsCollector | None:
@@ -539,6 +565,10 @@ def _supplemental_collectors(
         )
         if meridianbet_http is not None:
             collectors.append(meridianbet_http)
+
+        mozzart_http = _mozzart_http_collector(config, collector_run_repository, now=resolved_now)
+        if mozzart_http is not None:
+            collectors.append(mozzart_http)
 
     return collectors
 
